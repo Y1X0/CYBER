@@ -7,7 +7,12 @@ safe no-op default; **no real behavior is implemented in Phase 5.**
 
 from __future__ import annotations
 
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:  # avoid a runtime guardian_common -> guardian_core coupling; annotations only
+    from collections.abc import Iterable
+
+    from guardian_core.discovery import DiscoveredAsset, DiscoveryContext
 
 
 # ── SOAR: outbound notifications (Slack/PagerDuty/email...) — Phase 7 ──
@@ -40,15 +45,45 @@ class NullConnector:
         return None
 
 
-# ── Attack-path graph projection from graph_edges — Phase 6 ──
+# ── Attack-graph read side — path projection over graph_nodes/graph_edges (Phase 6D) ──
 @runtime_checkable
 class GraphProjector(Protocol):
-    def paths_to(self, *, tenant_id: str, target_type: str, target_id: str) -> list[list[dict]]: ...
+    # Depth-bounded; ordered node paths. Ranking is deterministic (finding risk along the path).
+    def paths_to(
+        self, *, tenant_id: str, target_type: str, target_id: str, max_depth: int = 6
+    ) -> list[list[dict]]: ...
+
+    def reachable_from(
+        self, *, tenant_id: str, src_type: str, src_id: str, max_depth: int = 6
+    ) -> list[dict]: ...
 
 
 class NullGraphProjector:
-    def paths_to(self, *, tenant_id: str, target_type: str, target_id: str) -> list[list[dict]]:
+    def paths_to(self, *, tenant_id, target_type, target_id, max_depth=6):  # noqa: ANN001, ANN201
         return []
+
+    def reachable_from(self, *, tenant_id, src_type, src_id, max_depth=6):  # noqa: ANN001, ANN201
+        return []
+
+
+# ── Attack-graph write side — edge/node ingestion from collectors (Phase 6B/6C) ──
+@runtime_checkable
+class GraphIngestor(Protocol):
+    """Upserts nodes and edges from a discovery run. Split from the projector so collectors write
+    without depending on query logic (closes the review's 'no graph-write seam' gap)."""
+
+    def upsert_node(self, *, tenant_id: str, node: DiscoveredAsset, run_id: str) -> str: ...
+    def link(
+        self, *, tenant_id: str, src_id: str, relation: str, dst_id: str, run_id: str
+    ) -> None: ...
+
+
+class NullGraphIngestor:
+    def upsert_node(self, *, tenant_id, node, run_id):  # noqa: ANN001, ANN201
+        return ""
+
+    def link(self, *, tenant_id, src_id, relation, dst_id, run_id):  # noqa: ANN001, ANN201
+        return None
 
 
 # ── KMS / secrets provider for envelope encryption + BYOK — Phase 9 (local default now) ──
@@ -61,11 +96,21 @@ class KMSProvider(Protocol):
 # ── EASM discovery collectors (domains/subdomains/IPs/cloud) — Phase 6 ──
 @runtime_checkable
 class DiscoveryProvider(Protocol):
-    def discover(self, *, seed: str, scope: dict) -> list[dict[str, Any]]: ...
+    """A pluggable EASM collector. Emits typed `DiscoveredAsset`s (with per-result confidence), so
+    upsert/dedup/provenance is uniform across sources. `requires_authorization` marks active methods
+    (port/service scan) that must be gated; passive collectors leave it False."""
+
+    key: str
+    requires_authorization: bool
+
+    def collect(self, ctx: DiscoveryContext) -> Iterable[DiscoveredAsset]: ...
 
 
 class NullDiscoveryProvider:
-    def discover(self, *, seed: str, scope: dict) -> list[dict[str, Any]]:
+    key = "null"
+    requires_authorization = False
+
+    def collect(self, ctx: DiscoveryContext) -> Iterable[DiscoveredAsset]:  # noqa: ARG002
         return []
 
 

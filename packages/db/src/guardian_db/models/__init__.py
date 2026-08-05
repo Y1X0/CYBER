@@ -3,9 +3,11 @@
 from guardian_db.models.assets import Asset, Authorization, Engagement
 from guardian_db.models.audit import ApiKey, AuditLog
 from guardian_db.models.billing import Plan, PlanEntitlement, Subscription, UsageRecord
+from guardian_db.models.discovery import DiscoveryRun, DiscoveryScope
 from guardian_db.models.events import DomainEvent
 from guardian_db.models.evidence import EvidenceItem
 from guardian_db.models.graph import GraphEdge
+from guardian_db.models.graph_nodes import GraphNode
 from guardian_db.models.knowledge import (
     Advisory,
     FeedSync,
@@ -13,6 +15,7 @@ from guardian_db.models.knowledge import (
     Vulnerability,
     Weakness,
 )
+from guardian_db.models.node_events import NodeEvent
 from guardian_db.models.plugins import ScannerPlugin, TenantScannerConfig
 from guardian_db.models.policy import Policy
 from guardian_db.models.reporting import Report, ReportApproval, ReportSection
@@ -39,6 +42,8 @@ __all__ = [
     "Authorization",
     "Customer",
     "CustomerContact",
+    "DiscoveryRun",
+    "DiscoveryScope",
     "DomainEvent",
     "Engagement",
     "EvidenceItem",
@@ -46,7 +51,9 @@ __all__ = [
     "Finding",
     "FindingEvent",
     "GraphEdge",
+    "GraphNode",
     "KbEntry",
+    "NodeEvent",
     "Plan",
     "PlanEntitlement",
     "Policy",

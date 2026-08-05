@@ -48,6 +48,63 @@ class AssetKind(str, Enum):
     CLOUD_ACCOUNT = "cloud_account"
     CONTAINER_IMAGE = "container_image"
     K8S_MANIFEST = "k8s_manifest"
+    # Phase 6 EASM discovery kinds.
+    DOMAIN = "domain"
+    SUBDOMAIN = "subdomain"
+    IP_ADDRESS = "ip_address"
+    NETBLOCK = "netblock"
+    SERVICE = "service"
+    CLOUD_RESOURCE = "cloud_resource"
+
+
+class NodeType(str, Enum):
+    """Attack-graph node kinds. A node is identified by an internal UUID; its `canonical_key`
+    (FQDN / ARN / referenced-row id) is a searchable, *mutable* natural key — so relations point at
+    stable ids and survive a rename (Phase 6 design decision)."""
+
+    DOMAIN = "domain"
+    SUBDOMAIN = "subdomain"
+    IP_ADDRESS = "ip_address"
+    NETBLOCK = "netblock"
+    SERVICE = "service"
+    CLOUD_RESOURCE = "cloud_resource"
+    ASSET = "asset"        # references a managed asset row
+    FINDING = "finding"    # references a finding row (for exposure/path analysis)
+
+
+class EdgeRelation(str, Enum):
+    """Directed relations between attack-graph nodes."""
+
+    SUBDOMAIN_OF = "subdomain_of"
+    RESOLVES_TO = "resolves_to"
+    HOSTS = "hosts"
+    ROUTES_TO = "routes_to"
+    EXPOSES = "exposes"        # service -> finding
+    ENABLES = "enables"        # finding -> exposure/blast-radius
+    CONTAINS = "contains"      # netblock -> ip_address
+    TRUSTS = "trusts"
+
+
+class AssetState(str, Enum):
+    """Discovery lifecycle for an asset/graph node (driven by last_seen_at)."""
+
+    CANDIDATE = "candidate"
+    ACTIVE = "active"
+    SHADOW = "shadow"      # live but never declared by the customer — the high-value EASM signal
+    INACTIVE = "inactive"
+
+
+class DiscoverySource(str, Enum):
+    """Where a discovered node/edge came from — carried as provenance on every observation."""
+
+    CT_LOG = "ct_log"
+    PASSIVE_DNS = "passive_dns"
+    DNS_RESOLVER = "dns_resolver"
+    ASN_RIR = "asn_rir"
+    CLOUD_ENUM = "cloud_enum"
+    PORT_SCAN = "port_scan"       # authorization-gated
+    MANUAL = "manual"
+    INFERRED = "inferred"
 
 
 class ScanStatus(str, Enum):
