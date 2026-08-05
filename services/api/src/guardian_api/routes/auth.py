@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from guardian_common.config import get_settings
-from guardian_common.security import create_access_token, verify_password
+from guardian_common.security import create_access_token, verify_dummy, verify_password
 from guardian_db.audit import record_audit
 from guardian_db.models import User
 from sqlalchemy.orm import Session
@@ -24,11 +24,12 @@ def login(
 ) -> TokenResponse:
     user = db.query(User).filter(User.email == body.email.lower()).first()
     # Constant-ish response regardless of which factor failed (avoid user enumeration).
-    if (
-        user is None
-        or not user.password_hash
-        or not verify_password(body.password, user.password_hash)
-    ):
+    # When the user is unknown, still run one Argon2 verification so the response time does
+    # not reveal whether the email exists (timing oracle).
+    if user is None or not user.password_hash:
+        verify_dummy(body.password)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
+    if not verify_password(body.password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
     if user.status != "active":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "account disabled")

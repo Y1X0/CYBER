@@ -30,7 +30,9 @@ class Asset(Base, TimestampMixin):
     identifier: Mapped[str] = mapped_column(Text, default="", nullable=False)
     # "public" | "internal" | "unknown" — feeds the scorer.
     exposure: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False)
-    # Scoped, ENCRYPTED credential *references* only — never raw secrets (doc 06 §6).
+    # Non-sensitive scan config + credential *references* (e.g. secrets-manager keys / role ARNs).
+    # PLAINTEXT JSONB in Phase 1 — raw secrets MUST NOT be stored here. Envelope encryption (KMS)
+    # for credential references lands in Phase 4 before any real cloud credentials are handled.
     config: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
 
 

@@ -5,6 +5,7 @@ Centralized so auth logic is implemented once and reviewed once (doc 06 §5).
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import hashlib
 import secrets
@@ -28,6 +29,17 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
     except Exception:  # malformed hash → treat as non-match, never raise to caller
         return False
+
+
+# Precomputed at import so a login for a NON-existent user still performs one Argon2
+# verification — equalizing response time and closing the user-enumeration timing oracle.
+_DUMMY_HASH = _ph.hash("timing-equalizer-not-a-real-secret")
+
+
+def verify_dummy(password: str) -> None:
+    """Run a throwaway verification to equalize auth timing when the user is unknown."""
+    with contextlib.suppress(Exception):
+        _ph.verify(_DUMMY_HASH, password)
 
 
 def needs_rehash(password_hash: str) -> bool:
@@ -54,8 +66,18 @@ def create_access_token(
 
 
 def decode_access_token(token: str, *, secret: str, algorithms: list[str]) -> dict[str, Any]:
-    """Decode & verify a token. Raises jwt.PyJWTError on any problem."""
-    return jwt.decode(token, secret, algorithms=algorithms)
+    """Decode & verify a token. Raises jwt.PyJWTError on any problem.
+
+    `algorithms` is an explicit allowlist (never trusts the token header) — this blocks the
+    `alg: none` and RS/HS confusion attacks. `exp` and `sub` are required, so a token missing
+    an expiry is rejected rather than treated as non-expiring.
+    """
+    return jwt.decode(
+        token,
+        secret,
+        algorithms=algorithms,
+        options={"require": ["exp", "sub"], "verify_exp": True},
+    )
 
 
 # ── API keys (CI/CD) — store only a hash, never the token (doc 06 §5) ──

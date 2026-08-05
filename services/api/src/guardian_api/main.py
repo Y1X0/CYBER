@@ -22,10 +22,14 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json",
     )
 
+    # Never combine a wildcard origin with credentials — that would let any site make
+    # credentialed cross-origin requests. If "*" is configured, credentials are disabled.
+    origins = settings.cors_origin_list
+    allow_credentials = "*" not in origins
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origin_list,
-        allow_credentials=True,
+        allow_origins=origins,
+        allow_credentials=allow_credentials,
         allow_methods=["*"],
         allow_headers=["*"],
     )

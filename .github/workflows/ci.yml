@@ -5,6 +5,10 @@ on:
     branches: ["**"]
   pull_request:
 
+# Least privilege: CI only needs to read the repo. No write scopes are granted to the token.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest

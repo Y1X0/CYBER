@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
 # ── Auth ──
@@ -53,9 +53,19 @@ class AssetCreate(BaseModel):
     customer_id: uuid.UUID
     name: str = Field(min_length=1, max_length=200)
     kind: str = Field(pattern="^(repo|web|api|cloud_account|container_image|k8s_manifest)$")
-    identifier: str = ""
+    identifier: str = Field(default="", max_length=2048)
     exposure: str = Field(default="unknown", pattern="^(public|internal|unknown)$")
     config: dict = Field(default_factory=dict)
+
+    @field_validator("config")
+    @classmethod
+    def _bound_config_size(cls, v: dict) -> dict:
+        # Cap serialized config to prevent oversized-payload DoS (also bounds inline_content).
+        import json
+
+        if len(json.dumps(v)) > 262_144:  # 256 KiB
+            raise ValueError("config exceeds maximum size (256 KiB)")
+        return v
 
 
 class AssetOut(BaseModel):
