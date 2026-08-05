@@ -198,7 +198,8 @@ All engines implement one interface and emit the **canonical finding schema** (s
 ```python
 # Conceptual adapter contract (illustrative, not final code)
 class ScanEngine(Protocol):
-    key: str                         # "sast", "sca", "dast", "api", "cspm", "container"
+    key: str  # "sast", "sca", "dast", "api", "cspm", "container"
+
     def supports(self, target: Target) -> bool: ...
     def run(self, ctx: ScanContext) -> Iterable[RawFinding]: ...
     def health(self) -> EngineHealth: ...

@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "security-guardian"
+version = "0.1.0"
+description = "AI Security Operations Platform — defensive security auditing (Phase 1 Foundation)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+dependencies = [
+    # API / control plane
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic[email]>=2.6",
+    "pydantic-settings>=2.2",
+    "python-multipart>=0.0.9",
+    # Auth / security
+    "argon2-cffi>=23.1",
+    "pyjwt>=2.8",
+    # Data
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    # Async / queue
+    "celery>=5.3",
+    "redis>=5.0",
+    # Observability / utils
+    "structlog>=24.1",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.9",
+]
+
+# First-party scanner plugins are discovered via entry points (plugin architecture, doc 07 §4).
+[project.entry-points."guardian.scanner_plugins"]
+secrets = "guardian_scanner.engines.secrets_engine:SecretsEngine"
+
+[tool.setuptools.packages.find]
+# Monorepo: one installable distribution discovering packages from every src root.
+where = [
+    "packages/core/src",
+    "packages/common/src",
+    "packages/db/src",
+    "services/api/src",
+    "workers/scanner/src",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = [
+    "S101",   # asserts (used in tests)
+    "B008",   # function call in default arg — FastAPI's Depends() idiom
+    "UP042",  # keep explicit `str, Enum` (portable, predictable .value semantics)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B", "E501"]
+"**/migrations/**" = ["E501", "F401", "I001"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

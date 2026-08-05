@@ -28,6 +28,11 @@ It exists to be reviewed and approved *before* implementation begins.
    How the platform secures *itself*: threat model, trust boundaries, tenant isolation, secrets
    handling, authorization enforcement, and safe-scanning guarantees.
 
+7. **[07 — Commercial Platform Design](07-commercial-platform.md)**
+   The AI Security Operations Platform layer: hybrid tenancy, customer portal domain, plugin
+   architecture, billing/subscription schema (no payments), human-pentester approval workflow, and
+   platform-wide audit & scope control. **Approved strategic scope — reflected in the Phase 1 build.**
+
 Architecture Decision Records live in [`../adr/`](../adr/).
 
 ## Design principles

@@ -1,12 +1,19 @@
 # Security Guardian Platform
 
-> An open-source, defensive **Security Intelligence System** that connects to your own
+> An open-source, defensive **AI Security Operations Platform** that connects to your own
 > software projects — websites, mobile apps, APIs, backends, and cloud deployments — to
-> automatically analyze security weaknesses and generate professional security reports.
+> manage assets, run automated + AI-assisted security assessments, produce expert-reviewed
+> pentest reports, track remediation, and monitor posture continuously.
 
-**Status:** 🏗️ Architecture & Design phase — *no application code yet.*
-This repository currently contains the **approved-pending architecture package**. Implementation
-begins only after the design is reviewed and signed off.
+**Status:** 🚧 **Phase 1 — Foundation (in progress).** The architecture package is approved; the
+commercial platform layer (hybrid tenancy, customer portal, plugin engines, billing-ready schema,
+human-pentester approval workflow) is designed and being implemented.
+
+**Not just a scanner — an operations loop:**
+
+```
+Asset Management → Security Assessment → AI + Human Pentest → Remediation Tracking → Compliance → Continuous Monitoring → ↺
+```
 
 ---
 
