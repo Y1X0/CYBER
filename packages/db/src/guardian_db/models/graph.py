@@ -15,7 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,6 +25,11 @@ from guardian_db.base import Base, TimestampMixin, uuid_pk
 class GraphEdge(Base, TimestampMixin):
     __tablename__ = "graph_edges"
     __table_args__ = (
+        # Identity of a relation → dedup/upsert target; a re-observed edge updates, not dupes.
+        UniqueConstraint(
+            "tenant_id", "src_type", "src_id", "relation", "dst_type", "dst_id",
+            name="uq_graph_edge_identity",
+        ),
         Index("idx_graph_src", "tenant_id", "src_type", "src_id"),
         Index("idx_graph_dst", "tenant_id", "dst_type", "dst_id"),
         Index("idx_graph_edges_run", "tenant_id", "discovery_run_id"),
@@ -40,6 +45,9 @@ class GraphEdge(Base, TimestampMixin):
     # relation kind: resolves_to | hosts | subdomain_of | routes_to | exposes | enables | ...
     relation: Mapped[str] = mapped_column(String(40), nullable=False)
     weight: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
+    # Lifecycle: a relation can disappear (a subdomain re-points) without erasing its history.
+    # active (seen in the latest run) | stale (not re-observed) | removed (confirmed gone).
+    state: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
 
     # ── mandatory provenance (Phase 6) ──
     source: Mapped[str | None] = mapped_column(String(40), nullable=True)  # DiscoverySource value

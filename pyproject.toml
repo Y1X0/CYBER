@@ -62,8 +62,10 @@ k8s = "guardian_scanner.engines.k8s_engine:K8sEngine"
 dast = "guardian_scanner.engines.dast_engine:DastEngine"
 api = "guardian_scanner.engines.api_engine:ApiEngine"
 
-# EASM discovery collectors (Phase 6) — same plugin pattern; providers register here in 6B.
+# EASM discovery collectors (Phase 6) — same plugin pattern as scanners. Passive providers first.
 [project.entry-points."guardian.discovery_providers"]
+dns = "guardian_scanner.discovery.providers.dns_provider:DnsProvider"
+ct = "guardian_scanner.discovery.providers.ct_provider:CtLogProvider"
 
 [tool.setuptools.packages.find]
 # Monorepo: one installable distribution discovering packages from every src root.

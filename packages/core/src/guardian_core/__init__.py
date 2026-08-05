@@ -4,6 +4,7 @@ This package is the single source of truth imported by the API, workers, and AI 
 engines and services can never drift on the finding shape or severity semantics.
 """
 
+from guardian_core.canonicalize import canonical_key
 from guardian_core.discovery import (
     DiscoveredAsset,
     DiscoveredEdge,
@@ -56,6 +57,7 @@ __all__ = [
     "StaffRole",
     "assess",
     "assess_exposure",
+    "canonical_key",
     "code_evidence",
     "dependency_evidence",
     "evaluate_gate",
