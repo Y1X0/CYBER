@@ -11,6 +11,7 @@ from guardian_db.models.knowledge import (
     Weakness,
 )
 from guardian_db.models.plugins import ScannerPlugin, TenantScannerConfig
+from guardian_db.models.policy import Policy
 from guardian_db.models.reporting import Report, ReportApproval, ReportSection
 from guardian_db.models.scanning import (
     Finding,
@@ -42,6 +43,7 @@ __all__ = [
     "KbEntry",
     "Plan",
     "PlanEntitlement",
+    "Policy",
     "RemediationItem",
     "Report",
     "ReportApproval",

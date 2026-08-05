@@ -97,9 +97,19 @@ scan/findings views, chat). Verified end-to-end against PostgreSQL offline via t
 
 ---
 
-## Phase 4 — Cloud Security & CI/CD Integration
+## Phase 4 — Cloud Security & CI/CD Integration  🚧 *in progress*
 
 **Goal:** extend coverage to cloud + containers and embed the platform in the developer workflow.
+
+**Delivered so far:** five new plugin engines (zero core changes) — **CSPM** (AWS/Azure/GCP config
+audit, CIS-mapped: public storage, IAM over-permission, open networking, encryption, audit logging),
+**container** (Dockerfile CIS rules), **Kubernetes** (manifest CIS rules), **DAST-lite**
+(headers/TLS/cookies) and **API** (OpenAPI review) — the last three authorization-gated. Plus a
+deterministic **deployment-gate policy engine** + `GET /scans/{id}/gate`, a **`guardian` CLI** and
+reusable **GitHub Action** for CI blocking, and an HMAC-verified **GitHub webhook** that auto-triggers
+scans. All offline-testable via config snapshots; the safe-scanning authorization gate is verified
+end-to-end. *Remaining:* live cloud collectors (boto3/az/gcloud), Trivy image-CVE wrap, GitHub App
+PR annotations.
 
 **Scope**
 - **CSPM engine**: AWS/Azure/GCP read-only, least-privilege config audits (IAM risk, public storage,

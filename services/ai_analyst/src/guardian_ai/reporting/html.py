@@ -32,9 +32,7 @@ def render_html(report, findings: list) -> str:  # noqa: ANN001
             remediation = _esc(
                 f.remediation.get("remediation") or f.remediation.get("summary") or ""
             )
-        sev_cell = (
-            f"<span style='color:{color};font-weight:600'>{_esc(f.severity.upper())}</span>"
-        )
+        sev_cell = f"<span style='color:{color};font-weight:600'>{_esc(f.severity.upper())}</span>"
         rows.append(
             f"<tr>"
             f"<td>{sev_cell}</td>"

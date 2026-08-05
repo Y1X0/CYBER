@@ -1,0 +1,43 @@
+name: "Security Guardian Scan"
+description: "Run a Security Guardian scan and fail the build if the deployment gate is not passed."
+author: "Security Guardian Platform"
+branding:
+  icon: "shield"
+  color: "blue"
+
+inputs:
+  asset-id:
+    description: "The Security Guardian asset id to scan"
+    required: true
+  engines:
+    description: "Comma-separated engine keys"
+    required: false
+    default: "secrets,sast,sca"
+  api-url:
+    description: "Security Guardian API base URL"
+    required: false
+    default: "https://guardian.example.com"
+  token:
+    description: "API token (store as a secret; do NOT hardcode)"
+    required: true
+  timeout:
+    description: "Max seconds to wait for scan completion"
+    required: false
+    default: "300"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Guardian CLI
+      shell: bash
+      run: pip install --quiet security-guardian
+    - name: Run scan + gate
+      shell: bash
+      env:
+        GUARDIAN_API_URL: ${{ inputs.api-url }}
+        GUARDIAN_TOKEN: ${{ inputs.token }}
+      run: |
+        guardian scan \
+          --asset "${{ inputs.asset-id }}" \
+          --engines "${{ inputs.engines }}" \
+          --timeout "${{ inputs.timeout }}"

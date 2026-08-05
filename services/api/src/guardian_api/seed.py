@@ -14,11 +14,13 @@ from guardian_common.config import get_settings
 from guardian_common.logging import configure_logging, get_logger
 from guardian_common.security import hash_password
 from guardian_core.enums import StaffRole
+from guardian_core.policy import DEFAULT_RULES
 from guardian_db.kb_seed import seed_knowledge_base
 from guardian_db.models import (
     Customer,
     Plan,
     PlanEntitlement,
+    Policy,
     ScannerPlugin,
     Subscription,
     Tenant,
@@ -95,6 +97,10 @@ def seed() -> None:
             tenant = Tenant(name=settings.bootstrap_tenant, slug=slug, mode="hybrid")
             db.add(tenant)
             db.flush()
+
+        # Default deployment-gate policy for the tenant
+        if not db.query(Policy).filter(Policy.organization_id == tenant.id).first():
+            db.add(Policy(organization_id=tenant.id, name="Default gate", rules=DEFAULT_RULES))
 
         # Admin user + owner membership
         email = settings.bootstrap_admin_email.lower()

@@ -5,12 +5,13 @@
 > manage assets, run automated + AI-assisted security assessments, produce expert-reviewed
 > pentest reports, track remediation, and monitor posture continuously.
 
-**Status:** 🚧 **Phase 3 — AI Analyst, Reporting & Dashboard (in progress).** Phases 1–2 are
-complete (foundation + security review; vulnerability intelligence, risk engine, SAST/SCA, pentester
-workflow). Phase 3 adds the **AI Security Analyst** (retrieval-grounded, provider-abstracted, with a
-deterministic offline default), professional **PDF/HTML reports**, a **grounded AI chat**, a 0–100
-**security score**, and a **React dashboard**. Deterministic scoring remains the source of truth —
-the AI explains and prioritizes, it never invents findings or severities.
+**Status:** 🚧 **Phase 4 — Cloud, Containers & DevSecOps (in progress).** Phases 1–3 are complete
+(foundation + security review; vulnerability intelligence, risk engine, SAST/SCA, pentester workflow;
+AI analyst, reporting, dashboard, chat). Phase 4 extends from *code* to *infrastructure*: **CSPM**
+(AWS/Azure/GCP, CIS-mapped), **container** (Dockerfile) and **Kubernetes** manifest engines,
+authorization-gated **DAST + API** assessment, a declarative **deployment gate**, a **`guardian`
+CLI** + **GitHub Action**, and an HMAC-verified **GitHub webhook**. Active scanning stays
+authorization-gated; deterministic scoring remains the source of truth; the AI stays analyst-only.
 
 **Not just a scanner — an operations loop:**
 

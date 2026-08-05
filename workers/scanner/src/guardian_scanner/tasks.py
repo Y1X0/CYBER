@@ -151,6 +151,7 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                     inline_content=inline,
                     exposure=asset.exposure,
                     vuln_matcher=KbVulnMatcher(session),  # SCA matches against the local KB
+                    asset_config=asset.config or {},  # offline snapshots for active engines
                 )
                 # Business impact defaults to the customer's criticality (overridable per asset).
                 business_impact = (asset.config or {}).get("business_impact", customer.criticality)

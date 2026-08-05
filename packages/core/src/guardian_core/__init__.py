@@ -16,15 +16,18 @@ from guardian_core.enums import (
 )
 from guardian_core.evidence import Evidence, EvidenceKind, code_evidence, dependency_evidence
 from guardian_core.findings import RawFinding
+from guardian_core.policy import DEFAULT_RULES, GateResult, evaluate_gate
 from guardian_core.scoring import RiskAssessment, ScoreInputs, assess, score_severity
 
 __all__ = [
+    "DEFAULT_RULES",
     "AssetKind",
     "EngineKey",
     "Evidence",
     "EvidenceKind",
     "FindingSource",
     "FindingStatus",
+    "GateResult",
     "PortalRole",
     "RawFinding",
     "RiskAssessment",
@@ -35,5 +38,6 @@ __all__ = [
     "assess",
     "code_evidence",
     "dependency_evidence",
+    "evaluate_gate",
     "score_severity",
 ]

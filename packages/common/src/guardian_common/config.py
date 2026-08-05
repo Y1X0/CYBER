@@ -31,6 +31,9 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:5173"
 
+    # DevSecOps: GitHub webhook HMAC secret (empty = webhook endpoint rejects all deliveries).
+    github_webhook_secret: str = ""
+
     bootstrap_tenant: str = "Acme Security"
     bootstrap_admin_email: str = "admin@example.com"
     bootstrap_admin_password: str = "ChangeMe123!"  # noqa: S105 - dev bootstrap default only

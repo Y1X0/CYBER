@@ -15,10 +15,13 @@ from guardian_api.routes import (
     knowledge_base,
     reports,
     scans,
+    webhooks,
 )
 
 api_router = APIRouter()
 api_router.include_router(health.router, tags=["health"])
+# Webhooks are HMAC-verified, not JWT-authenticated — mounted outside /api/v1.
+api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 
 v1 = APIRouter(prefix="/api/v1")
 v1.include_router(auth.router, prefix="/auth", tags=["auth"])

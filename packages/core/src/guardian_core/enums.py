@@ -33,6 +33,7 @@ class EngineKey(str, Enum):
     API = "api"
     CSPM = "cspm"
     CONTAINER = "container"
+    K8S = "k8s"
 
 
 # Engines that actively probe a live target and therefore REQUIRE an authorization record

@@ -48,6 +48,9 @@ class ScanContext:
     exposure: str = "unknown"
     settings: dict = field(default_factory=dict)
     vuln_matcher: VulnMatcher | None = None  # injected for SCA (KB or live-feed backed)
+    # The asset's config blob. Carries offline snapshots for active engines (cloud_config,
+    # http_snapshot, openapi_spec) so CSPM/DAST/API run without touching a live system in tests.
+    asset_config: dict = field(default_factory=dict)
 
 
 @dataclass

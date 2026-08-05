@@ -6,8 +6,9 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from guardian_core.enums import EngineKey, ScanStatus
+from guardian_core.policy import evaluate_gate
 from guardian_db.audit import record_audit
-from guardian_db.models import Asset, Scan
+from guardian_db.models import Asset, Finding, Policy, Scan
 from sqlalchemy.orm import Session
 
 from guardian_api.deps import Identity, client_ip, get_current_identity, get_db, require_staff_write
@@ -124,3 +125,31 @@ def analyze_scan(
     db.commit()
     enqueue_analysis(str(scan.id))
     return {"scan_id": str(scan.id), "status": "analysis_queued"}
+
+
+@router.get("/{scan_id}/gate")
+def scan_gate(
+    scan_id: uuid.UUID,
+    identity: Identity = Depends(get_current_identity),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Evaluate the deployment gate for a scan (used by CI/CD to block on high-risk findings)."""
+    scan = _scoped_query(db, identity).filter(Scan.id == scan_id).first()
+    if scan is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
+
+    # Project-scoped policy, else tenant default, else the built-in DEFAULT_RULES.
+    policy = (
+        db.query(Policy)
+        .filter(Policy.organization_id == identity.tenant_id, Policy.enabled.is_(True))
+        .order_by(Policy.created_at.desc())
+        .first()
+    )
+    findings = db.query(Finding).filter(Finding.scan_id == scan.id).all()
+    result = evaluate_gate(findings, policy.rules if policy else None)
+    return {
+        "scan_id": str(scan.id),
+        "passed": result.passed,
+        "blocking_count": len(result.blocking),
+        "blocking": result.blocking,
+    }

@@ -29,9 +29,13 @@ dependencies = [
     # Observability / utils
     "structlog>=24.1",
     "httpx>=0.27",
+    "pyyaml>=6.0",  # Kubernetes manifest parsing
     # Reporting (pure-python PDF, no system libs)
     "reportlab>=4.1",
 ]
+
+[project.scripts]
+guardian = "guardian_cli.main:main"
 
 [project.optional-dependencies]
 dev = [
@@ -50,6 +54,11 @@ ai = [
 secrets = "guardian_scanner.engines.secrets_engine:SecretsEngine"
 sast = "guardian_scanner.engines.sast_engine:SastEngine"
 sca = "guardian_scanner.engines.sca_engine:ScaEngine"
+cspm = "guardian_scanner.engines.cspm_engine:CspmEngine"
+container = "guardian_scanner.engines.container_engine:ContainerEngine"
+k8s = "guardian_scanner.engines.k8s_engine:K8sEngine"
+dast = "guardian_scanner.engines.dast_engine:DastEngine"
+api = "guardian_scanner.engines.api_engine:ApiEngine"
 
 [tool.setuptools.packages.find]
 # Monorepo: one installable distribution discovering packages from every src root.
@@ -61,6 +70,7 @@ where = [
     "services/api/src",
     "services/ai_analyst/src",
     "workers/scanner/src",
+    "cli/guardian/src",
 ]
 
 [tool.ruff]
