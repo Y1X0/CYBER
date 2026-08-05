@@ -33,6 +33,12 @@ It exists to be reviewed and approved *before* implementation begins.
    architecture, billing/subscription schema (no payments), human-pentester approval workflow, and
    platform-wide audit & scope control. **Approved strategic scope — reflected in the Phase 1 build.**
 
+8. **[08 — Strategic Product & Architecture Review](08-strategic-review.md)**
+   Post-Phase-4 CSA review of eight proposed capabilities (EASM, SOAR, attack-path graph, AI agents,
+   cloud/IaC/supply-chain, pentest workspace, enterprise, self-security). Decides what lands before
+   Phase 5, the Phase 6–9 roadmap, the expanded **Phase 5 = Hardening + Foundations** scope, and the
+   cheap-now schema seams + interface ports. **Awaiting approval before implementation.**
+
 Architecture Decision Records live in [`../adr/`](../adr/).
 
 ## Design principles
