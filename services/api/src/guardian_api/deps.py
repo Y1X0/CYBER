@@ -18,8 +18,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from guardian_common.config import get_settings
 from guardian_common.security import decode_access_token
 from guardian_core.enums import StaffRole
-from guardian_db.models import CustomerContact, TenantMembership, User
-from guardian_db.session import get_app_session, get_session, reset_tenant, set_tenant
+from guardian_db.models import User
+from guardian_db.session import get_app_session, reset_tenant, set_tenant
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 _bearer = HTTPBearer(auto_error=True)
@@ -75,40 +76,33 @@ def get_current_identity(
     except (jwt.PyJWTError, KeyError, ValueError):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid or expired token") from None
 
-    # Identity bootstrap runs on a privileged (admin) session: these lookups precede knowing the
-    # tenant, so they must not be filtered by RLS. Data queries afterward use the RLS-bound `db`.
-    boot = get_session()
-    try:
-        user = boot.get(User, user_id)
-        if user is None or user.status != "active":
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user not found or inactive")
-        boot.expunge(user)
+    # Bootstrap runs on the same RLS app session — no second (owner) connection. `users` is a global
+    # table (no RLS), and membership/portal lookups use SECURITY DEFINER functions scoped to this
+    # JWT-verified user id, so RLS is honored without needing a tenant bound yet.
+    user = db.get(User, user_id)
+    if user is None or user.status != "active":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user not found or inactive")
 
-        memberships = boot.query(TenantMembership).filter(TenantMembership.user_id == user_id).all()
-        identity: Identity | None = None
-        if memberships:
-            chosen = memberships[0]
-            if x_tenant_id:
-                match = next((m for m in memberships if str(m.tenant_id) == x_tenant_id), None)
-                if match is None:
-                    raise HTTPException(status.HTTP_403_FORBIDDEN, "not a member of that tenant")
-                chosen = match
-            identity = Identity(user=user, tenant_id=chosen.tenant_id, staff_role=chosen.role,
-                                portal_customer_id=None)
-        else:
-            contact = (
-                boot.query(CustomerContact).filter(CustomerContact.user_id == user_id).first()
-            )
-            if contact is not None:
-                from guardian_db.models import Customer
-
-                customer = boot.get(Customer, contact.customer_id)
-                if customer is None:
-                    raise HTTPException(status.HTTP_403_FORBIDDEN, "customer not found")
-                identity = Identity(user=user, tenant_id=customer.tenant_id, staff_role=None,
-                                    portal_customer_id=contact.customer_id)
-    finally:
-        boot.close()
+    identity: Identity | None = None
+    memberships = db.execute(
+        text("SELECT tenant_id, role FROM auth_memberships(:u)"), {"u": str(user_id)}
+    ).all()
+    if memberships:
+        chosen = memberships[0]
+        if x_tenant_id:
+            match = next((m for m in memberships if str(m.tenant_id) == x_tenant_id), None)
+            if match is None:
+                raise HTTPException(status.HTTP_403_FORBIDDEN, "not a member of that tenant")
+            chosen = match
+        identity = Identity(user=user, tenant_id=chosen.tenant_id, staff_role=chosen.role,
+                            portal_customer_id=None)
+    else:
+        portal = db.execute(
+            text("SELECT customer_id, tenant_id, role FROM auth_portal(:u)"), {"u": str(user_id)}
+        ).first()
+        if portal is not None:
+            identity = Identity(user=user, tenant_id=portal.tenant_id, staff_role=None,
+                                portal_customer_id=portal.customer_id)
 
     if identity is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "no tenant membership or portal access")

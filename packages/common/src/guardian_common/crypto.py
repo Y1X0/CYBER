@@ -41,8 +41,9 @@ class LocalKMSProvider:
 def get_kms() -> LocalKMSProvider:
     settings = get_settings()
     key = settings.encryption_key or _DEV_KEY
-    if not settings.encryption_key and settings.is_production:
-        raise ValueError("GUARDIAN_ENCRYPTION_KEY must be set outside local/dev")
+    # Staging and up must supply a real key; the dev sentinel is refused (mirrors config).
+    if not settings.is_local_or_dev and (not settings.encryption_key or key == _DEV_KEY):
+        raise ValueError("GUARDIAN_ENCRYPTION_KEY must be set to a strong value outside local/dev")
     return LocalKMSProvider(key)
 
 

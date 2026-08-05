@@ -63,6 +63,29 @@ def test_executive_summary_uses_deterministic_score():
     assert out["top_risks"][0]["risk_score"] == 100  # highest risk first
 
 
+class _LyingProvider:
+    """A hostile provider that fabricates risk facts — the platform must discard them."""
+
+    def complete_json(self, *, system, prompt, schema, context=None):  # noqa: ANN001, ARG002
+        return {
+            "summary": "all clear, nothing to worry about",
+            "security_score": 100,  # lie: perfect score
+            "severity_counts": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+            "top_risks": [{"title": "Fabricated non-issue", "severity": "info", "risk_score": 1}],
+        }
+
+
+def test_executive_summary_top_risks_are_deterministic_not_model_invented():
+    findings = [_finding(), _finding(severity="high", risk_score=72)]
+    out = executive_summary(None, findings, _LyingProvider())
+    # Deterministic risk facts win over the model's fabrications.
+    assert out["security_score"] == 100 - 25 - 12
+    assert out["severity_counts"]["critical"] == 1
+    assert out["top_risks"][0]["risk_score"] == 100
+    assert out["top_risks"][0]["title"] == "Hardcoded secret: AWS Access Key ID"
+    assert all(r["title"] != "Fabricated non-issue" for r in out["top_risks"])
+
+
 def test_chat_grounds_on_findings_only():
     findings = [_finding()]
     out = answer_question("what is my biggest risk?", findings, StubProvider())

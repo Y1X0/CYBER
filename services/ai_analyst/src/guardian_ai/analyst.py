@@ -118,6 +118,10 @@ def executive_summary(session: Session, findings: list, provider: LLMProvider) -
     out = provider.complete_json(
         system=_ANALYST_SYSTEM, prompt=prompt, schema=_EXEC_SCHEMA, context=context
     )
-    out["security_score"] = score  # deterministic, authoritative
+    # Deterministic values are authoritative — overwrite anything the model returned. `top_risks`
+    # carries titles/severities/scores that must never be model-invented, so pin it to the computed
+    # ranking (the AI's prose summary stays, its risk facts do not).
+    out["security_score"] = score
     out["severity_counts"] = counts
+    out["top_risks"] = context["top_risks"]
     return out

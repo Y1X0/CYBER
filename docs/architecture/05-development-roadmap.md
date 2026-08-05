@@ -158,6 +158,19 @@ PR annotations.
   graph, SOAR, evidence workflow, EASM) build on without a core rewrite. Schema-integrity and
   backward-compatibility tests guard them.
 
+**Production-Readiness sprint (pre-Phase-6 hardening, from the architecture review):** connection-
+pool sizing + **transaction-local** tenant binding (auto-clears on connection return — no cross-tenant
+bleed, PgBouncer-safe); identity bootstrap moved onto the RLS app session via SECURITY DEFINER
+functions (no second, owner-privileged connection per request); tenant/child-FK **indexes** so RLS
+predicates and list queries stay index-backed; a partial-unique **asset natural identity** +
+`last_seen_at` for discovery upsert; **fail-fast** startup that refuses to run if the API isn't on
+the non-owner role or the encryption key is the dev sentinel; the guardian_app role password sourced
+from the environment; a deterministic `top_risks` override; and a **CI guard** asserting every
+tenant-scoped table has an RLS policy. Validated at 100 tenants / 10k assets / 100k findings: RLS
+queries index-backed (bitmap index scan on the tenant predicate), sub-millisecond list/aggregate
+latency, zero cross-tenant leakage across 400 concurrent tenant-bound probes, and a stable pool
+under deliberate over-subscription.
+
 *Remaining:* full threat-model closure, secrets-manager/BYOK integration, image signing + SBOM
 publishing, reliability (autoscaling, DLQ, DR runbooks), observability (OTel/SLOs), compliance
 (ASVS L2, NIST CSF), and packaging (Helm/Terraform).

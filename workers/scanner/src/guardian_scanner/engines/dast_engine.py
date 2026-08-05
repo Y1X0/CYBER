@@ -34,6 +34,7 @@ class DastEngine:
     name = "Guardian DAST-lite (headers/TLS/cookies)"
     version = "0.1.0"
     requires_authorization = True
+    wants_secrets = True  # consumes target auth material from the encrypted secret_ref
 
     def supports(self, asset_kind: str) -> bool:
         return asset_kind == "web"

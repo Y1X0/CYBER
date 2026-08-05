@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import uuid
+from functools import lru_cache
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from guardian_core.enums import EngineKey, ScanStatus
+from guardian_core.enums import ScanStatus
 from guardian_core.policy import evaluate_gate
 from guardian_db.audit import record_audit
 from guardian_db.models import Asset, Finding, Policy, Scan
@@ -17,7 +18,13 @@ from guardian_api.schemas import ScanCreate, ScanOut
 
 router = APIRouter()
 
-_VALID_ENGINES = {e.value for e in EngineKey}
+
+@lru_cache
+def _registered_engine_keys() -> frozenset[str]:
+    # Entry-point names are the engine keys by convention (see pyproject scanner_plugins group).
+    from importlib.metadata import entry_points
+
+    return frozenset(ep.name for ep in entry_points(group="guardian.scanner_plugins"))
 
 
 @router.post("", response_model=ScanOut, status_code=202)
@@ -32,7 +39,10 @@ def create_scan(
     if asset is None or asset.tenant_id != identity.tenant_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "asset not found")
 
-    unknown = set(body.engines) - _VALID_ENGINES
+    # Validate against actually-registered engines (entry-point names == engine keys), not the core
+    # enum — a third-party engine registered via entry points is requestable without editing core,
+    # and the API stays decoupled from the worker package (reads installed metadata only).
+    unknown = set(body.engines) - _registered_engine_keys()
     if unknown:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_ENTITY, f"unknown engines: {sorted(unknown)}"

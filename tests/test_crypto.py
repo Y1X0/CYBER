@@ -49,6 +49,23 @@ def test_decrypt_json_fails_closed():
     assert decrypt_json("garbage-token") == {}
 
 
+def test_kms_refuses_dev_key_outside_local(monkeypatch):
+    """Defense-in-depth: even if Settings is bypassed, the KMS refuses the dev key off local/dev."""
+    from guardian_common import crypto
+
+    class _S:
+        is_local_or_dev = False
+        encryption_key = ""
+
+    monkeypatch.setattr(crypto, "get_settings", lambda: _S())
+    crypto.get_kms.cache_clear()
+    try:
+        with pytest.raises(ValueError, match="ENCRYPTION_KEY"):
+            crypto.get_kms()
+    finally:
+        crypto.get_kms.cache_clear()
+
+
 def test_distinct_keys_do_not_cross_decrypt():
     from guardian_common.crypto import LocalKMSProvider
 

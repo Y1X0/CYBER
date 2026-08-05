@@ -29,6 +29,7 @@ class CspmEngine:
     name = "Guardian CSPM (AWS/Azure/GCP config audit)"
     version = "0.1.0"
     requires_authorization = True
+    wants_secrets = True  # consumes cloud credentials from the encrypted secret_ref
 
     def supports(self, asset_kind: str) -> bool:
         return asset_kind == "cloud_account"

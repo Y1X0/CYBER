@@ -74,7 +74,8 @@ def upgrade() -> None:
         """
         DO $$ BEGIN
           IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'guardian_app') THEN
-            CREATE ROLE guardian_app LOGIN PASSWORD 'guardian_app';
+            -- No password literal here; it is set from the environment in migration 0006.
+            CREATE ROLE guardian_app LOGIN;
           END IF;
         END $$;
         """

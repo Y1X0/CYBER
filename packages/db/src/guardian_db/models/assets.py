@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import DateTime, ForeignKey, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -19,6 +19,16 @@ from guardian_db.base import Base, TimestampMixin, uuid_pk
 
 class Asset(Base, TimestampMixin):
     __tablename__ = "assets"
+    __table_args__ = (
+        Index("idx_assets_tenant_customer", "tenant_id", "customer_id"),
+        Index("idx_assets_tenant_state_source", "tenant_id", "state", "source"),
+        # Natural identity for discovery upsert — a re-observed domain/ARN is the same asset, not a
+        # new one. Partial: inline/identifier-less assets (identifier = '') are exempt.
+        Index(
+            "uq_asset_identity", "tenant_id", "customer_id", "kind", "identifier",
+            unique=True, postgresql_where=text("identifier <> ''"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = uuid_pk()
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), nullable=False)
@@ -41,6 +51,10 @@ class Asset(Base, TimestampMixin):
     state: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
     discovered_by_scan_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     first_seen_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Updated on each re-observation; drives the shadow/inactive lifecycle for continuous EASM.
+    last_seen_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     # Envelope-encrypted credential reference (opaque ciphertext); decrypted only at use.

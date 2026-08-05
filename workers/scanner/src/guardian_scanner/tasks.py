@@ -136,9 +136,9 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                     continue
 
                 # Safe-scanning gate: active engines need a valid authorization (doc 06 §4).
-                needs_auth = (
-                    engine.requires_authorization or EngineKey(engine_key) in ACTIVE_ENGINES
-                )
+                # Use the engine's own key (already an EngineKey) — never coerce the raw request
+                # string, which would raise on an unknown/third-party key and fail the whole scan.
+                needs_auth = engine.requires_authorization or engine.key in ACTIVE_ENGINES
                 if needs_auth and not _authorized(session, asset):
                     run.status = "skipped"
                     run.error = "no valid authorization for active scan"
@@ -172,7 +172,12 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                     exposure=asset.exposure,
                     vuln_matcher=KbVulnMatcher(session),  # SCA matches against the local KB
                     asset_config=asset.config or {},  # offline snapshots for active engines
-                    secret_config=decrypt_json(asset.secret_ref),  # in-memory creds only
+                    # Least privilege: decrypt credentials only for engines that declare they need
+                    # them (cloud/DAST/API) — a SAST/secrets engine never receives cloud keys.
+                    secret_config=(
+                        decrypt_json(asset.secret_ref)
+                        if getattr(engine, "wants_secrets", False) else {}
+                    ),
                 )
                 # Business impact defaults to the customer's criticality (overridable per asset).
                 business_impact = (asset.config or {}).get("business_impact", customer.criticality)

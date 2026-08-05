@@ -2,12 +2,46 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from guardian_common.config import get_settings
-from guardian_common.logging import configure_logging
+from guardian_common.config import Settings, get_settings
+from guardian_common.logging import configure_logging, get_logger
+from sqlalchemy import text
 
 from guardian_api.routes import api_router
+
+log = get_logger("guardian.api")
+
+
+def _verify_rls_app_role(settings: Settings) -> None:
+    """Fail fast in production if the API's DB session is NOT the RLS-enforced non-owner role.
+
+    Pointing GUARDIAN_APP_DATABASE_URL at the owner (or a superuser/BYPASSRLS role) silently makes
+    tenant-isolation RLS inert. Refuse to start rather than serve without the backstop."""
+    if settings.is_local_or_dev:
+        return
+    from guardian_db.session import get_app_session
+
+    session = get_app_session()
+    try:
+        row = session.execute(
+            text("SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = current_user")
+        ).one()
+        if row.rolsuper or row.rolbypassrls:
+            raise RuntimeError(
+                "API app session connects as an RLS-bypassing role — set GUARDIAN_APP_DATABASE_URL "
+                "to the non-owner guardian_app role so tenant-isolation RLS is enforced"
+            )
+    finally:
+        session.close()
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):  # noqa: ANN202
+    _verify_rls_app_role(get_settings())
+    yield
 
 
 def create_app() -> FastAPI:
@@ -20,6 +54,7 @@ def create_app() -> FastAPI:
         description="AI Security Operations Platform — control plane (Phase 1 Foundation)",
         docs_url="/docs",
         openapi_url="/openapi.json",
+        lifespan=_lifespan,
     )
 
     # Never combine a wildcard origin with credentials — that would let any site make

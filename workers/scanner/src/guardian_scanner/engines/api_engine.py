@@ -24,6 +24,7 @@ class ApiEngine:
     name = "Guardian API (OpenAPI security review)"
     version = "0.1.0"
     requires_authorization = True
+    wants_secrets = True  # consumes API auth material from the encrypted secret_ref
 
     def supports(self, asset_kind: str) -> bool:
         return asset_kind == "api"
