@@ -31,9 +31,20 @@ class Asset(Base, TimestampMixin):
     # "public" | "internal" | "unknown" — feeds the scorer.
     exposure: Mapped[str] = mapped_column(String(20), default="unknown", nullable=False)
     # Non-sensitive scan config + credential *references* (e.g. secrets-manager keys / role ARNs).
-    # PLAINTEXT JSONB in Phase 1 — raw secrets MUST NOT be stored here. Envelope encryption (KMS)
-    # for credential references lands in Phase 4 before any real cloud credentials are handled.
+    # Raw secrets MUST NOT be stored here — use `secret_ref` (envelope-encrypted) instead.
     config: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+
+    # ── Phase 5 (5B) provenance seam: where this asset came from (EASM / discovery foundation).
+    # "declared" (customer-registered) | "discovered" (found by EASM). No discovery logic yet.
+    source: Mapped[str] = mapped_column(String(20), default="declared", nullable=False)
+    # "active" | "inactive" | "shadow" — lifecycle/shadow-asset state.
+    state: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    discovered_by_scan_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    first_seen_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Envelope-encrypted credential reference (opaque ciphertext); decrypted only at use.
+    secret_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Engagement(Base, TimestampMixin):

@@ -5,13 +5,18 @@
 > manage assets, run automated + AI-assisted security assessments, produce expert-reviewed
 > pentest reports, track remediation, and monitor posture continuously.
 
-**Status:** 🚧 **Phase 4 — Cloud, Containers & DevSecOps (in progress).** Phases 1–3 are complete
+**Status:** 🚧 **Phase 5 — Hardening & Foundational Seams (in progress).** Phases 1–4 are complete
 (foundation + security review; vulnerability intelligence, risk engine, SAST/SCA, pentester workflow;
-AI analyst, reporting, dashboard, chat). Phase 4 extends from *code* to *infrastructure*: **CSPM**
-(AWS/Azure/GCP, CIS-mapped), **container** (Dockerfile) and **Kubernetes** manifest engines,
-authorization-gated **DAST + API** assessment, a declarative **deployment gate**, a **`guardian`
-CLI** + **GitHub Action**, and an HMAC-verified **GitHub webhook**. Active scanning stays
-authorization-gated; deterministic scoring remains the source of truth; the AI stays analyst-only.
+AI analyst, reporting, dashboard, chat; CSPM/container/Kubernetes/DAST/API engines, deployment gate,
+`guardian` CLI + GitHub Action + webhook). Phase 5 hardens the platform for multi-tenant scale:
+**PostgreSQL Row-Level Security** enforcing tenant isolation at the database (verified by
+cross-tenant and negative-authorization tests), a **worker sandbox** (resource-limited,
+egress-restricted process isolation for untrusted-input engines), **envelope-encrypted credentials**
+(no plaintext secrets at rest), and a **supply-chain self-scan** (self-SBOM + dependency audit in
+CI). It also lands non-feature **storage seams** for future phases — a polymorphic graph edge, a
+domain-event outbox, first-class evidence with hash-chain integrity, and asset provenance. Active
+scanning stays authorization-gated; deterministic scoring remains the source of truth; the AI stays
+analyst-only.
 
 **Not just a scanner — an operations loop:**
 

@@ -32,9 +32,14 @@ services:
       dockerfile: infra/docker/Dockerfile
     environment:
       GUARDIAN_ENV: local
+      # Admin URL (owner) runs migrations + seed; the app URL below binds request handlers to the
+      # non-owner, RLS-enforced role. The `guardian_app` role is created by migration 0005.
       GUARDIAN_DATABASE_URL: postgresql+psycopg://guardian:guardian@db:5432/guardian
+      GUARDIAN_APP_DATABASE_URL: postgresql+psycopg://guardian_app:guardian_app@db:5432/guardian
       GUARDIAN_REDIS_URL: redis://redis:6379/0
       GUARDIAN_JWT_SECRET: change-me-dev-only-do-not-use-in-production
+      # Shared with the worker: the API encrypts credentials, the worker decrypts them at scan time.
+      GUARDIAN_ENCRYPTION_KEY: dev-only-encryption-key-change-me
     depends_on:
       db:
         condition: service_healthy
@@ -54,9 +59,13 @@ services:
       dockerfile: infra/docker/Dockerfile
     environment:
       GUARDIAN_ENV: local
+      # Worker uses the admin URL by design: engines run cross-tenant and bypass RLS legitimately.
       GUARDIAN_DATABASE_URL: postgresql+psycopg://guardian:guardian@db:5432/guardian
       GUARDIAN_REDIS_URL: redis://redis:6379/0
       GUARDIAN_JWT_SECRET: change-me-dev-only-do-not-use-in-production
+      GUARDIAN_ENCRYPTION_KEY: dev-only-encryption-key-change-me
+      # Turn on to run untrusted-input engines in the resource-limited sandbox (5A).
+      GUARDIAN_SANDBOX_ENGINES: "false"
     depends_on:
       db:
         condition: service_healthy

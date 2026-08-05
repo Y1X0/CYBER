@@ -97,7 +97,7 @@ scan/findings views, chat). Verified end-to-end against PostgreSQL offline via t
 
 ---
 
-## Phase 4 — Cloud Security & CI/CD Integration  🚧 *in progress*
+## Phase 4 — Cloud Security & CI/CD Integration  ✅ *complete*
 
 **Goal:** extend coverage to cloud + containers and embed the platform in the developer workflow.
 
@@ -129,9 +129,38 @@ PR annotations.
 
 ---
 
-## Phase 5 — Production Hardening
+## Phase 5 — Production Hardening  🚧 *in progress*
 
 **Goal:** make it safe, reliable, and operable at scale — commercial-grade.
+
+**Delivered so far (5A hardening + 5B foundational seams):**
+- **Tenant isolation at the database (hard gate).** The API connects as a non-owner, RLS-enforced
+  role (`guardian_app`); every request binds its connection to `app.current_tenant`, and PostgreSQL
+  Row-Level Security policies reject any cross-tenant read or write — direct-`tenant_id` tables,
+  parent-scoped child tables, the tenant's own row, and org-scoped policies alike. Workers and
+  migrations keep a privileged (owner) connection for legitimate cross-tenant work. Verified by
+  cross-tenant isolation, fail-closed (no context → zero rows), and negative-authorization
+  (`WITH CHECK` rejects) tests.
+- **Worker sandbox (hard gate, MVP).** Untrusted-input engines can run in a forked child with
+  OS-enforced resource limits (CPU/memory/file-size/open-files/no-core), a wall-clock deadline,
+  private temp isolation, and network-egress restriction (only DAST/API reach an authorized target).
+  Opt-in via `sandbox_engines`; the container-per-run backend for external scanning at scale plugs in
+  behind the same interface later.
+- **No plaintext secrets.** Asset credentials are envelope-encrypted (`LocalKMSProvider`, Fernet)
+  into `asset.secret_ref` and decrypted only in-memory at scan time; a cloud-KMS/BYOK provider
+  implements the same port later.
+- **Supply-chain self-scan.** A dependency-free **self-SBOM** generator (CycloneDX-lite) plus a
+  **pip-audit** dependency-vulnerability scan run in CI (the platform inventorying and checking its
+  own supply chain).
+- **Foundational seams (storage only, no feature logic):** a polymorphic **graph edge**, a
+  **domain-event outbox**, first-class **evidence** with a hash-chain integrity foundation, and
+  **asset provenance** columns — the irreversible schema decisions that later phases (attack-path
+  graph, SOAR, evidence workflow, EASM) build on without a core rewrite. Schema-integrity and
+  backward-compatibility tests guard them.
+
+*Remaining:* full threat-model closure, secrets-manager/BYOK integration, image signing + SBOM
+publishing, reliability (autoscaling, DLQ, DR runbooks), observability (OTel/SLOs), compliance
+(ASVS L2, NIST CSF), and packaging (Helm/Terraform).
 
 **Scope**
 - Security: full threat-model closure, secrets manager integration, dependency + container signing,

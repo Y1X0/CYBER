@@ -36,6 +36,9 @@ jobs:
     env:
       GUARDIAN_ENV: ci
       GUARDIAN_DATABASE_URL: postgresql+psycopg://guardian:guardian@localhost:5432/guardian
+      # RLS-enforced app role (created by migration 0005). Set so the cross-tenant isolation and
+      # negative-authorization tests actually run here instead of skipping.
+      GUARDIAN_APP_DATABASE_URL: postgresql+psycopg://guardian_app:guardian_app@localhost:5432/guardian
       GUARDIAN_REDIS_URL: redis://localhost:6379/0
       GUARDIAN_JWT_SECRET: ci-only-secret-not-used-in-production-0123456789
 
@@ -65,4 +68,18 @@ jobs:
           GUARDIAN_RUN_DB_TESTS: "1"
         run: pytest -ra --cov=guardian_core --cov=guardian_scanner --cov=guardian_api
 
-      # Dogfood gate (Phase 5): the platform will self-scan here and fail on high-risk findings.
+      # ── Supply-chain self-scan (Phase 5A): know, then check, our own dependencies. ──
+      - name: Generate self-SBOM
+        run: python tools/generate_sbom.py sbom.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: guardian-sbom
+          path: sbom.json
+
+      - name: Dependency vulnerability scan (pip-audit)
+        # Recommended hardening, not a release blocker (per Phase 5 gate tiering): report advisories
+        # in our own dependency tree without failing the build on a fresh upstream CVE.
+        continue-on-error: true
+        run: pip-audit --desc --strict

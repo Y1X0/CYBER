@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from guardian_common.crypto import encrypt_json
 from guardian_db.audit import record_audit
 from guardian_db.models import Asset, Customer
 from sqlalchemy.orm import Session
@@ -41,6 +42,8 @@ def create_asset(
         identifier=body.identifier,
         exposure=body.exposure,
         config=body.config,
+        # Credentials are encrypted at rest; the plaintext never touches the DB, logs, or audit.
+        secret_ref=encrypt_json(body.secret) if body.secret else None,
     )
     db.add(asset)
     db.flush()

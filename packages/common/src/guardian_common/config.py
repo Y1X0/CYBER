@@ -29,7 +29,20 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_ttl_minutes: int = 60
 
+    # Envelope-encryption key for credential references (5A). Generate: openssl rand -hex 32.
+    # Empty falls back to a dev-only key (refused outside local/dev, like the JWT secret).
+    encryption_key: str = ""
+
+    # RLS: the API connects as a non-owner, RLS-enforced role. Falls back to the main URL in dev
+    # (app-level tenant scoping still applies; production must set this to the guardian_app role).
+    app_database_url: str = ""
+
     cors_origins: str = "http://localhost:5173"
+
+    # Worker sandboxing (5A). When true, untrusted-input engines run in a resource-limited,
+    # egress-restricted child process. Off by default so the in-process path stays simple for
+    # internal/authorized scanning; turn on before scanning external/untrusted targets at scale.
+    sandbox_engines: bool = False
 
     # DevSecOps: GitHub webhook HMAC secret (empty = webhook endpoint rejects all deliveries).
     github_webhook_secret: str = ""

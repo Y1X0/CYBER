@@ -44,4 +44,10 @@ The nine foundational decisions (ADR-001 … ADR-009) that anchor the initial bu
 | 008 | Observability: OpenTelemetry-native |
 | 009 | License: Apache-2.0 |
 
-New ADRs start at **ADR-010**.
+## Incremental decisions
+
+| ADR | Decision |
+|---|---|
+| [010](0010-phase5-rls-and-foundational-seams.md) | Phase 5: two-role RLS tenant isolation + Tier-1 foundational seams |
+
+New ADRs start at **ADR-011**.

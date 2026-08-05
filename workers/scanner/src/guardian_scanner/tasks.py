@@ -12,6 +12,8 @@ import subprocess  # noqa: S404 - used with a fixed argv, no shell
 import tempfile
 import uuid
 
+from guardian_common.config import get_settings
+from guardian_common.crypto import decrypt_json
 from guardian_common.logging import get_logger
 from guardian_core.enums import ACTIVE_ENGINES, EngineKey, ScanStatus
 from guardian_db.audit import record_audit
@@ -26,6 +28,7 @@ from guardian_db.models import (
 )
 from guardian_db.session import session_scope
 
+from guardian_scanner import sandbox
 from guardian_scanner.celery_app import celery_app
 from guardian_scanner.engines.base import ScanContext
 from guardian_scanner.normalize import severity_counts, to_finding
@@ -35,6 +38,23 @@ from guardian_scanner.vuln_match import KbVulnMatcher
 log = get_logger("guardian.scanner")
 
 _CLONE_TIMEOUT = 120
+
+
+def _run_engine(engine, ctx: ScanContext) -> list:  # noqa: ANN001 - engine is a ScanEngine
+    """Execute an engine, optionally inside the worker sandbox (5A hard gate).
+
+    When `sandbox_engines` is on, untrusted-input engines run in a resource-limited, egress-
+    restricted child process. SCA is exempt: it matches against the local KB over a DB handle that
+    isn't fork-safe, and its input (trusted, local advisory data) is low-risk — it stays in-process.
+    """
+    settings = get_settings()
+    if (
+        settings.sandbox_engines
+        and sandbox.supported()
+        and engine.key != EngineKey.SCA
+    ):
+        return sandbox.run_in_sandbox(lambda: list(engine.run(ctx)), sandbox.policy_for(engine.key))
+    return list(engine.run(ctx))
 
 
 def _now() -> dt.datetime:
@@ -152,11 +172,12 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                     exposure=asset.exposure,
                     vuln_matcher=KbVulnMatcher(session),  # SCA matches against the local KB
                     asset_config=asset.config or {},  # offline snapshots for active engines
+                    secret_config=decrypt_json(asset.secret_ref),  # in-memory creds only
                 )
                 # Business impact defaults to the customer's criticality (overridable per asset).
                 business_impact = (asset.config or {}).get("business_impact", customer.criticality)
                 try:
-                    raws = list(engine.run(ctx))
+                    raws = _run_engine(engine, ctx)
                     run.tool_versions = {engine.key.value: engine.version}
                     for raw in raws:
                         finding = to_finding(

@@ -56,15 +56,18 @@ class AssetCreate(BaseModel):
     identifier: str = Field(default="", max_length=2048)
     exposure: str = Field(default="unknown", pattern="^(public|internal|unknown)$")
     config: dict = Field(default_factory=dict)
+    # Sensitive credential material (cloud keys, DAST auth). Encrypted at rest into
+    # `asset.secret_ref` and never echoed back — keep it out of `config`, which is returned/logged.
+    secret: dict | None = Field(default=None)
 
-    @field_validator("config")
+    @field_validator("config", "secret")
     @classmethod
-    def _bound_config_size(cls, v: dict) -> dict:
-        # Cap serialized config to prevent oversized-payload DoS (also bounds inline_content).
+    def _bound_size(cls, v: dict | None) -> dict | None:
+        # Cap serialized size to prevent oversized-payload DoS (also bounds inline_content).
         import json
 
-        if len(json.dumps(v)) > 262_144:  # 256 KiB
-            raise ValueError("config exceeds maximum size (256 KiB)")
+        if v is not None and len(json.dumps(v)) > 262_144:  # 256 KiB
+            raise ValueError("field exceeds maximum size (256 KiB)")
         return v
 
 

@@ -51,6 +51,9 @@ class ScanContext:
     # The asset's config blob. Carries offline snapshots for active engines (cloud_config,
     # http_snapshot, openapi_spec) so CSPM/DAST/API run without touching a live system in tests.
     asset_config: dict = field(default_factory=dict)
+    # Decrypted credential material (cloud keys, DAST auth), in-memory only for this run. Sourced
+    # from the asset's encrypted secret_ref — never persisted, logged, or emitted in findings.
+    secret_config: dict = field(default_factory=dict)
 
 
 @dataclass

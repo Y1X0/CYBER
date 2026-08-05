@@ -3,6 +3,9 @@
 from guardian_db.models.assets import Asset, Authorization, Engagement
 from guardian_db.models.audit import ApiKey, AuditLog
 from guardian_db.models.billing import Plan, PlanEntitlement, Subscription, UsageRecord
+from guardian_db.models.events import DomainEvent
+from guardian_db.models.evidence import EvidenceItem
+from guardian_db.models.graph import GraphEdge
 from guardian_db.models.knowledge import (
     Advisory,
     FeedSync,
@@ -36,10 +39,13 @@ __all__ = [
     "Authorization",
     "Customer",
     "CustomerContact",
+    "DomainEvent",
     "Engagement",
+    "EvidenceItem",
     "FeedSync",
     "Finding",
     "FindingEvent",
+    "GraphEdge",
     "KbEntry",
     "Plan",
     "PlanEntitlement",
