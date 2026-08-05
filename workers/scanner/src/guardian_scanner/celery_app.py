@@ -11,7 +11,7 @@ celery_app = Celery(
     "guardian",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["guardian_scanner.tasks"],
+    include=["guardian_scanner.tasks", "guardian_scanner.feeds"],
 )
 
 celery_app.conf.update(

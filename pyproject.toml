@@ -42,6 +42,8 @@ dev = [
 # First-party scanner plugins are discovered via entry points (plugin architecture, doc 07 §4).
 [project.entry-points."guardian.scanner_plugins"]
 secrets = "guardian_scanner.engines.secrets_engine:SecretsEngine"
+sast = "guardian_scanner.engines.sast_engine:SastEngine"
+sca = "guardian_scanner.engines.sca_engine:ScaEngine"
 
 [tool.setuptools.packages.find]
 # Monorepo: one installable distribution discovering packages from every src root.
@@ -49,6 +51,7 @@ where = [
     "packages/core/src",
     "packages/common/src",
     "packages/db/src",
+    "packages/clients/src",
     "services/api/src",
     "workers/scanner/src",
 ]

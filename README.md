@@ -5,9 +5,10 @@
 > manage assets, run automated + AI-assisted security assessments, produce expert-reviewed
 > pentest reports, track remediation, and monitor posture continuously.
 
-**Status:** 🚧 **Phase 1 — Foundation (in progress).** The architecture package is approved; the
-commercial platform layer (hybrid tenancy, customer portal, plugin engines, billing-ready schema,
-human-pentester approval workflow) is designed and being implemented.
+**Status:** 🚧 **Phase 2 — Vulnerability Intelligence & Scanning (in progress).** Phase 1
+Foundation is complete and passed a focused security review. Phase 2 adds the vulnerability
+knowledge base (CVE/CWE/OSV/EPSS/KEV), the Risk Engine (0–100 business-risk scoring), SAST + SCA
+plugin engines, structured evidence, and the human-pentester triage & report-approval workflow.
 
 **Not just a scanner — an operations loop:**
 

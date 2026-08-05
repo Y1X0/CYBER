@@ -3,6 +3,13 @@
 from guardian_db.models.assets import Asset, Authorization, Engagement
 from guardian_db.models.audit import ApiKey, AuditLog
 from guardian_db.models.billing import Plan, PlanEntitlement, Subscription, UsageRecord
+from guardian_db.models.knowledge import (
+    Advisory,
+    FeedSync,
+    KbEntry,
+    Vulnerability,
+    Weakness,
+)
 from guardian_db.models.plugins import ScannerPlugin, TenantScannerConfig
 from guardian_db.models.reporting import Report, ReportApproval, ReportSection
 from guardian_db.models.scanning import (
@@ -21,6 +28,7 @@ from guardian_db.models.tenancy import (
 )
 
 __all__ = [
+    "Advisory",
     "ApiKey",
     "Asset",
     "AuditLog",
@@ -28,8 +36,10 @@ __all__ = [
     "Customer",
     "CustomerContact",
     "Engagement",
+    "FeedSync",
     "Finding",
     "FindingEvent",
+    "KbEntry",
     "Plan",
     "PlanEntitlement",
     "RemediationItem",
@@ -45,4 +55,6 @@ __all__ = [
     "TenantScannerConfig",
     "UsageRecord",
     "User",
+    "Vulnerability",
+    "Weakness",
 ]

@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 
 from guardian_core.findings import RawFinding
-from guardian_core.scoring import ScoreInputs, score_severity
+from guardian_core.scoring import ScoreInputs, assess
 from guardian_db.models import Finding
 
 
@@ -23,8 +23,10 @@ def to_finding(
     asset_id: uuid.UUID,
     exposure: str,
     asset_criticality: str,
+    business_impact: str = "medium",
 ) -> Finding:
-    severity = score_severity(
+    # Risk Engine: deterministic severity band + 0–100 score + auditable rationale.
+    risk = assess(
         ScoreInputs(
             base_severity=raw.base_severity,
             cvss_base=raw.cvss_base,
@@ -32,6 +34,7 @@ def to_finding(
             kev=raw.kev,
             exposure=exposure,
             asset_criticality=asset_criticality,
+            business_impact=business_impact,
         )
     )
     return Finding(
@@ -50,7 +53,9 @@ def to_finding(
         cvss_base=raw.cvss_base,
         epss_score=raw.epss_score,
         kev=raw.kev,
-        severity=severity.value,
+        severity=risk.severity.value,
+        risk_score=risk.score,
+        risk_rationale=risk.rationale,
         confidence=raw.confidence,
         status="open",
         source="automated",

@@ -36,9 +36,17 @@ scan end-to-end through the real pipeline.
 
 ---
 
-## Phase 2 — Code Analysis, Dependencies & Vulnerability Database
+## Phase 2 — Code Analysis, Dependencies & Vulnerability Database  🚧 *in progress*
 
 **Goal:** real, valuable static findings and a live vulnerability knowledge base.
+
+**Delivered so far:** builtin SAST engine (insecure-code patterns, optional Semgrep wrap) and SCA
+engine (manifest parse → KB match), both as plugins; the vulnerability KB models + offline seed
+(CWE + sample CVEs) + OSV/EPSS/KEV feed clients + a graceful feed-sync task; the **Risk Engine**
+(0–100 business-risk score with transparent rationale + business-impact input); structured
+**evidence**; and the human-pentester **triage** (audited) + **report-approval** workflow. All
+verified end-to-end against PostgreSQL. *Remaining:* dedup/trend across repeat scans, license/SBOM,
+and scheduled feed beat.
 
 **Scope**
 - **SAST engine**: Semgrep + Bandit + ESLint-security adapters → canonical findings, CWE/OWASP mapping.

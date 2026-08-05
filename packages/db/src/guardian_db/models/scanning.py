@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -94,6 +95,9 @@ class Finding(Base, TimestampMixin):
     kev: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     severity: Mapped[str] = mapped_column(String(10), nullable=False)
+    # Risk Engine output: 0–100 business-risk score + the transparent rationale behind it.
+    risk_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    risk_rationale: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     confidence: Mapped[str] = mapped_column(String(10), default="medium", nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="open", nullable=False)
     # Provenance for the human-pentester workflow (doc 07 §6).

@@ -14,6 +14,7 @@ from guardian_common.config import get_settings
 from guardian_common.logging import configure_logging, get_logger
 from guardian_common.security import hash_password
 from guardian_core.enums import StaffRole
+from guardian_db.kb_seed import seed_knowledge_base
 from guardian_db.models import (
     Customer,
     Plan,
@@ -57,6 +58,9 @@ def seed() -> None:
                 for ek, ev in ents:
                     db.add(PlanEntitlement(plan_id=plan.id, key=ek, limit_value=ev))
             plan_by_key[key] = plan
+
+        # Vulnerability knowledge base (offline seed) — CWE catalog + sample advisories
+        kb_counts = seed_knowledge_base(db)
 
         # Register discovered scanner plugins (plugin registry, doc 07 §4)
         try:
@@ -140,6 +144,7 @@ def seed() -> None:
             tenant=tenant.name,
             admin=email,
             customer=customer.name,
+            kb=kb_counts,
         )
         print(  # noqa: T201 - user-facing CLI output
             f"✅ Seed complete. Login as {email} "

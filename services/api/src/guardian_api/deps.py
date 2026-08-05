@@ -109,5 +109,17 @@ def require_staff_write(identity: Identity = Depends(get_current_identity)) -> I
     return identity
 
 
+# Roles allowed to approve/reject a report (independent QA gate, doc 07 §6).
+_REVIEW_ROLES = {StaffRole.REVIEWER.value, StaffRole.ADMIN.value, StaffRole.OWNER.value}
+
+
+def require_reviewer(identity: Identity = Depends(get_current_identity)) -> Identity:
+    if identity.staff_role not in _REVIEW_ROLES:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN, "report approval requires a reviewer/admin/owner role"
+        )
+    return identity
+
+
 def client_ip(x_forwarded_for: str | None = Header(default=None)) -> str | None:
     return x_forwarded_for.split(",")[0].strip() if x_forwarded_for else None

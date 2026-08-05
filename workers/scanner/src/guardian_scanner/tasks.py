@@ -30,6 +30,7 @@ from guardian_scanner.celery_app import celery_app
 from guardian_scanner.engines.base import ScanContext
 from guardian_scanner.normalize import severity_counts, to_finding
 from guardian_scanner.registry import get_engine
+from guardian_scanner.vuln_match import KbVulnMatcher
 
 log = get_logger("guardian.scanner")
 
@@ -149,7 +150,10 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                     workspace_path=workspace,
                     inline_content=inline,
                     exposure=asset.exposure,
+                    vuln_matcher=KbVulnMatcher(session),  # SCA matches against the local KB
                 )
+                # Business impact defaults to the customer's criticality (overridable per asset).
+                business_impact = (asset.config or {}).get("business_impact", customer.criticality)
                 try:
                     raws = list(engine.run(ctx))
                     run.tool_versions = {engine.key.value: engine.version}
@@ -163,6 +167,7 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                             asset_id=asset.id,
                             exposure=asset.exposure,
                             asset_criticality=customer.criticality,
+                            business_impact=business_impact,
                         )
                         session.add(finding)
                         all_findings.append(finding)

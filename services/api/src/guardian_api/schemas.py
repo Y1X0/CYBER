@@ -108,6 +108,8 @@ class FindingOut(BaseModel):
     title: str
     category: str
     severity: str
+    risk_score: int
+    risk_rationale: list
     confidence: str
     status: str
     source: str
@@ -117,4 +119,42 @@ class FindingOut(BaseModel):
     location: dict
     evidence: dict
     references: dict
+    created_at: dt.datetime
+
+
+class FindingTriage(BaseModel):
+    """Human-pentester triage action (workflow, doc 07 §6)."""
+
+    status: str | None = Field(
+        default=None,
+        pattern="^(open|triaged|confirmed|false_positive|accepted_risk|resolved)$",
+    )
+    severity_override: str | None = Field(default=None, pattern="^(critical|high|medium|low|info)$")
+    note: str = Field(default="", max_length=4000)
+
+
+# ── Reports (pentester + reviewer approval flow) ──
+class ReportCreate(BaseModel):
+    scan_id: uuid.UUID
+    title: str = Field(default="", max_length=300)
+
+
+class ReportAction(BaseModel):
+    notes: str = Field(default="", max_length=4000)
+
+
+class ReportApprovalOut(BaseModel):
+    actor_id: uuid.UUID
+    decision: str
+    notes: str
+    created_at: dt.datetime
+
+
+class ReportOut(BaseModel):
+    id: uuid.UUID
+    customer_id: uuid.UUID
+    scan_id: uuid.UUID | None
+    title: str
+    status: str
+    summary: dict
     created_at: dt.datetime

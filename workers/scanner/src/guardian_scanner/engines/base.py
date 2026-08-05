@@ -10,8 +10,30 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from guardian_core.enums import EngineKey
+from guardian_core.enums import EngineKey, Severity
 from guardian_core.findings import RawFinding
+
+
+@dataclass
+class VulnMatch:
+    """A KB/feed vulnerability matched to a dependency (consumed by the SCA engine)."""
+
+    external_id: str  # CVE / GHSA id
+    summary: str = ""
+    severity: Severity = Severity.MEDIUM
+    cvss_base: float | None = None
+    epss_score: float | None = None
+    kev: bool = False
+    cwe_ids: list[str] = field(default_factory=list)
+    references: list = field(default_factory=list)
+
+
+@runtime_checkable
+class VulnMatcher(Protocol):
+    """Looks up known vulnerabilities for a dependency. Implemented DB-side or via a live feed,
+    so the SCA engine never imports the database or a network client directly."""
+
+    def match(self, *, name: str, version: str, ecosystem: str) -> list[VulnMatch]: ...
 
 
 @dataclass
@@ -25,6 +47,7 @@ class ScanContext:
     inline_content: str | None = None  # optional inline content (tests, single-file scans)
     exposure: str = "unknown"
     settings: dict = field(default_factory=dict)
+    vuln_matcher: VulnMatcher | None = None  # injected for SCA (KB or live-feed backed)
 
 
 @dataclass

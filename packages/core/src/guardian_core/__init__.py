@@ -14,19 +14,26 @@ from guardian_core.enums import (
     Severity,
     StaffRole,
 )
+from guardian_core.evidence import Evidence, EvidenceKind, code_evidence, dependency_evidence
 from guardian_core.findings import RawFinding
-from guardian_core.scoring import ScoreInputs, score_severity
+from guardian_core.scoring import RiskAssessment, ScoreInputs, assess, score_severity
 
 __all__ = [
     "AssetKind",
     "EngineKey",
+    "Evidence",
+    "EvidenceKind",
     "FindingSource",
     "FindingStatus",
     "PortalRole",
     "RawFinding",
+    "RiskAssessment",
     "ScanStatus",
     "ScoreInputs",
     "Severity",
     "StaffRole",
+    "assess",
+    "code_evidence",
+    "dependency_evidence",
     "score_severity",
 ]
