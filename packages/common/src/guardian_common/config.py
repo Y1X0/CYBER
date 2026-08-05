@@ -35,7 +35,11 @@ class Settings(BaseSettings):
     bootstrap_admin_email: str = "admin@example.com"
     bootstrap_admin_password: str = "ChangeMe123!"  # noqa: S105 - dev bootstrap default only
 
+    # AI analyst (Phase 3). With no API key the platform uses the deterministic stub provider.
     anthropic_api_key: str = ""
+    ai_model: str = "claude-opus-5"
+    ai_effort: str = "medium"  # low | medium | high | xhigh | max
+    ai_max_tokens: int = 8192
 
     @property
     def cors_origin_list(self) -> list[str]:

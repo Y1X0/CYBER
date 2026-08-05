@@ -20,3 +20,7 @@ def _client() -> Celery:
 
 def enqueue_scan(scan_id: str) -> None:
     _client().send_task("guardian.run_scan", args=[scan_id])
+
+
+def enqueue_analysis(scan_id: str) -> None:
+    _client().send_task("guardian.analyze_scan", args=[scan_id])

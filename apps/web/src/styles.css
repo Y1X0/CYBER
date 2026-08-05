@@ -1,0 +1,36 @@
+:root { --bg: #0f1117; --panel: #1a1d27; --fg: #e8e8ea; --muted: #8a8f9c; --accent: #4a9eff; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg); color: var(--fg); }
+
+.center { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+.card { background: var(--panel); padding: 32px; border-radius: 12px; width: 320px;
+  display: flex; flex-direction: column; gap: 12px; }
+.card input { padding: 10px; border-radius: 6px; border: 1px solid #333;
+  background: #12141c; color: var(--fg); }
+button { padding: 8px 14px; border: 0; border-radius: 6px; background: var(--accent);
+  color: #fff; cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: default; }
+.err { color: #d9534f; margin: 0; }
+
+.app { max-width: 1000px; margin: 0 auto; padding: 20px; }
+header { display: flex; justify-content: space-between; align-items: center; }
+header button { background: #333; }
+section { background: var(--panel); border-radius: 10px; padding: 18px; margin-top: 18px; }
+
+.score-card { text-align: center; }
+.score { font-size: 56px; font-weight: 700; }
+.score small { font-size: 22px; color: var(--muted); }
+.badges { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin: 10px 0; }
+.badges span { color: #fff; padding: 3px 10px; border-radius: 12px; font-size: 13px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 8px; border-bottom: 1px solid #2a2d38; }
+code { background: #12141c; padding: 2px 5px; border-radius: 4px; }
+.hint { color: var(--muted); font-size: 13px; }
+
+.chat-row { display: flex; gap: 8px; }
+.chat-row input { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid #333;
+  background: #12141c; color: var(--fg); }
+.answer { background: #12141c; padding: 12px; border-radius: 8px; white-space: pre-wrap;
+  border-left: 3px solid var(--accent); }

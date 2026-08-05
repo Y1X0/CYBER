@@ -11,7 +11,7 @@ from guardian_db.models import Asset, Scan
 from sqlalchemy.orm import Session
 
 from guardian_api.deps import Identity, client_ip, get_current_identity, get_db, require_staff_write
-from guardian_api.publisher import enqueue_scan
+from guardian_api.publisher import enqueue_analysis, enqueue_scan
 from guardian_api.schemas import ScanCreate, ScanOut
 
 router = APIRouter()
@@ -97,3 +97,30 @@ def get_scan(
     if scan is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
     return ScanOut.model_validate(scan, from_attributes=True)
+
+
+@router.post("/{scan_id}/analyze", status_code=202)
+def analyze_scan(
+    scan_id: uuid.UUID,
+    request: Request,
+    identity: Identity = Depends(require_staff_write),
+    db: Session = Depends(get_db),
+    ip: str | None = Depends(client_ip),
+) -> dict:
+    """Enqueue AI analysis (grounded explanation + remediation) for a scan's findings."""
+    scan = db.query(Scan).filter(Scan.id == scan_id, Scan.tenant_id == identity.tenant_id).first()
+    if scan is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
+    record_audit(
+        db,
+        action="scan.analyze.request",
+        tenant_id=identity.tenant_id,
+        customer_id=scan.customer_id,
+        actor_id=identity.user.id,
+        entity_type="scan",
+        entity_id=str(scan.id),
+        ip=ip,
+    )
+    db.commit()
+    enqueue_analysis(str(scan.id))
+    return {"scan_id": str(scan.id), "status": "analysis_queued"}

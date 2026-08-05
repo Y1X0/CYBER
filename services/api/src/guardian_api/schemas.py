@@ -158,3 +158,23 @@ class ReportOut(BaseModel):
     status: str
     summary: dict
     created_at: dt.datetime
+
+
+# ── AI chat (grounded on project findings) ──
+class ChatRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=1000)
+    scan_id: uuid.UUID | None = None
+    customer_id: uuid.UUID | None = None
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    cited_finding_ids: list[str]
+
+
+# ── Dashboard ──
+class DashboardResponse(BaseModel):
+    security_score: int
+    severity_counts: dict
+    total_findings: int
+    recent_scans: list[ScanOut]

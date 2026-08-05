@@ -66,9 +66,18 @@ and scheduled feed beat.
 
 ---
 
-## Phase 3 — AI Security Analyst, Reporting & Dashboard
+## Phase 3 — AI Security Analyst, Reporting & Dashboard  🚧 *in progress*
 
 **Goal:** turn findings into human-grade, prioritized reports and give users a UI to work them.
+
+**Delivered so far:** `LLMProvider` port with a Claude (Anthropic SDK, structured-output) provider
+and a **deterministic offline stub** default; RAG grounding over the KB (CWE/OWASP/CVE mapping —
+pgvector is a later upgrade behind the same call); the AI analyst (explanation, impact, non-actionable
+attack summary, remediation) with grounding guardrails; a 0–100 **security score**; **executive
+summaries**; professional **HTML + PDF reports** (reportlab) with an export endpoint; a **grounded AI
+chat** (answers only from the customer's findings); and a **React dashboard** (score, severity mix,
+scan/findings views, chat). Verified end-to-end against PostgreSQL offline via the stub provider.
+*Remaining:* pgvector embeddings retrieval, SSE live scan progress, and object-storage report archival.
 
 **Scope**
 - **AI analyst service**: `LLMProvider` (Claude) + RAG over `kb_entries` (pgvector); explanation,

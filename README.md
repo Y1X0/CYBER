@@ -5,10 +5,12 @@
 > manage assets, run automated + AI-assisted security assessments, produce expert-reviewed
 > pentest reports, track remediation, and monitor posture continuously.
 
-**Status:** 🚧 **Phase 2 — Vulnerability Intelligence & Scanning (in progress).** Phase 1
-Foundation is complete and passed a focused security review. Phase 2 adds the vulnerability
-knowledge base (CVE/CWE/OSV/EPSS/KEV), the Risk Engine (0–100 business-risk scoring), SAST + SCA
-plugin engines, structured evidence, and the human-pentester triage & report-approval workflow.
+**Status:** 🚧 **Phase 3 — AI Analyst, Reporting & Dashboard (in progress).** Phases 1–2 are
+complete (foundation + security review; vulnerability intelligence, risk engine, SAST/SCA, pentester
+workflow). Phase 3 adds the **AI Security Analyst** (retrieval-grounded, provider-abstracted, with a
+deterministic offline default), professional **PDF/HTML reports**, a **grounded AI chat**, a 0–100
+**security score**, and a **React dashboard**. Deterministic scoring remains the source of truth —
+the AI explains and prioritizes, it never invents findings or severities.
 
 **Not just a scanner — an operations loop:**
 

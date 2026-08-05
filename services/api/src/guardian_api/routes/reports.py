@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from guardian_ai.providers import get_provider
+from guardian_ai.reporting import generate_report_content, render_html, render_pdf
 from guardian_db.audit import record_audit
 from guardian_db.models import Finding, Report, ReportApproval, Scan
 from sqlalchemy.orm import Session
@@ -125,6 +127,56 @@ def _transition(
     )
     db.commit()
     return report
+
+
+@router.post("/{report_id}/generate", response_model=ReportOut)
+def generate_report(
+    report_id: uuid.UUID,
+    request: Request,
+    identity: Identity = Depends(require_staff_write),
+    db: Session = Depends(get_db),
+    ip: str | None = Depends(client_ip),
+) -> ReportOut:
+    """Build the report's sections + summary from findings and the AI executive summary."""
+    report = _get_owned(db, report_id, identity)
+    generate_report_content(db, report, get_provider())
+    record_audit(
+        db,
+        action="report.generate",
+        tenant_id=identity.tenant_id,
+        customer_id=report.customer_id,
+        actor_id=identity.user.id,
+        entity_type="report",
+        entity_id=str(report.id),
+        ip=ip,
+    )
+    db.commit()
+    return ReportOut.model_validate(report, from_attributes=True)
+
+
+@router.get("/{report_id}/export")
+def export_report(
+    report_id: uuid.UUID,
+    format: str = "pdf",  # noqa: A002 - query param name
+    identity: Identity = Depends(get_current_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Export a report as PDF (default) or HTML. Portal contacts get published reports only."""
+    report = _get_owned(db, report_id, identity)
+    if not identity.is_staff and (
+        report.customer_id != identity.portal_customer_id or report.status != "published"
+    ):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "report not found")
+    findings = db.query(Finding).filter(Finding.scan_id == report.scan_id).all()
+    if format == "html":
+        return Response(content=render_html(report, findings), media_type="text/html")
+    if format == "pdf":
+        return Response(
+            content=render_pdf(report, findings),
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'attachment; filename="report-{report.id}.pdf"'},
+        )
+    raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "format must be pdf or html")
 
 
 @router.post("/{report_id}/submit", response_model=ReportOut)
