@@ -36,6 +36,8 @@ class EngineKey(str, Enum):
     K8S = "k8s"
     # Read-only Web/TLS tool provider (Security Tool Execution Framework — first provider).
     WEB_TLS = "web_tls"
+    # Offline PCAP header/metadata analysis provider (Framework — second, artifact/non-network).
+    PCAP_META = "pcap_meta"
 
 
 # Engines that actively probe a live target and therefore REQUIRE an authorization record

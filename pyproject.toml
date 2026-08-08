@@ -81,6 +81,8 @@ tls = "guardian_scanner.discovery.protocols.tls_probe:TlsProbe"
 # provider is read-only Web/TLS: it observes an authorized host, it never crawls/fuzzes/exploits.
 [project.entry-points."guardian.tool_providers"]
 web_tls = "guardian_scanner.tools.providers.web_tls_provider:WebTlsProvider"
+# Offline PCAP header/metadata analysis — untrusted-artifact branch, no network, stdlib-only parser.
+pcap_meta = "guardian_scanner.tools.providers.pcap_provider:PcapMetaProvider"
 
 [tool.setuptools.packages.find]
 # Monorepo: one installable distribution discovering packages from every src root.

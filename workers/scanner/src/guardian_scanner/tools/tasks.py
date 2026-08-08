@@ -16,6 +16,7 @@ destructive tools before a job is dispatched.
 
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import uuid
 
@@ -31,13 +32,17 @@ from guardian_core.tool import (
     job_to_wire,
 )
 from guardian_db.audit import record_audit
-from guardian_db.models import Authorization, Customer, Scan, ScanEngineRun
+from guardian_db.models import Asset, Authorization, Customer, Scan, ScanEngineRun
 from guardian_db.session import session_scope
 from sqlalchemy import select
 
 from guardian_scanner.celery_app import celery_app
 
 log = get_logger("guardian.tools")
+
+# Inline artifact transport cap (Provider #2). A raw artifact above this is rejected fail-closed,
+# BEFORE any execution — the artifact travels inline in the ToolJob (no object storage, no table).
+_ARTIFACT_MAX_BYTES = 2 * 1024 * 1024
 
 
 def _enforce_tool_plane(*, expect_tool: bool) -> None:
@@ -191,3 +196,137 @@ def _bind_and_derive_findings(session, tenant_id, tool_key, evidences):  # noqa:
             count += 1
         bound.append((str(asset.customer_id), count))
     return bound
+
+
+# ── Provider #2: artifact analysis (asset-anchored, non-network). Reuses the same rail. ──
+def _authorized_asset(session, tenant_id, asset_id, now):  # noqa: ANN001, ANN202
+    """The asset IFF it exists, is owned by this tenant, and carries a valid authorization.
+
+    The asset is the authorization ANCHOR — it is never treated as a network target, and the
+    execution plane it feeds holds no DB/KMS/network. Returns None (⇒ denied) on any miss.
+    """
+    asset = session.get(Asset, asset_id)
+    if asset is None or asset.tenant_id != tenant_id:
+        return None
+    authz = session.execute(
+        select(Authorization).where(
+            Authorization.tenant_id == tenant_id,
+            Authorization.asset_id == asset_id,
+            Authorization.revoked_at.is_(None),
+            Authorization.valid_from <= now, Authorization.valid_until >= now,
+        ).limit(1)
+    ).scalar_one_or_none()
+    return asset if authz is not None else None
+
+
+def _derive_artifact_findings(session, tenant_id, tool_key, asset_id, evidences):  # noqa: ANN001, ANN202
+    """Evidence-first: derive findings bound to the ANCHORED asset only. No findings ⇒ no Scan.
+
+    Reuses Scan/ScanEngineRun(engine=tool_key) + normalize → to_finding. Evidence is already
+    persisted independently, so a benign artifact yields evidence with zero findings.
+    """
+    from guardian_scanner.normalize import to_finding
+    from guardian_scanner.tools import registry
+
+    provider = registry.tool_for(tool_key)
+    asset = session.get(Asset, asset_id)
+    if provider is None or asset is None:
+        return 0
+    raws = [r for r in (provider.normalize(e) for e in evidences) if r is not None]
+    if not raws:
+        return 0  # Evidence persisted; nothing to derive — no empty Scan (Evidence-first)
+
+    customer = session.get(Customer, asset.customer_id)
+    criticality = customer.criticality if customer is not None else "medium"
+    scan = Scan(tenant_id=tenant_id, customer_id=asset.customer_id, asset_id=asset.id,
+                trigger="tool", status="completed", requested_engines=[tool_key])
+    session.add(scan)
+    session.flush()
+    run = ScanEngineRun(scan_id=scan.id, engine=tool_key[:30], status="completed",
+                        tool_versions={tool_key: provider.version})
+    session.add(run)
+    session.flush()
+    for raw in raws:
+        session.add(to_finding(
+            raw, tenant_id=tenant_id, customer_id=asset.customer_id, scan_id=scan.id,
+            engine_run_id=run.id, asset_id=asset.id, exposure=asset.exposure,
+            asset_criticality=criticality, business_impact=criticality,
+        ))
+    return len(raws)
+
+
+@celery_app.task(name="guardian.dispatch_artifact_job", bind=True)
+def dispatch_artifact_job(  # noqa: ANN001, PLR0911, PLR0913
+    self, tenant_id: str, tool_key: str, asset_id: str, artifact_b64: str,
+    media_type: str | None = None, settings: dict | None = None, policy: dict | None = None,
+) -> dict:
+    """TRUSTED Control Plane for artifact analysis (Provider #2).
+
+    Asset-anchored authorization → artifact-analysis scope → policy → DB-less sandboxed parse (no
+    network) → Evidence-first persist (artifact sha256 is the chain root) → findings bound to the
+    anchored asset → 6E graph. The artifact travels inline (≤2 MB); an oversized or undecodable
+    blob is rejected fail-closed BEFORE anything runs.
+    """
+    _enforce_tool_plane(expect_tool=False)
+    from guardian_scanner.tools import registry
+    from guardian_scanner.tools.evidence import persist_evidence_chain
+
+    caps = registry.capabilities_for(tool_key)
+    if caps is None:
+        return {"status": "unknown_tool", "tool": tool_key}
+
+    # Fail-closed transport bound, before any execution: reject an undecodable/empty/oversized blob.
+    try:
+        raw_len = len(base64.b64decode(artifact_b64 or "", validate=True))
+    except (ValueError, TypeError):
+        return {"status": "rejected", "tool": tool_key, "reason": "invalid_encoding"}
+    if raw_len == 0:
+        return {"status": "rejected", "tool": tool_key, "reason": "empty_artifact"}
+    if raw_len > _ARTIFACT_MAX_BYTES:
+        return {"status": "rejected", "tool": tool_key,
+                "reason": "artifact_exceeds_2mb", "size": raw_len}
+
+    tid = uuid.UUID(tenant_id)
+    aid = uuid.UUID(asset_id)
+    now = dt.datetime.now(dt.UTC)
+
+    # Asset-anchored gate: the asset is the anchor placed into scope (never a network target).
+    with session_scope() as session:
+        asset = _authorized_asset(session, tid, aid, now)
+        anchored = [str(asset.id)] if asset is not None else []
+        scope = derive_effective_scope(anchored, anchored, caps, policy)
+        decision = evaluate_tool_policy(caps, scope, human_approved=False)
+        record_audit(
+            session, action="tool.artifact.decision", tenant_id=tid, entity_type="tool_job",
+            entity_id=tool_key,
+            metadata={"allowed": decision.allowed and asset is not None, "asset_id": asset_id,
+                      "reasons": list(decision.reasons), "authorized_asset": asset is not None},
+        )
+        if asset is None or not decision.allowed:
+            reasons = list(decision.reasons) or ["asset not found, not owned, or not authorized"]
+            return {"status": "denied", "tool": tool_key, "reasons": reasons}
+        customer_id = str(asset.customer_id)
+
+    job_settings = dict(settings or {})
+    job_settings.update({"artifact_b64": artifact_b64, "media_type": media_type})
+    job = ToolJob(tenant_id=tenant_id, job_id=uuid.uuid4().hex, tool_key=tool_key,
+                  scope=scope, settings=job_settings)
+
+    # Execution plane (no DB, no network) → RawEvidence via result-return.
+    wire = run_tool.apply_async(args=[job_to_wire(job)], queue="tools").get(
+        timeout=300, disable_sync_subtasks=False
+    )
+    evidences = [evidence_from_wire(w) for w in wire or []]
+
+    # Evidence-first: persist the hash chain (artifact sha256 is its root), THEN derive findings.
+    with session_scope() as session:
+        ids = persist_evidence_chain(session, tenant_id=tid, evidences=evidences)
+        n_findings = _derive_artifact_findings(session, tid, tool_key, aid, evidences)
+
+    if n_findings:  # graph integration only when a finding was actually derived (6E)
+        from guardian_scanner.discovery.tasks import enrich_graph
+        enrich_graph.apply_async(args=[str(tid), customer_id])
+
+    log.info("artifact_job_done", tool=tool_key, evidence=len(ids), findings=n_findings)
+    return {"status": "completed", "tool": tool_key, "job_id": job.job_id,
+            "evidence": len(ids), "asset_id": asset_id, "findings": n_findings}

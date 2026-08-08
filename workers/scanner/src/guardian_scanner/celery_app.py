@@ -40,6 +40,7 @@ celery_app.conf.update(
         # Tool framework: the DB-less execution step runs on the isolated `tools` plane; the trusted
         # dispatcher (authorize/scope/policy/persist) stays on `default`.
         "guardian.dispatch_tool_job": {"queue": "default"},
+        "guardian.dispatch_artifact_job": {"queue": "default"},
         "guardian.run_tool": {"queue": "tools"},
     },
 )
