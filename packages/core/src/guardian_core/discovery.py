@@ -60,3 +60,43 @@ class DiscoveredAsset:
     def __post_init__(self) -> None:
         self.confidence = max(0, min(100, int(self.confidence)))
         self.ownership_confidence = max(0, min(100, int(self.ownership_confidence)))
+
+
+# ── result-return wire format (Phase 6C.4) ──
+# The recon execution plane (no DB) returns evidence as plain JSON-able dicts; the trusted
+# persistence plane rebuilds `DiscoveredAsset`s and ingests them. Enums cross the boundary as their
+# string values; no behaviour changes — the same assets, just serialized between planes.
+def asset_to_wire(a: DiscoveredAsset) -> dict[str, Any]:
+    """Serialize a `DiscoveredAsset` (and its edges) to a plain dict for cross-plane transport."""
+    return {
+        "node_type": a.node_type.value,
+        "canonical_key": a.canonical_key,
+        "source": a.source.value,
+        "confidence": a.confidence,
+        "ownership_confidence": a.ownership_confidence,
+        "attributes": a.attributes,
+        "edges": [
+            {"relation": e.relation.value, "dst_type": e.dst_type.value,
+             "dst_key": e.dst_key, "confidence": e.confidence}
+            for e in a.edges
+        ],
+    }
+
+
+def asset_from_wire(d: dict[str, Any]) -> DiscoveredAsset:
+    """Rebuild a `DiscoveredAsset` from its wire dict (inverse of `asset_to_wire`)."""
+    return DiscoveredAsset(
+        node_type=NodeType(d["node_type"]),
+        canonical_key=d["canonical_key"],
+        source=DiscoverySource(d["source"]),
+        confidence=d.get("confidence", 100),
+        ownership_confidence=d.get("ownership_confidence", 0),
+        attributes=dict(d.get("attributes") or {}),
+        edges=[
+            DiscoveredEdge(
+                relation=EdgeRelation(e["relation"]), dst_type=NodeType(e["dst_type"]),
+                dst_key=e["dst_key"], confidence=e.get("confidence", 100),
+            )
+            for e in (d.get("edges") or [])
+        ],
+    )

@@ -27,5 +27,7 @@ def enqueue_analysis(scan_id: str) -> None:
 
 
 def enqueue_discovery(run_id: str) -> None:
-    # Routed to the dedicated `recon` queue so discovery/active-recon work is isolated from scans.
-    _client().send_task("guardian.run_discovery", args=[run_id], queue="recon")
+    # The trusted orchestrator runs on `default` (it authorizes + persists in the DB plane); it then
+    # dispatches only the DB-less probing step to the isolated `recon` plane (6C.4). Routing is by
+    # task name via task_routes, so the API stays a pure publisher (ADR-003).
+    _client().send_task("guardian.run_discovery", args=[run_id])

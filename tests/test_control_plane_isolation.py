@@ -36,5 +36,6 @@ def test_publisher_dispatches_discovery_by_task_name():
 
     src = inspect.getsource(publisher.enqueue_discovery)
     assert 'send_task("guardian.run_discovery"' in src  # by NAME, not an imported task object
-    assert 'queue="recon"' in src                        # routed to the isolated recon plane
+    # 6C.4: the orchestrator is routed to the trusted `default` plane via task_routes (not forced to
+    # recon here) — the recon isolation is enforced by the recon_collect split, not by this call.
     assert "guardian_scanner" not in inspect.getsource(publisher)  # no worker import anywhere

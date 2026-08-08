@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # internal/authorized scanning; turn on before scanning external/untrusted targets at scale.
     sandbox_engines: bool = False
 
+    # Recon execution plane marker (6C.4). True ONLY on the isolated recon worker, which holds no DB
+    # credentials and runs `recon_collect` (probing). The DB-bound orchestrator `run_discovery` runs
+    # where this is False. Each task refuses to run on the wrong plane, so a misroute fails loudly.
+    recon_plane: bool = False
+
     # DevSecOps: GitHub webhook HMAC secret (empty = webhook endpoint rejects all deliveries).
     github_webhook_secret: str = ""
 

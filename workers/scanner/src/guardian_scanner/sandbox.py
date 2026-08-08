@@ -59,6 +59,7 @@ class SandboxPolicy:
     memory_mb: int = 2048          # RLIMIT_AS — total virtual address space (counts mapped libs)
     fsize_mb: int = 256            # RLIMIT_FSIZE — largest file the child may write
     open_files: int = 256          # RLIMIT_NOFILE
+    max_processes: int = 64        # RLIMIT_NPROC — caps fork() in the child (fork-bomb containment)
     allow_network: bool = False    # INET socket creation permitted inside the child
 
 
@@ -162,6 +163,29 @@ def _install_egress_allowlist(allowed_hosts: frozenset[str]) -> None:
     socket.create_connection = _guarded  # type: ignore[assignment]
 
 
+def _close_inherited_fds(keep: set[int]) -> None:
+    """Close file descriptors inherited from the parent (except `keep`) inside the forked child.
+
+    A fork copies the parent's descriptor table, so the child would otherwise inherit the parent's
+    open sockets — including a Postgres/Redis connection. RLIMIT_NOFILE only caps *new* descriptors,
+    and the egress guard only covers `create_connection`, so neither stops a probe from reusing an
+    inherited DB connection. Closing them here (6C.4) makes an inherited connection unusable in the
+    child; closing the child's own copy never affects the parent's descriptor.
+    """
+    try:
+        max_fd = os.sysconf("SC_OPEN_MAX")
+    except (ValueError, OSError, AttributeError):
+        max_fd = 4096
+    max_fd = min(max_fd, 65536)  # bound the scan; the real table is tiny
+    for fd in range(3, max_fd):
+        if fd in keep:
+            continue
+        try:
+            os.close(fd)
+        except OSError:
+            pass  # not open — nothing to close
+
+
 def _apply_limits(policy: SandboxPolicy) -> None:
     """Apply OS resource limits + the wall-clock alarm inside the child. Best-effort per limit."""
     def _set(res: int, soft: int, hard: int | None = None) -> None:
@@ -174,6 +198,11 @@ def _apply_limits(policy: SandboxPolicy) -> None:
     _set(resource.RLIMIT_AS, policy.memory_mb * _MB)
     _set(resource.RLIMIT_FSIZE, policy.fsize_mb * _MB)
     _set(resource.RLIMIT_NOFILE, policy.open_files)
+    if hasattr(resource, "RLIMIT_NPROC"):
+        # Cap process creation so a fork-bomb in the child cannot exhaust the host. Per-uid and not
+        # enforced for privileged (root) processes — the container `pids_limit` is the production
+        # backstop (6C.4); this is the in-process layer.
+        _set(resource.RLIMIT_NPROC, policy.max_processes)
     _set(resource.RLIMIT_CORE, 0)  # no core dumps (may contain secrets from memory)
 
     # Wall-clock deadline: SIGALRM's default action terminates the process.
@@ -194,6 +223,9 @@ def run_in_sandbox(func: Callable[[], Any], policy: SandboxPolicy) -> Any:
         exit_code = 0
         try:
             os.close(read_fd)
+            # Neutralize inherited descriptors (e.g. the parent's DB/cache sockets) before running
+            # untrusted work — keep only stdio and the result pipe (6C.4).
+            _close_inherited_fds(keep={0, 1, 2, write_fd})
             if not policy.allow_network:
                 _install_egress_guard()
             else:

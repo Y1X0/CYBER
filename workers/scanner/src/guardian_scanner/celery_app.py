@@ -29,7 +29,11 @@ celery_app.conf.update(
     task_soft_time_limit=1500,
     worker_max_tasks_per_child=50,
     result_expires=3600,
-    # Isolate active/passive discovery on its own queue (`recon`), separate from scan/analysis work
-    # on `default`. This is the first step toward a dedicated recon execution plane (6C.3).
-    task_routes={"guardian.run_discovery": {"queue": "recon"}},
+    # Execution-plane split (6C.4). The DB-bound orchestrator (`run_discovery`: authorize + persist)
+    # runs on `default`; only the DB-less probing step (`recon_collect`) runs on the `recon` plane.
+    # Keeping them on separate queues is what lets the recon worker hold no DB credentials.
+    task_routes={
+        "guardian.run_discovery": {"queue": "default"},
+        "guardian.recon_collect": {"queue": "recon"},
+    },
 )
