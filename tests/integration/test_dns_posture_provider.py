@@ -30,7 +30,7 @@ _CLEAN = {"spf": "v=spf1 -all", "dmarc": "v=DMARC1; p=reject", "caa": ["0 issue 
 
 
 def _tenant():
-    from guardian_db.models import Authorization, Customer, Tenant, User
+    from guardian_db.models import Authorization, Customer, Tenant, TenantMembership, User
     from guardian_db.session import session_scope
     m = uuid.uuid4().hex[:8]
     now = dt.datetime.now(dt.UTC)
@@ -44,6 +44,7 @@ def _tenant():
         u = User(email=f"dp-{m}@x.com", name="U", password_hash="x", status="active")
         db.add(u)
         db.flush()
+        db.add(TenantMembership(user_id=u.id, tenant_id=t.id, role="pentester"))
         db.add(Authorization(
             tenant_id=t.id, customer_id=c.id, asset_id=None, scope="s",
             authorized_targets=[{"type": "domain", "value": "app.example.com"}],
@@ -85,10 +86,19 @@ def _scans(tid):
         return db.query(Scan).filter(Scan.tenant_id == uuid.UUID(tid)).all()
 
 
+def _staff_actor(tid):
+    from guardian_db.models import TenantMembership
+    from guardian_db.session import session_scope
+    with session_scope() as db:
+        m = db.query(TenantMembership).filter(
+            TenantMembership.tenant_id == uuid.UUID(tid)).first()
+        return str(m.user_id)
+
+
 def _dispatch(tid, domain, snapshot):
     from guardian_scanner.tools.tasks import dispatch_tool_job
     return dispatch_tool_job.apply(
-        args=[tid, "dns_posture", [domain], False, {"snapshot": snapshot}]
+        args=[tid, "dns_posture", [domain], _staff_actor(tid), False, {"snapshot": snapshot}]
     ).get()
 
 

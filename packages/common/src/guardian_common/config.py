@@ -48,6 +48,11 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:5173"
 
+    # Platform Owner principals (Phase A capability governance): a comma-separated allowlist of
+    # user ids with platform-level authority, distinct from any per-tenant "owner" membership role.
+    # Empty in dev. Platform owners are still subject to authorization, scope, policy, and audit.
+    platform_owner_ids: str = ""
+
     # Worker sandboxing (5A). When true, untrusted-input engines run in a resource-limited,
     # egress-restricted child process. Off by default so the in-process path stays simple for
     # internal/authorized scanning; turn on before scanning external/untrusted targets at scale.

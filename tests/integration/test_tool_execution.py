@@ -50,7 +50,7 @@ def _install_echo(monkeypatch, caps=None):
 
 
 def _tenant_with_authz(targets):
-    from guardian_db.models import Authorization, Customer, Tenant, User
+    from guardian_db.models import Authorization, Customer, Tenant, TenantMembership, User
     from guardian_db.session import session_scope
     m = uuid.uuid4().hex[:8]
     now = dt.datetime.now(dt.UTC)
@@ -64,6 +64,7 @@ def _tenant_with_authz(targets):
         u = User(email=f"tf-{m}@x.com", name="U", password_hash="x", status="active")
         db.add(u)
         db.flush()
+        db.add(TenantMembership(user_id=u.id, tenant_id=t.id, role="pentester"))
         if targets:
             db.add(Authorization(
                 tenant_id=t.id, customer_id=c.id, asset_id=None, scope="s",
@@ -72,6 +73,15 @@ def _tenant_with_authz(targets):
                 valid_from=now - dt.timedelta(hours=1), valid_until=now + dt.timedelta(hours=1),
             ))
         return str(t.id)
+
+
+def _actor(tid):
+    from guardian_db.models import TenantMembership
+    from guardian_db.session import session_scope
+    with session_scope() as db:
+        m = db.query(TenantMembership).filter(
+            TenantMembership.tenant_id == uuid.UUID(tid)).first()
+        return str(m.user_id)
 
 
 def _evidence_rows(tid):
@@ -88,7 +98,7 @@ def test_pipeline_authorized_tool_persists_hash_chained_evidence(monkeypatch):
 
     _install_echo(monkeypatch)
     tid = _tenant_with_authz(["example.com"])
-    res = dispatch_tool_job.apply(args=[tid, "echo", ["example.com"]]).get()
+    res = dispatch_tool_job.apply(args=[tid, "echo", ["example.com"], _actor(tid)]).get()
     assert res["status"] == "completed" and res["evidence"] == 1
 
     rows = _evidence_rows(tid)
@@ -103,7 +113,8 @@ def test_pipeline_denies_target_outside_authorization(monkeypatch):
     from guardian_scanner.tools.tasks import dispatch_tool_job
     _install_echo(monkeypatch)
     tid = _tenant_with_authz(["example.com"])
-    res = dispatch_tool_job.apply(args=[tid, "echo", ["evil.com"]]).get()   # not authorized
+    res = dispatch_tool_job.apply(
+        args=[tid, "echo", ["evil.com"], _actor(tid)]).get()   # authorized identity, bad target
     assert res["status"] == "denied"
     assert _evidence_rows(tid) == []                                        # nothing ran/persisted
 
@@ -114,11 +125,13 @@ def test_pipeline_requires_human_approval_for_active_tool(monkeypatch):
         category="net", network=True, active=True, requires_human_approval=True))
     tid = _tenant_with_authz(["example.com"])
 
-    denied = dispatch_tool_job.apply(args=[tid, "echo", ["example.com"], False]).get()
+    denied = dispatch_tool_job.apply(
+        args=[tid, "echo", ["example.com"], _actor(tid), False]).get()
     assert denied["status"] == "denied" and denied["requires_human_approval"] is True
     assert _evidence_rows(tid) == []
 
-    ok = dispatch_tool_job.apply(args=[tid, "echo", ["example.com"], True]).get()  # approved
+    ok = dispatch_tool_job.apply(
+        args=[tid, "echo", ["example.com"], _actor(tid), True]).get()  # approved
     assert ok["status"] == "completed"
 
 
@@ -130,8 +143,8 @@ def test_evidence_is_tenant_isolated(monkeypatch):
     _install_echo(monkeypatch)
     a = _tenant_with_authz(["example.com"])
     b = _tenant_with_authz(["example.com"])
-    dispatch_tool_job.apply(args=[a, "echo", ["example.com"]]).get()
-    dispatch_tool_job.apply(args=[b, "echo", ["example.com"]]).get()
+    dispatch_tool_job.apply(args=[a, "echo", ["example.com"], _actor(a)]).get()
+    dispatch_tool_job.apply(args=[b, "echo", ["example.com"], _actor(b)]).get()
 
     s = get_app_session()
     try:

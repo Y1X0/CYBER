@@ -30,7 +30,7 @@ _EXPIRED_TLS = {"tls": {"port": 443, "tls_version": "TLSv1.2", "subject": {"comm
 
 
 def _tenant():
-    from guardian_db.models import Authorization, Customer, Tenant, User
+    from guardian_db.models import Authorization, Customer, Tenant, TenantMembership, User
     from guardian_db.session import session_scope
     m = uuid.uuid4().hex[:8]
     with session_scope() as db:
@@ -43,6 +43,7 @@ def _tenant():
         u = User(email=f"wt-{m}@x.com", name="U", password_hash="x", status="active")
         db.add(u)
         db.flush()
+        db.add(TenantMembership(user_id=u.id, tenant_id=t.id, role="pentester"))
         db.add(Authorization(
             tenant_id=t.id, customer_id=c.id, asset_id=None, scope="s",
             authorized_targets=[{"type": "domain", "value": "app.example.com"}],
@@ -90,11 +91,20 @@ def _findings(tid):
         return db.query(Finding).filter(Finding.tenant_id == uuid.UUID(tid)).all()
 
 
+def _staff_actor(tid):
+    from guardian_db.models import TenantMembership
+    from guardian_db.session import session_scope
+    with session_scope() as db:
+        m = db.query(TenantMembership).filter(
+            TenantMembership.tenant_id == uuid.UUID(tid)).first()
+        return str(m.user_id)
+
+
 def _dispatch(tid, targets, *, approved=True, snapshot=None):
     from guardian_scanner.tools.tasks import dispatch_tool_job
     settings = {"snapshot": snapshot or {}}
     return dispatch_tool_job.apply(
-        args=[tid, "web_tls", targets, approved, settings]
+        args=[tid, "web_tls", targets, _staff_actor(tid), approved, settings]
     ).get()
 
 

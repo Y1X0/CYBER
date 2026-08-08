@@ -54,7 +54,7 @@ def _b64(raw):
 
 
 def _tenant():
-    from guardian_db.models import Customer, Tenant, User
+    from guardian_db.models import Customer, Tenant, TenantMembership, User
     from guardian_db.session import session_scope
     m = uuid.uuid4().hex[:8]
     with session_scope() as db:
@@ -66,6 +66,8 @@ def _tenant():
         db.flush()
         u = User(email=f"pc-{m}@x.com", name="U", password_hash="x", status="active")
         db.add(u)
+        db.flush()
+        db.add(TenantMembership(user_id=u.id, tenant_id=t.id, role="pentester"))
         db.flush()
         return str(t.id), str(c.id), str(u.id)
 
@@ -115,9 +117,19 @@ def _assets(tid):
         return db.query(Asset).filter(Asset.tenant_id == uuid.UUID(tid)).all()
 
 
+def _staff_actor(tid):
+    from guardian_db.models import TenantMembership
+    from guardian_db.session import session_scope
+    with session_scope() as db:
+        m = db.query(TenantMembership).filter(
+            TenantMembership.tenant_id == uuid.UUID(tid)).first()
+        return str(m.user_id)
+
+
 def _dispatch(tid, aid, raw):
     from guardian_scanner.tools.tasks import dispatch_artifact_job
-    return dispatch_artifact_job.apply(args=[tid, "pcap_meta", aid, _b64(raw)]).get()
+    return dispatch_artifact_job.apply(
+        args=[tid, "pcap_meta", aid, _b64(raw), _staff_actor(tid)]).get()
 
 
 def test_full_pipeline_evidence_binding_finding_and_graph():
@@ -193,7 +205,8 @@ def test_oversized_artifact_rejected_before_execution():
     _authorize_asset(tid, cid, uid, aid)
     big = b"\xd4\xc3\xb2\xa1" + b"\x00" * (2 * 1024 * 1024 + 1)  # > 2 MB
     from guardian_scanner.tools.tasks import dispatch_artifact_job
-    res = dispatch_artifact_job.apply(args=[tid, "pcap_meta", aid, _b64(big)]).get()
+    res = dispatch_artifact_job.apply(
+        args=[tid, "pcap_meta", aid, _b64(big), _staff_actor(tid)]).get()
     assert res["status"] == "rejected" and res["reason"] == "artifact_exceeds_2mb"
     assert _evidence_rows(tid) == []                             # fail-closed, nothing ran
 

@@ -58,5 +58,6 @@ The nine foundational decisions (ADR-001 … ADR-009) that anchor the initial bu
 | [017](0017-web-tls-read-only-provider.md) | Provider #1: read-only Web/TLS tool (Evidence-first, exact canonical-host asset binding, reuses Scan/ScanEngineRun/to_finding/enrich_graph) |
 | [018](0018-pcap-artifact-analysis-provider.md) | Provider #2: offline PCAP/artifact analysis (asset-anchored, non-network, stdlib-only parser, fail-closed, inline-bounded ≤2 MB) |
 | [019](0019-dns-posture-and-provider-semantics.md) | Provider #3: offline DNS/email-security posture (absence-as-evidence) + unified Provider semantic contract + Tool Catalog schema + `verify_chain` prev_hash fix |
+| [021](0021-capability-governance-phase-a.md) | Capability Governance (Phase A): identity-gated tool execution — capability levels L0–L5 derived from primitives, role ceilings, platform owner, service-account scopes, actor in audit; no migration |
 
-New ADRs start at **ADR-020**.
+New ADRs start at **ADR-022** (ADR-020 reserved for the Nmap provider Discovery).

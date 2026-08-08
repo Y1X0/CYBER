@@ -37,6 +37,7 @@ from guardian_db.session import session_scope
 from sqlalchemy import select
 
 from guardian_scanner.celery_app import celery_app
+from guardian_scanner.tools.governance import evaluate_governance
 
 log = get_logger("guardian.tools")
 
@@ -93,10 +94,10 @@ def _authorized_target_values(session, tenant_id: uuid.UUID, now: dt.datetime) -
 
 @celery_app.task(name="guardian.dispatch_tool_job", bind=True)
 def dispatch_tool_job(  # noqa: ANN001, PLR0913
-    self, tenant_id: str, tool_key: str, requested_targets: list[str],
+    self, tenant_id: str, tool_key: str, requested_targets: list[str], actor_id: str | None = None,
     human_approved: bool = False, settings: dict | None = None, policy: dict | None = None,
 ) -> dict:
-    """TRUSTED Control Plane: authorize → scope → policy → dispatch → persist evidence chain."""
+    """TRUSTED Control Plane: identity → authorize → scope → policy → dispatch → persist."""
     _enforce_tool_plane(expect_tool=False)
     from guardian_scanner.tools import registry
     from guardian_scanner.tools.evidence import persist_evidence_chain
@@ -108,14 +109,25 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
     tid = uuid.UUID(tenant_id)
     now = dt.datetime.now(dt.UTC)
 
-    # Control Plane derives scope (never wider than authorization) and runs the deterministic gate.
+    # Control Plane: WHO may run this? (governance) then WHAT may it touch? (authz/scope).
     with session_scope() as session:
+        gov = evaluate_governance(session, tenant_id=tid, actor_id=actor_id, caps=caps)
+        record_audit(
+            session, action="tool.capability.decision", tenant_id=tid, actor_id=gov.actor_uuid,
+            entity_type="tool_job", entity_id=tool_key,
+            metadata={"allowed": gov.allowed, "principal": gov.principal_kind,
+                      "level": gov.required_level, "reasons": list(gov.reasons)},
+        )
+        if not gov.allowed:
+            return {"status": "forbidden", "tool": tool_key, "principal": gov.principal_kind,
+                    "level": gov.required_level, "reasons": list(gov.reasons)}
+
         authorized = _authorized_target_values(session, tid, now)
         scope = derive_effective_scope(requested_targets or [], authorized, caps, policy)
         decision = evaluate_tool_policy(caps, scope, human_approved=human_approved)
         record_audit(
-            session, action="tool.job.decision", tenant_id=tid, entity_type="tool_job",
-            entity_id=tool_key,
+            session, action="tool.job.decision", tenant_id=tid, actor_id=gov.actor_uuid,
+            entity_type="tool_job", entity_id=tool_key,
             metadata={"allowed": decision.allowed,
                       "requires_approval": decision.requires_human_approval,
                       "reasons": list(decision.reasons), "targets": list(scope.targets)},
@@ -314,14 +326,15 @@ def _derive_artifact_findings(session, tenant_id, tool_key, asset_id, evidences)
 @celery_app.task(name="guardian.dispatch_artifact_job", bind=True)
 def dispatch_artifact_job(  # noqa: ANN001, PLR0911, PLR0913
     self, tenant_id: str, tool_key: str, asset_id: str, artifact_b64: str,
+    actor_id: str | None = None,
     media_type: str | None = None, settings: dict | None = None, policy: dict | None = None,
 ) -> dict:
     """TRUSTED Control Plane for artifact analysis (Provider #2).
 
-    Asset-anchored authorization → artifact-analysis scope → policy → DB-less sandboxed parse (no
-    network) → Evidence-first persist (artifact sha256 is the chain root) → findings bound to the
-    anchored asset → 6E graph. The artifact travels inline (≤2 MB); an oversized or undecodable
-    blob is rejected fail-closed BEFORE anything runs.
+    Identity/capability governance → asset-anchored authorization → artifact-analysis scope → policy
+    → DB-less sandboxed parse (no network) → Evidence-first persist (artifact sha256 is the chain
+    root) → findings bound to the anchored asset → 6E graph. The artifact travels inline (≤2 MB); an
+    oversized or undecodable blob is rejected fail-closed BEFORE anything runs.
     """
     _enforce_tool_plane(expect_tool=False)
     from guardian_scanner.tools import registry
@@ -330,6 +343,21 @@ def dispatch_artifact_job(  # noqa: ANN001, PLR0911, PLR0913
     caps = registry.capabilities_for(tool_key)
     if caps is None:
         return {"status": "unknown_tool", "tool": tool_key}
+
+    tid = uuid.UUID(tenant_id)
+
+    # Capability governance FIRST: who is asking, and may they run this capability level here?
+    with session_scope() as session:
+        gov = evaluate_governance(session, tenant_id=tid, actor_id=actor_id, caps=caps)
+        record_audit(
+            session, action="tool.capability.decision", tenant_id=tid, actor_id=gov.actor_uuid,
+            entity_type="tool_job", entity_id=tool_key,
+            metadata={"allowed": gov.allowed, "principal": gov.principal_kind,
+                      "level": gov.required_level, "reasons": list(gov.reasons)},
+        )
+        if not gov.allowed:
+            return {"status": "forbidden", "tool": tool_key, "principal": gov.principal_kind,
+                    "level": gov.required_level, "reasons": list(gov.reasons)}
 
     # Fail-closed transport bound, before any execution: reject an undecodable/empty/oversized blob.
     try:
@@ -342,7 +370,6 @@ def dispatch_artifact_job(  # noqa: ANN001, PLR0911, PLR0913
         return {"status": "rejected", "tool": tool_key,
                 "reason": "artifact_exceeds_2mb", "size": raw_len}
 
-    tid = uuid.UUID(tenant_id)
     aid = uuid.UUID(asset_id)
     now = dt.datetime.now(dt.UTC)
 
@@ -353,8 +380,8 @@ def dispatch_artifact_job(  # noqa: ANN001, PLR0911, PLR0913
         scope = derive_effective_scope(anchored, anchored, caps, policy)
         decision = evaluate_tool_policy(caps, scope, human_approved=False)
         record_audit(
-            session, action="tool.artifact.decision", tenant_id=tid, entity_type="tool_job",
-            entity_id=tool_key,
+            session, action="tool.artifact.decision", tenant_id=tid, actor_id=gov.actor_uuid,
+            entity_type="tool_job", entity_id=tool_key,
             metadata={"allowed": decision.allowed and asset is not None, "asset_id": asset_id,
                       "reasons": list(decision.reasons), "authorized_asset": asset is not None},
         )
