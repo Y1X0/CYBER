@@ -69,6 +69,12 @@ ct = "guardian_scanner.discovery.providers.ct_provider:CtLogProvider"
 # Active (Phase 6C) — authorization-gated; the only active provider, deliberately limited to 80/443.
 service_scan = "guardian_scanner.discovery.providers.service_scan_provider:ServiceScanProvider"
 
+# Protocol probes (Phase 6C.2) — one low-impact identification plugin per protocol. Only http/tls
+# (80/443) now; new protocols register here later without touching the orchestrator or core.
+[project.entry-points."guardian.protocol_probes"]
+http = "guardian_scanner.discovery.protocols.http_probe:HttpProbe"
+tls = "guardian_scanner.discovery.protocols.tls_probe:TlsProbe"
+
 [tool.setuptools.packages.find]
 # Monorepo: one installable distribution discovering packages from every src root.
 where = [

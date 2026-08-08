@@ -28,6 +28,7 @@ from guardian_core.evidence import Evidence, EvidenceKind, code_evidence, depend
 from guardian_core.exposure import ExposureAssessment, ExposureInputs, assess_exposure
 from guardian_core.findings import RawFinding
 from guardian_core.policy import DEFAULT_RULES, GateResult, evaluate_gate
+from guardian_core.probe import ProbeEvidence
 from guardian_core.scoring import RiskAssessment, ScoreInputs, assess, score_severity
 
 __all__ = [
@@ -49,6 +50,7 @@ __all__ = [
     "GateResult",
     "NodeType",
     "PortalRole",
+    "ProbeEvidence",
     "RawFinding",
     "RiskAssessment",
     "ScanStatus",

@@ -13,6 +13,7 @@ if TYPE_CHECKING:  # avoid a runtime guardian_common -> guardian_core coupling; 
     from collections.abc import Iterable
 
     from guardian_core.discovery import DiscoveredAsset, DiscoveryContext
+    from guardian_core.probe import ProbeEvidence
 
 
 # ── SOAR: outbound notifications (Slack/PagerDuty/email...) — Phase 7 ──
@@ -112,6 +113,23 @@ class NullDiscoveryProvider:
 
     def collect(self, ctx: DiscoveryContext) -> Iterable[DiscoveredAsset]:  # noqa: ARG002
         return []
+
+
+# ── Protocol probes — one low-impact service-identification plugin per protocol (Phase 6C.2) ──
+@runtime_checkable
+class ProtocolProbe(Protocol):
+    """Talks to ONE protocol on an authorized target and returns evidence. Ignorant of the graph.
+
+    `probe` reads a snapshot when offline (deterministic CI) and runs live network work inside the
+    worker sandbox otherwise. It NEVER exploits or sends payloads — identification/fingerprinting
+    only, and only for a target the authorization gate already cleared (orchestrator-enforced)."""
+
+    key: str
+    ports: tuple[int, ...]
+
+    def probe(
+        self, host: str, port: int, *, timeout: int, allow_live: bool, snapshot: dict | None
+    ) -> ProbeEvidence | None: ...
 
 
 # ── Enterprise identity (SAML/OIDC/SCIM) — Phase 9 ──

@@ -115,16 +115,21 @@ def test_authorized_target_is_scanned():
 
 
 def test_unauthorized_target_blocked_before_any_network(monkeypatch):
-    """The core guarantee: an unauthorized target never opens a socket, and the denial is audited."""
-    import guardian_scanner.discovery.providers.service_scan_provider as ssp
+    """The core guarantee: an unauthorized target never opens a socket, and the denial is audited.
+
+    6C.2 note: the live network now runs via the protocol probes' sandbox call, so the tripwire moved
+    to `sandbox.run_in_sandbox` — if the gate leaked, ANY live probe attempt raises here and fails
+    the test. Stricter than before; same guarantee.
+    """
+    from guardian_scanner import sandbox
     from guardian_scanner.discovery.tasks import run_discovery
 
-    def _boom(host, port):  # noqa: ANN001, ANN202 - must never be called for a blocked target
-        raise AssertionError(f"NETWORK CALLED for unauthorized {host}:{port}")
+    def _boom(*_a, **_k):  # must never be reached for a blocked target
+        raise AssertionError("NETWORK ATTEMPTED for an unauthorized target")
 
-    monkeypatch.setattr(ssp, "_probe_live", _boom)
+    monkeypatch.setattr(sandbox, "run_in_sandbox", _boom)
 
-    # allow_live=True so that IF the gate leaked, the provider WOULD call _probe_live and blow up.
+    # allow_live=True so that IF the gate leaked, a probe WOULD hit the sandbox and blow up.
     tid, run_id = _setup(targets_auth=[{"type": "ip", "value": _IP}],
                          active_targets=["10.0.0.5"], allow_live=True)  # 10.0.0.5 not authorized
     result = run_discovery.apply(args=[run_id]).get()  # must NOT raise
@@ -246,14 +251,18 @@ def test_service_nodes_isolated_across_tenants():
 
 
 def test_sandbox_timeout_is_contained(monkeypatch):
-    """A probe that breaches the sandbox limits yields no result and never crashes the run."""
-    import guardian_scanner.discovery.providers.service_scan_provider as ssp
+    """A probe that breaches the sandbox limits yields no result and never crashes the run.
+
+    6C.2 note: sandbox-containment moved from the provider's private `_probe_one` into the protocol
+    probe. The BEHAVIOR is unchanged (violation → None); only the call site moved, so the assertion
+    now targets the probe directly.
+    """
     from guardian_scanner import sandbox
+    from guardian_scanner.discovery.protocols.tls_probe import TlsProbe
 
     def _raise(*_a, **_k):
         raise sandbox.SandboxViolation("bounded out")
 
     monkeypatch.setattr(sandbox, "run_in_sandbox", _raise)
-    provider = ssp.ServiceScanProvider()
     # allow_live with no snapshot → goes through the sandbox path, which raises → contained as None.
-    assert provider._probe_one(_IP, 443, {}, allow_live=True) is None
+    assert TlsProbe().probe(_IP, 443, timeout=1, allow_live=True, snapshot=None) is None
