@@ -113,6 +113,36 @@ class ScanOut(BaseModel):
     created_at: dt.datetime
 
 
+# ── Discovery (Phase 6C.1 operationalization) ──
+class DiscoveryRunCreate(BaseModel):
+    customer_id: uuid.UUID
+    # Passive seeds (domains/hosts) and/or active_targets — active ones are only ever probed if a
+    # valid authorization covers them; this DTO never grants authorization by itself.
+    seeds: dict = Field(default_factory=dict)
+    providers: list[str] = Field(default_factory=list)  # empty → default passive (dns, ct)
+    trigger: str = Field(default="manual", pattern="^(manual|schedule|api)$")
+
+    @field_validator("seeds")
+    @classmethod
+    def _bound_seeds(cls, v: dict) -> dict:
+        import json
+
+        if len(json.dumps(v)) > 262_144:  # 256 KiB cap, same posture as asset config
+            raise ValueError("seeds exceed maximum size (256 KiB)")
+        return v
+
+
+class DiscoveryRunOut(BaseModel):
+    id: uuid.UUID
+    customer_id: uuid.UUID | None
+    status: str
+    trigger: str
+    stats: dict
+    started_at: dt.datetime | None
+    finished_at: dt.datetime | None
+    created_at: dt.datetime
+
+
 # ── Findings ──
 class FindingOut(BaseModel):
     id: uuid.UUID

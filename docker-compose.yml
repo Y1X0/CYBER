@@ -71,7 +71,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: celery -A guardian_scanner.celery_app.celery_app worker --loglevel=info --concurrency=4
+    # Consumes both queues for now; a dedicated recon worker with egress isolation lands in 6C.3.
+    command: celery -A guardian_scanner.celery_app.celery_app worker --loglevel=info --concurrency=4 -Q default,recon
 
 volumes:
   pgdata:

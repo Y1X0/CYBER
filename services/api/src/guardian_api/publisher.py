@@ -24,3 +24,8 @@ def enqueue_scan(scan_id: str) -> None:
 
 def enqueue_analysis(scan_id: str) -> None:
     _client().send_task("guardian.analyze_scan", args=[scan_id])
+
+
+def enqueue_discovery(run_id: str) -> None:
+    # Routed to the dedicated `recon` queue so discovery/active-recon work is isolated from scans.
+    _client().send_task("guardian.run_discovery", args=[run_id], queue="recon")
