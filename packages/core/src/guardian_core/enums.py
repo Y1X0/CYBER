@@ -79,10 +79,11 @@ class EdgeRelation(str, Enum):
     RESOLVES_TO = "resolves_to"
     HOSTS = "hosts"
     ROUTES_TO = "routes_to"
-    EXPOSES = "exposes"        # service -> finding
-    ENABLES = "enables"        # finding -> exposure/blast-radius
+    EXPOSES = "exposes"        # asset -> finding (evidence: findings.asset_id) — produced in 6E
+    ENABLES = "enables"        # finding -> exposure/blast-radius (future seam; NOT produced yet)
     CONTAINS = "contains"      # netblock -> ip_address
     TRUSTS = "trusts"
+    SERVES = "serves"          # subdomain/service -> asset (deterministic host-identity link, 6E)
 
 
 class AssetState(str, Enum):

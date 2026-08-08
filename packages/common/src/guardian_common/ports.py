@@ -66,6 +66,11 @@ class GraphProjector(Protocol):
         self, *, tenant_id: str, max_depth: int = 6, limit: int = 100
     ) -> dict: ...
 
+    # Every real attack path (entry → finding, over reachability + serves + exposes) — 6E.
+    def attack_paths(
+        self, *, tenant_id: str, max_depth: int = 6, limit: int = 100
+    ) -> dict: ...
+
     # Deterministic blast radius of one node (affected/sensitive counts, paths-through, weighted).
     def blast_radius(
         self, *, tenant_id: str, node_type: str, node_id: str, max_depth: int = 6
@@ -86,6 +91,9 @@ class NullGraphProjector:
         return []
 
     def exposure_paths(self, *, tenant_id, max_depth=6, limit=100):  # noqa: ANN001, ANN201
+        return {"paths": [], "truncated": False}
+
+    def attack_paths(self, *, tenant_id, max_depth=6, limit=100):  # noqa: ANN001, ANN201
         return {"paths": [], "truncated": False}
 
     def blast_radius(self, *, tenant_id, node_type, node_id, max_depth=6):  # noqa: ANN001, ANN201

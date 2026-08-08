@@ -66,6 +66,26 @@ def _enforce_plane(*, expect_recon: bool) -> None:
         )
 
 
+@celery_app.task(name="guardian.enrich_graph")
+def enrich_graph(tenant_id: str, customer_id: str | None = None) -> dict:
+    """Project assets + findings into the graph (Phase 6E). Trusted plane, DB-only, idempotent.
+
+    Runs after a scan completes; creates/refreshes asset+finding nodes and exposes/serves edges. No
+    network, no recon, no AI — a re-run updates in place (dedupe on identity).
+    """
+    _enforce_plane(expect_recon=False)
+    from guardian_scanner.discovery.enricher import GraphEnricher
+
+    with session_scope() as session:
+        enricher = GraphEnricher(
+            session, tenant_id=uuid.UUID(tenant_id),
+            customer_id=uuid.UUID(customer_id) if customer_id else None,
+        )
+        stats = enricher.enrich()
+        log.info("graph_enriched", tenant_id=tenant_id, **stats)
+        return {"tenant_id": tenant_id, "status": "completed", "stats": stats}
+
+
 @celery_app.task(name="guardian.recon_collect")
 def recon_collect(payload: dict) -> list[dict]:
     """RECON PLANE (no DB): run providers/probes over already-authorized targets, return evidence.

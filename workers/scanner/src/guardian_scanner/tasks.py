@@ -238,4 +238,13 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
             entity_id=str(scan.id),
             metadata={"status": scan.status, "stats": scan.stats},
         )
-        return {"scan_id": scan_id, "status": scan.status, "stats": scan.stats}
+        result = {"scan_id": scan_id, "status": scan.status, "stats": scan.stats}
+        _tenant, _customer, _status = str(scan.tenant_id), str(scan.customer_id), scan.status
+
+    # After the scan commits, project its findings into the attack graph (Phase 6E) on the trusted
+    # plane. Fire-and-forget + idempotent; never blocks the scan and never runs on the recon worker.
+    if _status in (ScanStatus.COMPLETED.value, ScanStatus.PARTIAL.value):
+        from guardian_scanner.discovery.tasks import enrich_graph
+
+        enrich_graph.apply_async(args=[_tenant, _customer])
+    return result

@@ -158,6 +158,64 @@ def test_chokepoint_cuts_eighty_percent():
         assert "X" in p.node_ids
 
 
+# ── attack paths (6E): internet → ... → serves → exposes → finding ──
+def _attack_graph():
+    nodes = [
+        _n("sub", node_type="subdomain", key="a.example.com", internet=True),
+        _n("ip", node_type="ip_address", key="1.2.3.4"),
+        _n("svc", node_type="service", key="1.2.3.4:443"),
+        _n("ast", node_type="asset", key="asset-1"),
+        _n("find", node_type="finding", key="finding-1"),
+    ]
+    edges = [
+        _e("sub", "ip", "resolves_to"), _e("ip", "svc", "hosts"),
+        _e("svc", "ast", "serves"), _e("ast", "find", "exposes"),
+    ]
+    return nodes, edges
+
+
+def test_attack_path_internet_to_finding():
+    nodes, edges = _attack_graph()
+    res = ag.attack_paths(nodes, edges)
+    assert [p.node_ids for p in res.paths] == [("sub", "ip", "svc", "ast", "find")]
+
+
+def test_attack_paths_do_not_use_enables():
+    nodes, edges = _attack_graph()
+    edges = [e for e in edges if e.relation != "exposes"]  # drop the only edge into the finding
+    edges.append(_e("ast", "find", "enables"))             # enables must NOT be traversed
+    assert ag.attack_paths(nodes, edges).paths == ()       # no path — enables is not an attack hop
+
+
+def test_attack_paths_empty_without_finding_node():
+    nodes, edges = _attack_graph()
+    nodes = [n for n in nodes if n.node_type != "finding"]
+    assert ag.attack_paths(nodes, edges).paths == ()
+
+
+def test_exposure_paths_unchanged_by_serves_exposes_nodes():
+    """Adding asset/finding nodes + serves/exposes edges must NOT change exposure_paths (6D)."""
+    topo = [
+        _n("sub", node_type="subdomain", key="a.example.com", internet=True),
+        _n("ip", node_type="ip_address", key="1.2.3.4"),
+        _n("svc", node_type="service", key="1.2.3.4:443", exposure=70),
+    ]
+    topo_edges = [_e("sub", "ip", "resolves_to"), _e("ip", "svc", "hosts")]
+    before = [p.node_ids for p in ag.exposure_paths(topo, topo_edges).paths]
+
+    enriched = topo + [_n("ast", node_type="asset", key="asset-1"),
+                       _n("find", node_type="finding", key="finding-1")]
+    enriched_edges = topo_edges + [_e("svc", "ast", "serves"), _e("ast", "find", "exposes")]
+    after = [p.node_ids for p in ag.exposure_paths(enriched, enriched_edges).paths]
+    assert before == after == [("sub", "ip", "svc")]
+
+
+def test_attack_paths_respect_max_depth():
+    nodes, edges = _attack_graph()
+    # the finding is 4 hops deep; max_depth=2 cannot reach it
+    assert ag.attack_paths(nodes, edges, ag.Limits(max_depth=2)).paths == ()
+
+
 # ── drift classification (only real emitted event types) ──
 def test_classify_drift_maps_real_events_only():
     events = [

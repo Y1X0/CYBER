@@ -137,6 +137,16 @@ class DbGraphProjector:
         return {"paths": [self._path(p, by_id) for p in res.paths],
                 "truncated": res.truncated or truncated}
 
+    def attack_paths(self, *, tenant_id: str, max_depth: int = 6, limit: int = 100) -> dict:
+        """Real attack paths (6E): entry → finding, over reachability + serves + exposes."""
+        nodes, edges, truncated = self._load(tenant_id)
+        by_id = {n.id: n for n in nodes}
+        res = ag.attack_paths(
+            nodes, edges, ag.Limits(max_depth=max_depth, max_paths=limit, max_nodes=self._max_nodes)
+        )
+        return {"paths": [self._path(p, by_id) for p in res.paths],
+                "truncated": res.truncated or truncated}
+
     def blast_radius(
         self, *, tenant_id: str, node_type: str, node_id: str, max_depth: int = 6
     ) -> dict:

@@ -50,6 +50,24 @@ def get_exposure_paths(
     return ExposurePathsOut.model_validate(out)
 
 
+@router.get("/attack-paths", response_model=ExposurePathsOut)
+def get_attack_paths(
+    identity: Identity = Depends(_staff),
+    db: Session = Depends(get_db),
+    max_depth: int = Query(default=6, ge=1, le=6),
+    limit: int = Query(default=100, ge=1, le=100),
+) -> ExposurePathsOut:
+    """Real attack paths (6E): internet → ... → service → serves → asset → exposes → finding.
+
+    Distinct from /exposure-paths (unchanged): a path ends at a real finding and exists only
+    where the data's edges do — no `enables`, no invented hops.
+    """
+    out = DbGraphProjector(db).attack_paths(
+        tenant_id=str(identity.tenant_id), max_depth=max_depth, limit=limit
+    )
+    return ExposurePathsOut.model_validate(out)
+
+
 @router.get("/chokepoints", response_model=ChokepointsOut)
 def get_chokepoints(
     identity: Identity = Depends(_staff),

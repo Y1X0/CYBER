@@ -27,6 +27,11 @@ from dataclasses import dataclass, field
 # relation (a subdomain belongs to a domain), NOT a reachability hop, so it is excluded.
 REACHABILITY_RELATIONS: frozenset[str] = frozenset({"resolves_to", "hosts"})
 
+# The relations that form an ATTACK path (6E): reachability, then `serves` (topology → asset)
+# and `exposes` (asset → finding). This is DISTINCT from exposure paths and never touches `enables`
+# (not produced) so a real "internet → vulnerability" path is only the edges the data actually has.
+ATTACK_RELATIONS: frozenset[str] = frozenset({"resolves_to", "hosts", "serves", "exposes"})
+
 DEFAULT_MAX_DEPTH = 6
 DEFAULT_MAX_PATHS = 100
 DEFAULT_MAX_NODES = 10_000
@@ -148,12 +153,19 @@ def _index(nodes: list[NodeView]) -> dict[str, NodeView]:
     return {n.id: n for n in nodes}
 
 
-def build_adjacency(nodes: list[NodeView], edges: list[EdgeView]) -> dict[str, list[str]]:
-    """Forward adjacency over reachability edges only; deterministic, de-duplicated."""
+def build_adjacency(
+    nodes: list[NodeView], edges: list[EdgeView],
+    relations: frozenset[str] = REACHABILITY_RELATIONS,
+) -> dict[str, list[str]]:
+    """Forward adjacency over the given relation set; deterministic, de-duplicated.
+
+    Defaults to reachability relations so exposure-path/blast/chokepoint behaviour is unchanged;
+    attack-path analysis passes ATTACK_RELATIONS.
+    """
     by_id = _index(nodes)
     adj: dict[str, list[str]] = {n.id: [] for n in nodes}
     for e in edges:
-        if e.relation in REACHABILITY_RELATIONS and e.src_id in by_id and e.dst_id in by_id:
+        if e.relation in relations and e.src_id in by_id and e.dst_id in by_id:
             adj[e.src_id].append(e.dst_id)
     for k, neighbours in adj.items():
         adj[k] = sorted(set(neighbours), key=lambda i: by_id[i].sort_key())
@@ -167,6 +179,11 @@ def entry_ids(nodes: list[NodeView]) -> list[str]:
 
 def sensitive_ids(nodes: list[NodeView]) -> list[str]:
     return [n.id for n in sorted(nodes, key=lambda n: n.sort_key()) if is_sensitive(n)]
+
+
+def finding_ids(nodes: list[NodeView]) -> list[str]:
+    """`finding` nodes — the endpoints of an attack path (a real vulnerability, 6E)."""
+    return [n.id for n in sorted(nodes, key=lambda n: n.sort_key()) if n.node_type == "finding"]
 
 
 def _mk_path(path: tuple[str, ...], by_id: dict[str, NodeView]) -> Path:
@@ -226,6 +243,18 @@ def exposure_paths(
     by_id = _index(nodes)
     adj = build_adjacency(nodes, edges)
     return _enumerate(adj, by_id, entry_ids(nodes), set(sensitive_ids(nodes)), limits)
+
+
+def attack_paths(
+    nodes: list[NodeView], edges: list[EdgeView], limits: Limits | None = None
+) -> PathResult:
+    """Every real attack path (6E): an internet-facing entry → a `finding`, over ATTACK_RELATIONS
+    only (reachability + `serves` + `exposes`). Distinct from `exposure_paths`, which is unchanged;
+    this never uses `enables` (not produced), so a path exists only where the data's edges do."""
+    limits = limits or Limits()
+    by_id = _index(nodes)
+    adj = build_adjacency(nodes, edges, ATTACK_RELATIONS)
+    return _enumerate(adj, by_id, entry_ids(nodes), set(finding_ids(nodes)), limits)
 
 
 def paths_to(
