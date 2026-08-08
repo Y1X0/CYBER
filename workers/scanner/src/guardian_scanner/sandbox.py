@@ -27,6 +27,7 @@ test path is unaffected. The primitive itself is tested directly.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import pickle
 import resource
@@ -85,6 +86,43 @@ def _install_egress_guard() -> None:
     socket.create_connection = _blocked  # type: ignore[assignment]
 
 
+def _is_internal_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """True for addresses a recon probe must never reach: RFC1918/ULA private, loopback, link-local
+    (which includes the cloud metadata endpoint 169.254.169.254), reserved, multicast, unspecified.
+    """
+    return (
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+    )
+
+
+def _resolve_public_address(host: str, port: int) -> str:
+    """Resolve `host` and return one validated public IP, or raise if it maps to an internal one.
+
+    SSRF / DNS-rebinding guard (Phase 6C.3.1): the egress allowlist authorizes a *hostname*, but a
+    hostname can resolve — or be rebinded — to a private/loopback/link-local/reserved/metadata
+    address that C1's network isolation does not IP-filter. We resolve here and fail closed if ANY
+    resolved address is internal (which defeats a multi-record rebind), then return the validated IP
+    so the caller can pin the connection to it and the real connector cannot re-resolve to a
+    different address (TOCTOU-safe).
+    """
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    public: str | None = None
+    for *_meta, sockaddr in infos:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip.version == 6 and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped  # an IPv4-mapped IPv6 literal is judged by its embedded IPv4 value
+        if _is_internal_ip(ip):
+            raise PermissionError(
+                f"egress to {host!r} denied: resolves to internal address {ip}"
+            )
+        if public is None:
+            public = sockaddr[0]
+    if public is None:
+        raise PermissionError(f"egress to {host!r} denied: no resolvable address")
+    return public
+
+
 def _install_egress_allowlist(allowed_hosts: frozenset[str]) -> None:
     """Permit outbound connections only to `allowed_hosts` (the Phase-6C.3 recon egress allowlist).
 
@@ -93,6 +131,11 @@ def _install_egress_allowlist(allowed_hosts: frozenset[str]) -> None:
     any other destination (an unauthorized target, or an internal service like the DB/cache/metadata
     endpoint) raises PermissionError and is contained by the sandbox as a violation. A connection is
     allowed only for a host the allowlist explicitly lists; an empty allowlist denies everything.
+
+    A hostname on the allowlist is additionally resolved and blocked if it maps to an internal
+    address, then pinned to the validated public IP (SSRF / DNS-rebinding guard, 6C.3.1). An IP that
+    is *itself* on the allowlist is honored as-is — a deliberately authorized internal target is a
+    valid choice the operator made explicitly.
 
     (Raw-socket egress that bypasses `create_connection` is the same residual gap already disclosed
     for the Python-level egress guard, closed by the per-run container/seccomp backend this seam is
@@ -106,6 +149,14 @@ def _install_egress_allowlist(allowed_hosts: frozenset[str]) -> None:
             raise PermissionError(
                 f"egress to {host!r} denied: host is not in the recon allowlist"
             )
+        try:
+            ipaddress.ip_address(host)  # an explicitly authorized IP literal is honored as-is
+        except ValueError:
+            # A hostname: resolve, block internal resolutions, and pin to the validated IP so the
+            # real connector cannot re-resolve to a rebinded address.
+            port = address[1] if isinstance(address, (tuple, list)) and len(address) > 1 else 0
+            safe_ip = _resolve_public_address(host, port)
+            address = (safe_ip, *tuple(address[1:]))
         return real_create_connection(address, *args, **kwargs)
 
     socket.create_connection = _guarded  # type: ignore[assignment]

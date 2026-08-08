@@ -101,3 +101,27 @@ RLS, provenance, deterministic scoring, exposure scoring, `node_events`, or AI. 
 - **Dynamic per-run egress derived from discovered assets.** Today the allowlist is derived from the
   run's authorized targets; a future version derives it from the resolved discovered nodes.
 - **Link active targets to 6B discovered nodes** instead of manual `active_targets` seeds.
+
+## Update — 6C.3.1: SSRF / DNS-rebinding micro-fix (applied)
+
+A read-only security review of this plane found an active gap the original decision did not cover:
+the egress allowlist authorized a *hostname* and checked it *before* DNS resolution, so an authorized
+domain could resolve — or be rebinded — to a private/loopback/link-local/reserved/metadata address
+that C1's network isolation does not IP-filter (C1 gates service reachability by name, not egress by
+IP). Impact was bounded (the current probes send no request, so this was internal-service enumeration
+/ TLS-cert disclosure, not credential theft), but SSRF is foundational for a security product, so it
+was closed before 6D.
+
+The fix lives entirely inside the `create_connection` egress guard (`_resolve_public_address` in
+`guardian_scanner.sandbox`): a listed *hostname* is resolved, the connection is rejected if **any**
+resolved address is internal (defeating a multi-record rebind), and the connection is then **pinned**
+to the validated public IP so the real connector cannot re-resolve to a different address
+(TOCTOU-safe). An IP literal that is itself on the allowlist is honored as-is — a deliberately
+authorized internal target is a valid operator choice. No change to the authorization gate,
+`ProtocolProbe`/`ProbeEvidence`, the probes, RLS, provenance, scoring/exposure, the sandbox fork/limit
+architecture, the Docker topology, or the Celery queues; no migration.
+
+Still deferred (unchanged): raw-socket/native-code egress that bypasses `create_connection` (closed
+by the per-probe container/seccomp backend), `RLIMIT_NPROC`/`pids_limit`, hard-binding
+`run_discovery` to the recon worker, the ContextVar allowlist for non-prefork pools, and 6C.4
+result-return.

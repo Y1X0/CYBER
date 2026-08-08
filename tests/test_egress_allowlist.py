@@ -51,6 +51,84 @@ def test_empty_allowlist_denies_everything(monkeypatch):
         socket.create_connection(("93.184.216.34", 443))
 
 
+# ── SSRF / DNS-rebinding guard (6C.3.1): a listed hostname that resolves to an internal IP ─────────
+def _install_with_resolver(monkeypatch, allowlist_hosts, resolved_ip):
+    """Install the guard with a stubbed connector + resolver, returning the connection call log.
+
+    The stub resolver makes the (authorized) hostname resolve to `resolved_ip`, so the test controls
+    DNS deterministically and no real network is touched.
+    """
+    connected: list = []
+
+    def fake_create_connection(address, *a, **k):
+        connected.append(address)
+        return "SOCK"
+
+    def fake_getaddrinfo(host, port, *a, **k):
+        fam = socket.AF_INET6 if ":" in resolved_ip else socket.AF_INET
+        return [(fam, socket.SOCK_STREAM, 6, "", (resolved_ip, port or 0))]
+
+    monkeypatch.setattr(socket, "create_connection", fake_create_connection)
+    monkeypatch.setattr(socket, "getaddrinfo", fake_getaddrinfo)
+    sandbox._install_egress_allowlist(frozenset(allowlist_hosts))
+    return connected
+
+
+def test_authorized_domain_resolving_to_private_ip_is_blocked(monkeypatch):
+    """THE 6C.3.1 proof: an authorized hostname that resolves to a private IP is blocked, and the
+    real connection is NEVER attempted."""
+    connected = _install_with_resolver(monkeypatch, {"evil.example.com"}, "10.0.0.7")
+    with pytest.raises(PermissionError, match="internal address"):
+        socket.create_connection(("evil.example.com", 443))
+    assert connected == []  # fail-closed BEFORE any socket to the internal address
+
+
+def test_authorized_domain_resolving_to_metadata_endpoint_is_blocked(monkeypatch):
+    """The cloud metadata endpoint (link-local) is rejected even for an authorized hostname."""
+    connected = _install_with_resolver(monkeypatch, {"cloud.example.com"}, "169.254.169.254")
+    with pytest.raises(PermissionError, match="internal address"):
+        socket.create_connection(("cloud.example.com", 80))
+    assert connected == []
+
+
+def test_authorized_domain_resolving_to_loopback_is_blocked(monkeypatch):
+    connected = _install_with_resolver(monkeypatch, {"local.example.com"}, "127.0.0.1")
+    with pytest.raises(PermissionError, match="internal address"):
+        socket.create_connection(("local.example.com", 8000))
+    assert connected == []
+
+
+def test_ipv4_mapped_ipv6_internal_is_blocked(monkeypatch):
+    """An IPv4-mapped IPv6 resolution to an internal address cannot slip past the guard."""
+    connected = _install_with_resolver(monkeypatch, {"mapped.example.com"}, "::ffff:169.254.169.254")
+    with pytest.raises(PermissionError, match="internal address"):
+        socket.create_connection(("mapped.example.com", 80))
+    assert connected == []
+
+
+def test_public_authorized_domain_is_allowed_and_pinned(monkeypatch):
+    """A public authorized hostname still works — and is pinned to the validated IP (TOCTOU-safe)."""
+    connected = _install_with_resolver(monkeypatch, {"example.com"}, "93.184.216.34")
+    assert socket.create_connection(("example.com", 443)) == "SOCK"
+    assert connected == [("93.184.216.34", 443)]  # connected to the validated IP, not the hostname
+
+
+def test_explicitly_authorized_internal_ip_is_allowed(monkeypatch):
+    """An IP literal that is itself on the allowlist is honored as-is — a deliberate operator choice,
+    not a rebind — so it is never resolved nor blocked."""
+    connected: list = []
+    monkeypatch.setattr(socket, "create_connection",
+                        lambda address, *a, **k: connected.append(address) or "SOCK")
+
+    def _boom(*_a, **_k):  # resolution must NOT happen for an IP literal
+        raise AssertionError("an authorized IP literal must not be resolved")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _boom)
+    sandbox._install_egress_allowlist(frozenset({"10.0.0.9"}))
+    assert socket.create_connection(("10.0.0.9", 22)) == "SOCK"
+    assert connected == [("10.0.0.9", 22)]
+
+
 # ── end-to-end enforcement inside the real forked sandbox ────────────────────────────────────────
 @fork_only
 def test_unauthorized_egress_blocked_in_sandbox():
