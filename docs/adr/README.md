@@ -57,5 +57,6 @@ The nine foundational decisions (ADR-001 … ADR-009) that anchor the initial bu
 | [016](0016-tool-execution-framework.md) | Security Tool Execution Framework (Phase 1): governed rail (ToolProvider, EffectiveScope, policy gate, DB-less tool plane, evidence hash-chain) — no tools |
 | [017](0017-web-tls-read-only-provider.md) | Provider #1: read-only Web/TLS tool (Evidence-first, exact canonical-host asset binding, reuses Scan/ScanEngineRun/to_finding/enrich_graph) |
 | [018](0018-pcap-artifact-analysis-provider.md) | Provider #2: offline PCAP/artifact analysis (asset-anchored, non-network, stdlib-only parser, fail-closed, inline-bounded ≤2 MB) |
+| [019](0019-dns-posture-and-provider-semantics.md) | Provider #3: offline DNS/email-security posture (absence-as-evidence) + unified Provider semantic contract + Tool Catalog schema + `verify_chain` prev_hash fix |
 
-New ADRs start at **ADR-019**.
+New ADRs start at **ADR-020**.

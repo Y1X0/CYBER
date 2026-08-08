@@ -84,16 +84,38 @@ def persist_evidence_chain(
 
 
 def verify_chain(session: Session, tenant_id: uuid.UUID) -> bool:
-    """Recompute the tenant's chain and confirm every link — tamper detection for tests/audit."""
+    """Recompute the tenant's chain and confirm every link — tamper detection for tests/audit.
+
+    The chain is self-describing: order is reconstructed by following ``prev_hash`` (the genesis
+    link has ``prev_hash IS NULL``; each successor is the item whose ``prev_hash`` equals the
+    current ``content_sha256``), NOT by ``created_at``/``id``. Items persisted in one transaction
+    share a ``now()`` timestamp, so timestamp ordering is ambiguous and tiebreaks on the random
+    UUID — this walks the links instead. A missing/duplicate genesis link, a fork, a break in the
+    middle, or a tampered item all fail closed.
+    """
     rows = list(session.execute(
-        select(EvidenceItem)
-        .where(EvidenceItem.tenant_id == tenant_id)
-        .order_by(EvidenceItem.created_at.asc(), EvidenceItem.id.asc())
+        select(EvidenceItem).where(EvidenceItem.tenant_id == tenant_id)
     ).scalars())
+    if not rows:
+        return True
+
+    by_prev: dict[str | None, list[EvidenceItem]] = {}
+    for r in rows:
+        by_prev.setdefault(r.prev_hash, []).append(r)
+
+    seen = 0
     prev: str | None = None
-    for item in rows:
-        expected = _hash(prev or "", json.dumps(item.detail, sort_keys=True, separators=(",", ":")))
-        if item.prev_hash != prev or item.content_sha256 != expected:
+    nexts = by_prev.get(None, [])            # the single genesis link (prev_hash IS NULL)
+    while nexts:
+        if len(nexts) != 1:
+            return False                     # missing or forked link ⇒ tampered/ambiguous chain
+        item = nexts[0]
+        canonical = json.dumps(item.detail, sort_keys=True, separators=(",", ":"))
+        if item.prev_hash != prev or item.content_sha256 != _hash(prev or "", canonical):
             return False
+        seen += 1
+        if seen > len(rows):
+            return False                     # absolute loop bound (defensive)
         prev = item.content_sha256
-    return True
+        nexts = by_prev.get(prev, [])
+    return seen == len(rows)                  # every item must belong to the single verified chain

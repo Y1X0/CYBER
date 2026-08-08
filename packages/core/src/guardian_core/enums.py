@@ -38,6 +38,8 @@ class EngineKey(str, Enum):
     WEB_TLS = "web_tls"
     # Offline PCAP header/metadata analysis provider (Framework — second, artifact/non-network).
     PCAP_META = "pcap_meta"
+    # Offline DNS / email-security posture provider (Framework — third, absence-as-evidence).
+    DNS_POSTURE = "dns_posture"
 
 
 # Engines that actively probe a live target and therefore REQUIRE an authorization record

@@ -44,6 +44,11 @@ log = get_logger("guardian.tools")
 # BEFORE any execution — the artifact travels inline in the ToolJob (no object storage, no table).
 _ARTIFACT_MAX_BYTES = 2 * 1024 * 1024
 
+# Tools whose host-binding honors the ADR-0019 semantic contract strictly: a Scan/ScanEngineRun is
+# created ONLY when a finding is actually derived (evidence-only otherwise). web_tls predates the
+# contract and keeps its eager binder; reconciling it is deferred technical debt (ADR-0019).
+_STRICT_BINDERS = frozenset({"dns_posture"})
+
 
 def _enforce_tool_plane(*, expect_tool: bool) -> None:
     """Pin a task to its plane; a misroute fails loudly. Skipped under eager (tests)."""
@@ -130,9 +135,13 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
 
     # Evidence-first: persist the hash chain (primary truth), THEN derive findings only where the
     # evidence binds to exactly one asset. Evidence-only when there is no asset or more than one.
+    # The semantic contract (ADR-0019) — a Scan/Finding is created ONLY when a finding is derived —
+    # is honored by the strict binder; web_tls keeps its existing binder (reconciliation deferred).
+    binder = (_bind_and_derive_findings_strict if tool_key in _STRICT_BINDERS
+              else _bind_and_derive_findings)
     with session_scope() as session:
         ids = persist_evidence_chain(session, tenant_id=tid, evidences=evidences)
-        bound = _bind_and_derive_findings(session, tid, tool_key, evidences)
+        bound = binder(session, tid, tool_key, evidences)
 
     # Auto-enrich the graph per bound customer (trusted plane, 6E) — evidence → finding → graph.
     from guardian_scanner.discovery.tasks import enrich_graph
@@ -195,6 +204,53 @@ def _bind_and_derive_findings(session, tenant_id, tool_key, evidences):  # noqa:
             ))
             count += 1
         bound.append((str(asset.customer_id), count))
+    return bound
+
+
+def _bind_and_derive_findings_strict(session, tenant_id, tool_key, evidences):  # noqa: ANN001, ANN202
+    """Host-binding that honors the ADR-0019 contract: a Scan is created ONLY when a finding exists.
+
+    Evidence is persisted independently (the source of truth); a host that binds but yields no
+    weakness produces evidence and NO Scan/Finding (evidence-only). Returns [(customer_id, count)].
+    """
+    from guardian_scanner.normalize import to_finding
+    from guardian_scanner.tools import registry
+    from guardian_scanner.tools.binding import resolve_asset
+
+    provider = registry.tool_for(tool_key)
+    if provider is None:
+        return []
+
+    by_host: dict[str, list] = {}
+    for e in evidences:
+        by_host.setdefault(e.target, []).append(e)
+
+    bound: list[tuple[str, int]] = []
+    for host, host_evidence in sorted(by_host.items()):
+        asset = resolve_asset(session, tenant_id=tenant_id, host=host)
+        if asset is None:
+            continue  # Evidence-only: no asset or ambiguous — never a guessed binding
+        raws = [r for r in (provider.normalize(e) for e in host_evidence) if r is not None]
+        if not raws:
+            continue  # Evidence persisted; nothing derived — no empty Scan (ADR-0019 contract)
+
+        customer = session.get(Customer, asset.customer_id)
+        criticality = customer.criticality if customer is not None else "medium"
+        scan = Scan(tenant_id=tenant_id, customer_id=asset.customer_id, asset_id=asset.id,
+                    trigger="tool", status="completed", requested_engines=[tool_key])
+        session.add(scan)
+        session.flush()
+        run = ScanEngineRun(scan_id=scan.id, engine=tool_key[:30], status="completed",
+                            tool_versions={tool_key: provider.version})
+        session.add(run)
+        session.flush()
+        for raw in raws:
+            session.add(to_finding(
+                raw, tenant_id=tenant_id, customer_id=asset.customer_id, scan_id=scan.id,
+                engine_run_id=run.id, asset_id=asset.id, exposure=asset.exposure,
+                asset_criticality=criticality, business_impact=criticality,
+            ))
+        bound.append((str(asset.customer_id), len(raws)))
     return bound
 
 

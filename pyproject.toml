@@ -83,6 +83,8 @@ tls = "guardian_scanner.discovery.protocols.tls_probe:TlsProbe"
 web_tls = "guardian_scanner.tools.providers.web_tls_provider:WebTlsProvider"
 # Offline PCAP header/metadata analysis — untrusted-artifact branch, no network, stdlib-only parser.
 pcap_meta = "guardian_scanner.tools.providers.pcap_provider:PcapMetaProvider"
+# Offline DNS / email-security posture — posture branch (absence-as-evidence), no network, no deps.
+dns_posture = "guardian_scanner.tools.providers.dns_posture_provider:DnsPostureProvider"
 
 [tool.setuptools.packages.find]
 # Monorepo: one installable distribution discovering packages from every src root.
