@@ -1,4 +1,21 @@
-# Full local stack — `docker compose up` brings up DB, cache, API, and worker (doc 01 §8).
+# Full local stack — `docker compose up` brings up DB, cache, API, and the two workers (doc 01 §8).
+#
+# Recon Execution Plane isolation (Phase 6C.3, ADR-011). This file is the runnable *reference* for
+# the isolation; production maps it to Kubernetes NetworkPolicy + resource limits + egress controls
+# (see docs/architecture/09-recon-execution-plane.md). Two layers of defense in depth:
+#   C1 — Network isolation: the recon worker joins ONLY `recon-data` (db + cache), never `backend`,
+#        so it cannot reach the control-plane API or the default worker; the API is never on
+#        `recon-data`, so the control plane cannot reach the recon plane either. db + cache are the
+#        only shared (necessary) services. Recon and default work run in separate containers, each
+#        consuming a single queue.
+#   C2 — Egress allowlist: enforced in-process at the socket layer (guardian_scanner.egress), so a
+#        recon probe can only reach a host the authorization gate cleared for the run — independent
+#        of C1 and of the gate's own target selection.
+networks:
+  edge:        # user-facing; only the API sits here
+  backend:     # control plane + default work reach db/cache here (recon worker is NOT on it)
+  recon-data:  # the ONLY internal network the recon worker joins: db + cache, nothing else
+
 services:
   db:
     image: postgres:16-alpine
@@ -10,6 +27,7 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks: [backend, recon-data]  # shared necessary service: reachable by both planes
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U guardian -d guardian"]
       interval: 5s
@@ -20,6 +38,7 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    networks: [backend, recon-data]  # shared necessary service (broker + result backend)
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -47,13 +66,17 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
+    # Control plane: on edge + backend only, NEVER on recon-data → structurally cannot reach the
+    # recon worker. It enqueues by task name (send_task), so it never opens an external socket itself.
+    networks: [edge, backend]
     # Migrate + seed, then serve. Dev convenience; production separates these steps.
     command: >
       sh -c "alembic upgrade head &&
              python -m guardian_api.seed &&
              uvicorn guardian_api.main:app --host 0.0.0.0 --port 8000"
 
-  worker:
+  # Default execution plane — scans + analysis on the `default` queue. Reaches db/cache on backend.
+  worker-default:
     build:
       context: .
       dockerfile: infra/docker/Dockerfile
@@ -71,8 +94,38 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    # Consumes both queues for now; a dedicated recon worker with egress isolation lands in 6C.3.
-    command: celery -A guardian_scanner.celery_app.celery_app worker --loglevel=info --concurrency=4 -Q default,recon
+    networks: [backend]
+    # Container-level resource ceiling on top of the per-process rlimits inside the sandbox.
+    mem_limit: 1g
+    cpus: 1.0
+    command: celery -A guardian_scanner.celery_app.celery_app worker --loglevel=info --concurrency=4 -Q default
+
+  # Recon execution plane — active discovery on the `recon` queue, ISOLATED (ADR-011).
+  worker-recon:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+    environment:
+      GUARDIAN_ENV: local
+      # 6C.3 keeps direct DB access via the one necessary path (recon-data); 6C.4 removes it in
+      # favor of a result-return execution plane with no direct DB (deferred debt, ADR-011).
+      GUARDIAN_DATABASE_URL: postgresql+psycopg://guardian:guardian@db:5432/guardian
+      GUARDIAN_REDIS_URL: redis://redis:6379/0
+      GUARDIAN_JWT_SECRET: change-me-dev-only-do-not-use-in-production
+      GUARDIAN_ENCRYPTION_KEY: dev-only-encryption-key-change-me
+      # Active recon runs untrusted network work through the sandbox + egress allowlist.
+      GUARDIAN_SANDBOX_ENGINES: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # ISOLATION (C1): recon-data ONLY. Not on backend → cannot reach the API or the default worker;
+    # reaches db + cache (necessary paths) and the public internet (for authorized probes) only.
+    networks: [recon-data]
+    mem_limit: 1g
+    cpus: 1.0
+    command: celery -A guardian_scanner.celery_app.celery_app worker --loglevel=info --concurrency=2 -Q recon
 
 volumes:
   pgdata:

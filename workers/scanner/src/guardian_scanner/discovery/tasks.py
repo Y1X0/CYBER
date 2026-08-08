@@ -18,6 +18,7 @@ from guardian_common.logging import get_logger
 from guardian_db.models import DiscoveryRun, DiscoveryScope
 from guardian_db.session import session_scope
 
+from guardian_scanner import egress
 from guardian_scanner.celery_app import celery_app
 from guardian_scanner.discovery.authorization import authorize_targets
 from guardian_scanner.discovery.ingestor import DbGraphIngestor, mark_stale_edges
@@ -31,6 +32,15 @@ _DEFAULT_PASSIVE = ["dns", "ct"]
 
 def _now() -> dt.datetime:
     return dt.datetime.now(dt.UTC)
+
+
+def _egress_hosts(allowed_targets: list[str]) -> frozenset[str]:
+    """Hosts a run's probes may reach — derived only from gate-cleared targets, with ports stripped.
+
+    This is what the runtime egress allowlist is bound to, so the socket layer permits exactly the
+    hosts the authorization gate cleared and nothing else.
+    """
+    return frozenset(t.split(":")[0] for t in allowed_targets if t)
 
 
 @celery_app.task(name="guardian.run_discovery", bind=True)
@@ -104,8 +114,12 @@ def run_discovery(self, run_id: str) -> dict:  # noqa: ANN001
                     customer_id=str(run.customer_id) if run.customer_id else None,
                     authorized=True, authorized_targets=allowed, settings=settings,
                 )
-                for raw in provider.collect(active_ctx):
-                    _ingest(raw)
+                # Second defense layer (6C.3): bind the runtime egress allowlist to exactly the
+                # gate-cleared hosts for this active provider. A probe socket to any host outside
+                # the set is denied at the socket layer, independent of the gate above.
+                with egress.allowlist(_egress_hosts(allowed)):
+                    for raw in provider.collect(active_ctx):
+                        _ingest(raw)
             else:
                 for raw in provider.collect(ctx):  # passive: no gate
                     _ingest(raw)

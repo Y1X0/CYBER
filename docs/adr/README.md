@@ -49,5 +49,6 @@ The nine foundational decisions (ADR-001 … ADR-009) that anchor the initial bu
 | ADR | Decision |
 |---|---|
 | [010](0010-phase5-rls-and-foundational-seams.md) | Phase 5: two-role RLS tenant isolation + Tier-1 foundational seams |
+| [011](0011-recon-execution-plane-isolation.md) | Phase 6C.3: Recon execution-plane isolation (network isolation + egress allowlist) |
 
-New ADRs start at **ADR-011**.
+New ADRs start at **ADR-012**.

@@ -85,6 +85,32 @@ def _install_egress_guard() -> None:
     socket.create_connection = _blocked  # type: ignore[assignment]
 
 
+def _install_egress_allowlist(allowed_hosts: frozenset[str]) -> None:
+    """Permit outbound connections only to `allowed_hosts` (the Phase-6C.3 recon egress allowlist).
+
+    Enforced at `socket.create_connection` — the chokepoint the protocol probes use — independently
+    of the authorization gate: the host is re-checked here against the allowlist, so a connection to
+    any other destination (an unauthorized target, or an internal service like the DB/cache/metadata
+    endpoint) raises PermissionError and is contained by the sandbox as a violation. A connection is
+    allowed only for a host the allowlist explicitly lists; an empty allowlist denies everything.
+
+    (Raw-socket egress that bypasses `create_connection` is the same residual gap already disclosed
+    for the Python-level egress guard, closed by the per-run container/seccomp backend this seam is
+    built for — see the module docstring and ADR-011.)
+    """
+    real_create_connection = socket.create_connection
+
+    def _guarded(address, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        host = address[0] if isinstance(address, (tuple, list)) and address else None
+        if host not in allowed_hosts:
+            raise PermissionError(
+                f"egress to {host!r} denied: host is not in the recon allowlist"
+            )
+        return real_create_connection(address, *args, **kwargs)
+
+    socket.create_connection = _guarded  # type: ignore[assignment]
+
+
 def _apply_limits(policy: SandboxPolicy) -> None:
     """Apply OS resource limits + the wall-clock alarm inside the child. Best-effort per limit."""
     def _set(res: int, soft: int, hard: int | None = None) -> None:
@@ -119,6 +145,16 @@ def run_in_sandbox(func: Callable[[], Any], policy: SandboxPolicy) -> Any:
             os.close(read_fd)
             if not policy.allow_network:
                 _install_egress_guard()
+            else:
+                # Network-permitted work (a probe reaching an authorized target): if a recon egress
+                # allowlist is active, enforce it here at the socket layer — a second defense that
+                # does not trust the orchestrator's target selection. No allowlist (None) → the
+                # existing DAST/API behavior (unrestricted egress for network engines) is unchanged.
+                from guardian_scanner import egress
+
+                _recon_allowlist = egress.current_allowlist()
+                if _recon_allowlist is not None:
+                    _install_egress_allowlist(_recon_allowlist)
             with tempfile.TemporaryDirectory(prefix="guardian-sbx-") as scratch:
                 os.chdir(scratch)
                 _apply_limits(policy)  # limits last, so setup isn't charged against them
