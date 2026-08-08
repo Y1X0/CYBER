@@ -53,5 +53,6 @@ The nine foundational decisions (ADR-001 … ADR-009) that anchor the initial bu
 | [012](0012-attack-graph-read-plane.md) | Phase 6D: deterministic, read-only attack-graph analysis plane (exposure paths / blast radius / chokepoints / drift) |
 | [013](0013-recon-result-return.md) | Phase 6C.4: Recon result-return — no DB credentials in the network-facing execution plane + execution hardening |
 | [014](0014-graph-enrichment-attack-paths.md) | Phase 6E: graph enrichment (finding/asset nodes, exposes/serves edges) + read-only attack-path analysis |
+| [015](0015-netblock-world-model.md) | Phase 6F: netblock world-model (authorized-CIDR enrichment + passive ASN/RIR provider, `contains` grouping only) |
 
-New ADRs start at **ADR-015**.
+New ADRs start at **ADR-016**.

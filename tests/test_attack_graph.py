@@ -216,6 +216,23 @@ def test_attack_paths_respect_max_depth():
     assert ag.attack_paths(nodes, edges, ag.Limits(max_depth=2)).paths == ()
 
 
+def test_contains_is_not_a_traversal_hop():
+    """6F: netblock --contains--> ip is grouping only — it must never form an exposure or attack hop,
+    and adding netblock/contains must not change 6D/6E results."""
+    assert "contains" not in ag.REACHABILITY_RELATIONS
+    assert "contains" not in ag.ATTACK_RELATIONS
+
+    nodes, edges = _attack_graph()
+    before_atk = [p.node_ids for p in ag.attack_paths(nodes, edges).paths]
+    before_exp = [p.node_ids for p in ag.exposure_paths(nodes, edges).paths]
+
+    # add a netblock that contains the ip (and even mark it internet-facing to try to bait a path)
+    nodes = nodes + [_n("nb", node_type="netblock", key="1.2.3.0/24", internet=True)]
+    edges = edges + [_e("nb", "ip", "contains")]
+    assert [p.node_ids for p in ag.attack_paths(nodes, edges).paths] == before_atk
+    assert [p.node_ids for p in ag.exposure_paths(nodes, edges).paths] == before_exp
+
+
 # ── drift classification (only real emitted event types) ──
 def test_classify_drift_maps_real_events_only():
     events = [

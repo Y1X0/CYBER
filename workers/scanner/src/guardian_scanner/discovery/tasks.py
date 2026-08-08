@@ -21,8 +21,10 @@ import uuid
 from guardian_common.config import get_settings
 from guardian_common.logging import get_logger
 from guardian_core.discovery import DiscoveryContext, asset_from_wire, asset_to_wire
-from guardian_db.models import DiscoveryRun, DiscoveryScope
+from guardian_core.enums import NodeType
+from guardian_db.models import DiscoveryRun, DiscoveryScope, GraphNode
 from guardian_db.session import session_scope
+from sqlalchemy import select
 
 from guardian_scanner import egress
 from guardian_scanner.celery_app import celery_app
@@ -35,6 +37,7 @@ log = get_logger("guardian.discovery")
 
 _DEFAULT_PASSIVE = ["dns", "ct"]
 _RECON_TIMEOUT = 900  # seconds the orchestrator will wait for the recon plane's evidence
+_MAX_ASN_IPS = 10_000  # bound the IP set handed to the passive ASN/RIR provider (6F-b)
 
 
 def _now() -> dt.datetime:
@@ -169,6 +172,18 @@ def run_discovery(self, run_id: str) -> dict:  # noqa: ANN001
             if denied:
                 log.info("discovery_targets_blocked", count=len(denied), run_id=run_id)
 
+        if "asn" in enabled:
+            # The passive ASN/RIR provider (6F-b) maps DISCOVERED IPs to netblocks. Supply the
+            # from existing ip_address nodes (never raw user seeds); dedup + bound + deterministic.
+            ip_keys = session.execute(
+                select(GraphNode.canonical_key).where(
+                    GraphNode.tenant_id == run.tenant_id,
+                    GraphNode.node_type == NodeType.IP_ADDRESS.value,
+                )
+            ).scalars().all()
+            raw_seeds = {**raw_seeds,
+                         "ips": sorted(set(ip_keys))[:_MAX_ASN_IPS]}
+
         payload = {
             "tenant_id": str(run.tenant_id), "run_id": str(run.id),
             "customer_id": str(run.customer_id) if run.customer_id else None,
@@ -212,6 +227,17 @@ def run_discovery(self, run_id: str) -> dict:  # noqa: ANN001
 
         stale = mark_stale_edges(session, tenant_id=tenant_uuid, run_id=run_uuid)
         ingestor.stats["edges_marked_stale"] = stale
+
+        # 6F-a: enrich the graph with netblocks the operator explicitly authorized, linking each to
+        # the ip_address nodes it contains (CIDR containment). Trusted plane, no network; idempotent
+        # and convergent with the passive ASN/RIR provider (same canonical netblock identity).
+        from guardian_scanner.discovery.netblock import NetblockEnricher
+
+        run_customer = run.customer_id if run is not None else None
+        nb_stats = NetblockEnricher(
+            session, tenant_id=tenant_uuid, customer_id=run_customer
+        ).enrich()
+        ingestor.stats.update(nb_stats)
 
         if run is not None:
             run.stats = ingestor.stats
