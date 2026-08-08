@@ -39,6 +39,9 @@ class DiscoveryContext:
     seeds: dict[str, Any] = field(default_factory=dict)  # domains / orgs / cloud accounts
     customer_id: str | None = None
     authorized: bool = False
+    # The targets an active provider is cleared to probe — pre-filtered by the authorization gate
+    # against a valid, tenant-owned authorization. An active provider MUST touch nothing outside it.
+    authorized_targets: list[str] = field(default_factory=list)
     settings: dict[str, Any] = field(default_factory=dict)
 
 

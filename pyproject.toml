@@ -66,6 +66,8 @@ api = "guardian_scanner.engines.api_engine:ApiEngine"
 [project.entry-points."guardian.discovery_providers"]
 dns = "guardian_scanner.discovery.providers.dns_provider:DnsProvider"
 ct = "guardian_scanner.discovery.providers.ct_provider:CtLogProvider"
+# Active (Phase 6C) — authorization-gated; the only active provider, deliberately limited to 80/443.
+service_scan = "guardian_scanner.discovery.providers.service_scan_provider:ServiceScanProvider"
 
 [tool.setuptools.packages.find]
 # Monorepo: one installable distribution discovering packages from every src root.

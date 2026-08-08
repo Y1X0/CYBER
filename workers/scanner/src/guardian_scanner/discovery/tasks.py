@@ -19,6 +19,7 @@ from guardian_db.models import DiscoveryRun, DiscoveryScope
 from guardian_db.session import session_scope
 
 from guardian_scanner.celery_app import celery_app
+from guardian_scanner.discovery.authorization import authorize_targets
 from guardian_scanner.discovery.ingestor import DbGraphIngestor, mark_stale_edges
 from guardian_scanner.discovery.normalizer import edge_target, normalize
 from guardian_scanner.discovery.registry import available_providers
@@ -67,25 +68,47 @@ def run_discovery(self, run_id: str) -> dict:  # noqa: ANN001
                 node_cache[k] = ingestor.upsert_node(asset)
             return node_cache[k]
 
+        def _ingest(raw) -> None:  # noqa: ANN001 - normalize -> resolve -> link one discovered asset
+            asset = normalize(raw)
+            src_uuid = _resolve(asset)
+            for edge in asset.edges:
+                dst = normalize(edge_target(edge, asset.source))
+                dst_uuid = _resolve(dst)
+                ingestor.link(
+                    src_id=src_uuid, relation=edge.relation.value, dst_id=dst_uuid,
+                    src_type=asset.node_type.value, dst_type=edge.dst_type.value,
+                    source=asset.source.value, confidence=edge.confidence,
+                )
+
         for key in enabled:
             provider = providers.get(key)
             if provider is None:
                 continue
-            # Safe-discovery gate: active providers need an authorized run (deferred to 6C).
-            if provider.requires_authorization and not ctx.authorized:
-                log.info("discovery_provider_skipped_unauthorized", provider=key, run_id=run_id)
-                continue
-            for raw in provider.collect(ctx):
-                asset = normalize(raw)
-                src_uuid = _resolve(asset)
-                for edge in asset.edges:
-                    dst = normalize(edge_target(edge, asset.source))
-                    dst_uuid = _resolve(dst)
-                    ingestor.link(
-                        src_id=src_uuid, relation=edge.relation.value, dst_id=dst_uuid,
-                        src_type=asset.node_type.value, dst_type=edge.dst_type.value,
-                        source=asset.source.value, confidence=edge.confidence,
-                    )
+
+            if provider.requires_authorization:
+                # Active provider: authorize every candidate target FIRST, before any network.
+                # Only DB-stored, tenant-owned, valid authorizations grant a target; denials are
+                # audited and the target never reaches the provider (no socket is opened).
+                candidates = list(raw_seeds.get("active_targets", []))
+                allowed, denied = authorize_targets(
+                    session, tenant_id=run.tenant_id, customer_id=run.customer_id,
+                    run_id=run.id, candidates=candidates, now=_now(),
+                )
+                if denied:
+                    log.info("discovery_targets_blocked", provider=key, count=len(denied),
+                             run_id=run_id)
+                if not allowed:
+                    continue
+                active_ctx = DiscoveryContext(
+                    tenant_id=str(run.tenant_id), run_id=str(run.id), seeds=raw_seeds,
+                    customer_id=str(run.customer_id) if run.customer_id else None,
+                    authorized=True, authorized_targets=allowed, settings=settings,
+                )
+                for raw in provider.collect(active_ctx):
+                    _ingest(raw)
+            else:
+                for raw in provider.collect(ctx):  # passive: no gate
+                    _ingest(raw)
 
         stale = mark_stale_edges(session, tenant_id=run.tenant_id, run_id=run.id)
         ingestor.stats["edges_marked_stale"] = stale

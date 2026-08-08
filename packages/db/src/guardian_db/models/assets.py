@@ -84,7 +84,10 @@ class Authorization(Base, TimestampMixin):
         ForeignKey("engagements.id"), nullable=True
     )
     scope: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    # "ownership_verified" | "written_consent"
+    # Structured targets authorized for active discovery when asset_id is null (Phase 6C):
+    # a list of {"type": "domain|netblock|ip|host", "value": "..."} the gate matches probes against.
+    authorized_targets: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # "ownership_verified" | "written_consent" | "active_recon"
     method: Mapped[str] = mapped_column(String(40), nullable=False)
     authorized_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     valid_from: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)

@@ -2,7 +2,7 @@
 
 Turns normalized `DiscoveredAsset`s into graph nodes + edges with the merge/dedup policy, the
 deterministic exposure score, the discovery lifecycle, and the per-node history. Merge policy: a
-is identified by `(tenant, node_type, canonical_key)` — a re-observation UPDATES that row (max
+node is identified by `(tenant, node_type, canonical_key)` — a re-observation UPDATES that row (max
 confidence, refreshed last_seen, merged attributes), it never creates a second entity.
 
 Tenant consistency is enforced here, at the polymorphic boundary RLS can't see: an edge is only ever
@@ -114,10 +114,21 @@ class DbGraphIngestor:
                 has_asset=existing.asset_id is not None,
             )
 
+        old_attrs = existing.metadata_ or {}
         changed: list[str] = []
+        tls_changed = ("tls" in node.attributes
+                       and old_attrs.get("tls") != node.attributes.get("tls"))
+        banner_changed = (
+            "banner" in node.attributes and old_attrs.get("banner") != node.attributes.get("banner")
+        )
+        if tls_changed:
+            changed.append("tls changed")
+        if banner_changed:
+            changed.append("banner changed")
         if merged_exposure != existing.exposure_score:
             changed.append(f"exposure {existing.exposure_score}->{merged_exposure}")
-        if new_state != existing.state:
+        state_changed = new_state != existing.state
+        if state_changed:
             changed.append(f"state {existing.state}->{new_state}")
 
         existing.confidence = max(existing.confidence, node.confidence)
@@ -128,14 +139,17 @@ class DbGraphIngestor:
         existing.last_seen_at = now
         existing.discovery_run_id = self._run
         self.stats["nodes_updated"] += 1
-        if new_state != existing.state and new_state == AssetState.SHADOW.value:
+        if state_changed and new_state == AssetState.SHADOW.value:
             self.stats["shadow_found"] += 1
             self._emit("asset.shadow", {"node_id": str(existing.id), "key": key})
         existing.state = new_state
         if changed:
+            # Most-specific event type for a clean, queryable history (Phase 6C).
+            event_type = ("tls_changed" if tls_changed else
+                          "service_changed" if banner_changed else
+                          "state_changed" if state_changed else "changed")
             self._s.add(NodeEvent(
-                tenant_id=self._tenant, node_id=existing.id,
-                event_type="state_changed" if "state" in " ".join(changed) else "changed",
+                tenant_id=self._tenant, node_id=existing.id, event_type=event_type,
                 detail={"changes": changed}, discovery_run_id=self._run, occurred_at=now,
             ))
         return existing.id
