@@ -221,3 +221,58 @@ class DashboardResponse(BaseModel):
     severity_counts: dict
     total_findings: int
     recent_scans: list[ScanOut]
+
+
+# ── Attack-graph read-only analysis (Phase 6D) ──
+class GraphNodeRef(BaseModel):
+    id: str
+    node_type: str
+    canonical_key: str
+
+
+class ExposurePathsOut(BaseModel):
+    paths: list[list[GraphNodeRef]]
+    truncated: bool
+
+
+class ReachableOut(BaseModel):
+    nodes: list[GraphNodeRef]
+    from_id: str
+
+
+class BlastRadiusOut(BaseModel):
+    root_id: str
+    root_key: str
+    affected_nodes: int
+    sensitive_nodes: int
+    exposure_paths: int
+    weighted_impact: int
+    truncated: bool
+
+
+class ChokepointOut(BaseModel):
+    node_id: str
+    node_key: str
+    node_type: str
+    paths_cut: int
+    total_paths: int
+    fraction: float
+    evidence_paths: list[list[GraphNodeRef]]
+
+
+class ChokepointsOut(BaseModel):
+    chokepoints: list[ChokepointOut]
+    total_paths: int
+    truncated: bool
+
+
+class DriftItemOut(BaseModel):
+    node_id: str
+    node_key: str
+    kind: str
+    detail: dict
+    occurred_at: str
+
+
+class DriftOut(BaseModel):
+    items: list[DriftItemOut]

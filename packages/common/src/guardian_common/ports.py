@@ -46,10 +46,13 @@ class NullConnector:
         return None
 
 
-# ── Attack-graph read side — path projection over graph_nodes/graph_edges (Phase 6D) ──
+# ── Attack-graph read side — deterministic, read-only projection over the graph (Phase 6D) ──
 @runtime_checkable
 class GraphProjector(Protocol):
-    # Depth-bounded; ordered node paths. Ranking is deterministic (finding risk along the path).
+    """Read-only, deterministic analysis over graph_nodes/graph_edges. Never writes, never reaches a
+    network. Every method is tenant-scoped and depth/count-bounded; results are reproducible."""
+
+    # Depth-bounded, ordered exposure paths from an internet-facing entry to a specific node.
     def paths_to(
         self, *, tenant_id: str, target_type: str, target_id: str, max_depth: int = 6
     ) -> list[list[dict]]: ...
@@ -58,6 +61,22 @@ class GraphProjector(Protocol):
         self, *, tenant_id: str, src_type: str, src_id: str, max_depth: int = 6
     ) -> list[dict]: ...
 
+    # Every internet-exposure path (entry → exposed/sensitive node) for the tenant.
+    def exposure_paths(
+        self, *, tenant_id: str, max_depth: int = 6, limit: int = 100
+    ) -> dict: ...
+
+    # Deterministic blast radius of one node (affected/sensitive counts, paths-through, weighted).
+    def blast_radius(
+        self, *, tenant_id: str, node_type: str, node_id: str, max_depth: int = 6
+    ) -> dict: ...
+
+    # Nodes ranked by how many exposure paths their remediation would cut (with evidence).
+    def chokepoints(self, *, tenant_id: str, top: int = 10, max_depth: int = 6) -> dict: ...
+
+    # Exposure drift classified from already-emitted node history within a time window.
+    def exposure_drift(self, *, tenant_id: str, since: str, until: str) -> dict: ...
+
 
 class NullGraphProjector:
     def paths_to(self, *, tenant_id, target_type, target_id, max_depth=6):  # noqa: ANN001, ANN201
@@ -65,6 +84,18 @@ class NullGraphProjector:
 
     def reachable_from(self, *, tenant_id, src_type, src_id, max_depth=6):  # noqa: ANN001, ANN201
         return []
+
+    def exposure_paths(self, *, tenant_id, max_depth=6, limit=100):  # noqa: ANN001, ANN201
+        return {"paths": [], "truncated": False}
+
+    def blast_radius(self, *, tenant_id, node_type, node_id, max_depth=6):  # noqa: ANN001, ANN201
+        return {}
+
+    def chokepoints(self, *, tenant_id, top=10, max_depth=6):  # noqa: ANN001, ANN201
+        return {"chokepoints": [], "total_paths": 0, "truncated": False}
+
+    def exposure_drift(self, *, tenant_id, since, until):  # noqa: ANN001, ANN201
+        return {"items": []}
 
 
 # ── Attack-graph write side — edge/node ingestion from collectors (Phase 6B/6C) ──
