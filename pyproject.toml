@@ -77,6 +77,11 @@ service_scan = "guardian_scanner.discovery.providers.service_scan_provider:Servi
 http = "guardian_scanner.discovery.protocols.http_probe:HttpProbe"
 tls = "guardian_scanner.discovery.protocols.tls_probe:TlsProbe"
 
+# Security tool providers (Framework) — a tool is a governed, sandboxed, scoped Provider. The first
+# provider is read-only Web/TLS: it observes an authorized host, it never crawls/fuzzes/exploits.
+[project.entry-points."guardian.tool_providers"]
+web_tls = "guardian_scanner.tools.providers.web_tls_provider:WebTlsProvider"
+
 [tool.setuptools.packages.find]
 # Monorepo: one installable distribution discovering packages from every src root.
 where = [

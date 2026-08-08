@@ -31,7 +31,7 @@ from guardian_core.tool import (
     job_to_wire,
 )
 from guardian_db.audit import record_audit
-from guardian_db.models import Authorization
+from guardian_db.models import Authorization, Customer, Scan, ScanEngineRun
 from guardian_db.session import session_scope
 from sqlalchemy import select
 
@@ -123,9 +123,71 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
     )
     evidences = [evidence_from_wire(w) for w in wire or []]
 
-    # Trusted plane persists the hash chain.
+    # Evidence-first: persist the hash chain (primary truth), THEN derive findings only where the
+    # evidence binds to exactly one asset. Evidence-only when there is no asset or more than one.
     with session_scope() as session:
         ids = persist_evidence_chain(session, tenant_id=tid, evidences=evidences)
-    log.info("tool_job_done", tool=tool_key, evidence=len(ids))
+        bound = _bind_and_derive_findings(session, tid, tool_key, evidences)
+
+    # Auto-enrich the graph per bound customer (trusted plane, 6E) — evidence → finding → graph.
+    from guardian_scanner.discovery.tasks import enrich_graph
+    for cid in sorted({c for c, _ in bound}):
+        enrich_graph.apply_async(args=[str(tid), cid])
+
+    findings = sum(n for _, n in bound)
+    log.info("tool_job_done", tool=tool_key, evidence=len(ids),
+             assets_bound=len(bound), findings=findings)
     return {"status": "completed", "tool": tool_key, "job_id": job.job_id,
-            "evidence": len(ids), "requires_human_approval": decision.requires_human_approval}
+            "evidence": len(ids), "assets_bound": len(bound), "findings": findings,
+            "requires_human_approval": decision.requires_human_approval}
+
+
+def _bind_and_derive_findings(session, tenant_id, tool_key, evidences):  # noqa: ANN001, ANN202
+    """Evidence-first finding derivation. Returns [(customer_id, findings_count)] for bound assets.
+
+    Groups evidence by host; for a host that binds to EXACTLY one web/api asset, reuses
+    Scan/ScanEngineRun(engine=tool_key) + the provider's deterministic normalize → to_finding. A
+    host with zero or 2+ matching assets stays Evidence-only (no Scan, no Finding).
+    """
+    from guardian_scanner.normalize import to_finding
+    from guardian_scanner.tools import registry
+    from guardian_scanner.tools.binding import resolve_asset
+
+    provider = registry.tool_for(tool_key)
+    if provider is None:
+        return []
+
+    by_host: dict[str, list] = {}
+    for e in evidences:
+        by_host.setdefault(e.target, []).append(e)
+
+    bound: list[tuple[str, int]] = []
+    for host, host_evidence in sorted(by_host.items()):
+        asset = resolve_asset(session, tenant_id=tenant_id, host=host)
+        if asset is None:
+            continue  # Evidence-only: no asset or ambiguous — never a guessed binding
+        customer = session.get(Customer, asset.customer_id)
+        criticality = customer.criticality if customer is not None else "medium"
+
+        scan = Scan(tenant_id=tenant_id, customer_id=asset.customer_id, asset_id=asset.id,
+                    trigger="tool", status="completed", requested_engines=[tool_key])
+        session.add(scan)
+        session.flush()
+        run = ScanEngineRun(scan_id=scan.id, engine=tool_key[:30], status="completed",
+                            tool_versions={tool_key: provider.version})
+        session.add(run)
+        session.flush()
+
+        count = 0
+        for e in host_evidence:
+            raw = provider.normalize(e)
+            if raw is None:
+                continue
+            session.add(to_finding(
+                raw, tenant_id=tenant_id, customer_id=asset.customer_id, scan_id=scan.id,
+                engine_run_id=run.id, asset_id=asset.id, exposure=asset.exposure,
+                asset_criticality=criticality, business_impact=criticality,
+            ))
+            count += 1
+        bound.append((str(asset.customer_id), count))
+    return bound

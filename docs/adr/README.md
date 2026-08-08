@@ -55,5 +55,6 @@ The nine foundational decisions (ADR-001 … ADR-009) that anchor the initial bu
 | [014](0014-graph-enrichment-attack-paths.md) | Phase 6E: graph enrichment (finding/asset nodes, exposes/serves edges) + read-only attack-path analysis |
 | [015](0015-netblock-world-model.md) | Phase 6F: netblock world-model (authorized-CIDR enrichment + passive ASN/RIR provider, `contains` grouping only) |
 | [016](0016-tool-execution-framework.md) | Security Tool Execution Framework (Phase 1): governed rail (ToolProvider, EffectiveScope, policy gate, DB-less tool plane, evidence hash-chain) — no tools |
+| [017](0017-web-tls-read-only-provider.md) | Provider #1: read-only Web/TLS tool (Evidence-first, exact canonical-host asset binding, reuses Scan/ScanEngineRun/to_finding/enrich_graph) |
 
-New ADRs start at **ADR-017**.
+New ADRs start at **ADR-018**.
