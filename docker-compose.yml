@@ -131,5 +131,30 @@ services:
     pids_limit: 512  # container-level fork-bomb backstop (complements the sandbox RLIMIT_NPROC)
     command: celery -A guardian_scanner.celery_app.celery_app worker --loglevel=info --concurrency=2 -Q recon
 
+  # Tool execution plane — DB-LESS sandboxed tools on the `tools` queue (Security Tool Framework).
+  # The same isolation as worker-recon: no DB URL, no route to the database, no KMS. It runs only
+  # `run_tool` (providers in the mandatory sandbox with egress bound to the job scope) and returns
+  # RawEvidence — so a compromise inside any tool finds no database, secrets, or other tenant.
+  worker-tools:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+    environment:
+      GUARDIAN_ENV: local
+      GUARDIAN_DATABASE_URL: ""      # NO DB credentials (execution plane is DB-incapable)
+      GUARDIAN_REDIS_URL: redis://redis:6379/0
+      GUARDIAN_JWT_SECRET: change-me-dev-only-do-not-use-in-production
+      GUARDIAN_ENCRYPTION_KEY: dev-only-encryption-key-change-me  # no KMS use on this plane
+      GUARDIAN_SANDBOX_ENGINES: "true"
+      GUARDIAN_TOOL_PLANE: "true"    # tool plane marker — the trusted dispatcher refuses to run here
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [recon-cache]          # redis broker only; no route to the database or the API
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 512
+    command: celery -A guardian_scanner.celery_app.celery_app worker --loglevel=info --concurrency=2 -Q tools
+
 volumes:
   pgdata:

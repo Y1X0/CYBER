@@ -18,6 +18,8 @@ celery_app = Celery(
         # Register the discovery orchestration task so a real worker can execute it — previously it
         # existed but was never registered, so 6B/6C were runnable only from tests (6C.1 fix).
         "guardian_scanner.discovery.tasks",
+        # Security Tool Framework (Phase 1): dispatch (trusted) + run_tool (execution plane).
+        "guardian_scanner.tools.tasks",
     ],
 )
 
@@ -35,5 +37,9 @@ celery_app.conf.update(
     task_routes={
         "guardian.run_discovery": {"queue": "default"},
         "guardian.recon_collect": {"queue": "recon"},
+        # Tool framework: the DB-less execution step runs on the isolated `tools` plane; the trusted
+        # dispatcher (authorize/scope/policy/persist) stays on `default`.
+        "guardian.dispatch_tool_job": {"queue": "default"},
+        "guardian.run_tool": {"queue": "tools"},
     },
 )

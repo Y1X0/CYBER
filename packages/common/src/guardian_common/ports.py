@@ -13,7 +13,9 @@ if TYPE_CHECKING:  # avoid a runtime guardian_common -> guardian_core coupling; 
     from collections.abc import Iterable
 
     from guardian_core.discovery import DiscoveredAsset, DiscoveryContext
+    from guardian_core.findings import RawFinding
     from guardian_core.probe import ProbeEvidence
+    from guardian_core.tool import RawEvidence, ToolCapabilities, ToolJob
 
 
 # ── SOAR: outbound notifications (Slack/PagerDuty/email...) — Phase 7 ──
@@ -169,6 +171,57 @@ class ProtocolProbe(Protocol):
     def probe(
         self, host: str, port: int, *, timeout: int, allow_live: bool, snapshot: dict | None
     ) -> ProbeEvidence | None: ...
+
+
+# ── Security Tool Execution Framework — a tool is a Provider behind one boundary (Framework P1) ──
+@runtime_checkable
+class ToolProvider(Protocol):
+    """A security tool as a governed provider. It declares WHAT it is (`capabilities`), validates a
+    job, and produces evidence inside the DB-less execution plane. It NEVER authorizes itself — the
+    Control Plane derives scope + runs the policy gate before a job ever reaches the provider."""
+
+    key: str
+    name: str
+    version: str
+
+    @property
+    def capabilities(self) -> ToolCapabilities: ...
+
+    def validate(self, job: ToolJob) -> None:
+        """Raise if the job is malformed for this tool. Validation is NOT authorization."""
+        ...
+
+    def execute(self, job: ToolJob) -> Iterable[RawEvidence]:
+        """Run inside the sandbox (no DB) and yield structured, sanitized evidence."""
+        ...
+
+    def normalize(self, evidence: RawEvidence) -> RawFinding | None:
+        """Map one evidence item to a canonical finding, or None if it is not a finding."""
+        ...
+
+
+class NullToolProvider:
+    """Safe default: a tool that does nothing and reaches nothing. Real providers arrive later."""
+
+    key = "null"
+    name = "null-tool"
+    version = "0"
+
+    @property
+    def capabilities(self) -> ToolCapabilities:
+        from guardian_core.tool import ToolCapabilities as _Caps
+
+        return _Caps(category="null", network=False, active=False, destructive=False,
+                     requires_authorization=True)
+
+    def validate(self, job: ToolJob) -> None:  # noqa: ARG002
+        return None
+
+    def execute(self, job: ToolJob):  # noqa: ANN201, ARG002
+        return []
+
+    def normalize(self, evidence: RawEvidence):  # noqa: ANN201, ARG002
+        return None
 
 
 # ── Enterprise identity (SAML/OIDC/SCIM) — Phase 9 ──

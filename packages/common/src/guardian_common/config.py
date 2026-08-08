@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     # where this is False. Each task refuses to run on the wrong plane, so a misroute fails loudly.
     recon_plane: bool = False
 
+    # Tool execution plane marker (Security Tool Execution Framework). True ONLY on the isolated,
+    # DB-less tool worker running `run_tool` (sandboxed providers). The trusted `dispatch_tool_job`
+    # (authorize/scope/policy/persist) runs where this is False. A misroute fails loudly.
+    tool_plane: bool = False
+
     # DevSecOps: GitHub webhook HMAC secret (empty = webhook endpoint rejects all deliveries).
     github_webhook_secret: str = ""
 

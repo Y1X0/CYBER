@@ -54,5 +54,6 @@ The nine foundational decisions (ADR-001 … ADR-009) that anchor the initial bu
 | [013](0013-recon-result-return.md) | Phase 6C.4: Recon result-return — no DB credentials in the network-facing execution plane + execution hardening |
 | [014](0014-graph-enrichment-attack-paths.md) | Phase 6E: graph enrichment (finding/asset nodes, exposes/serves edges) + read-only attack-path analysis |
 | [015](0015-netblock-world-model.md) | Phase 6F: netblock world-model (authorized-CIDR enrichment + passive ASN/RIR provider, `contains` grouping only) |
+| [016](0016-tool-execution-framework.md) | Security Tool Execution Framework (Phase 1): governed rail (ToolProvider, EffectiveScope, policy gate, DB-less tool plane, evidence hash-chain) — no tools |
 
-New ADRs start at **ADR-016**.
+New ADRs start at **ADR-017**.
