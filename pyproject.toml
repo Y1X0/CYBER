@@ -87,6 +87,8 @@ pcap_meta = "guardian_scanner.tools.providers.pcap_provider:PcapMetaProvider"
 dns_posture = "guardian_scanner.tools.providers.dns_posture_provider:DnsPostureProvider"
 # Nmap TCP-connect active network discovery (L2) — argv-isolated, no root, stdlib XML, no python-nmap.
 nmap = "guardian_scanner.tools.providers.nmap_provider:NmapProvider"
+# CT passive attack-surface discovery (L1) — in-proc, fixed-endpoint egress, anti-SSRF, no secrets.
+ct_surface = "guardian_scanner.tools.providers.ct_surface_provider:CtSurfaceProvider"
 
 [tool.setuptools.packages.find]
 # Monorepo: one installable distribution discovering packages from every src root.
