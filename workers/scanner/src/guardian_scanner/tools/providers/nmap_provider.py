@@ -75,6 +75,9 @@ class NmapProvider:
     key = "nmap"
     name = "Nmap TCP Connect Scan"
     version = "1"
+    # Trusted marker: spawns an external binary ⇒ the execution plane FORCES the uid+nft kernel
+    # isolation backend and never lets a job downgrade it.
+    external_binary = True
 
     @property
     def capabilities(self) -> ToolCapabilities:

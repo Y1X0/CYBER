@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     # Empty in dev. Platform owners are still subject to authorization, scope, policy, and audit.
     platform_owner_ids: str = ""
 
+    # Job signing (Phase C execution-plane trust): Ed25519 keys, base64 raw 32 bytes. The trusted
+    # dispatcher holds ONLY the private key; the tool plane (worker-tools) holds ONLY the public key
+    # and can never mint a valid job. Empty in local/dev falls back to a fixed dev keypair (refused
+    # outside local/dev). The PRIVATE key must NEVER be set on worker-tools.
+    job_signing_private_key: str = ""
+    job_signing_public_key: str = ""
+
     # Worker sandboxing (5A). When true, untrusted-input engines run in a resource-limited,
     # egress-restricted child process. Off by default so the in-process path stays simple for
     # internal/authorized scanning; turn on before scanning external/untrusted targets at scale.

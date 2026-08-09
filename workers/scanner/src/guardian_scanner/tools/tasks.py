@@ -73,11 +73,24 @@ def _enforce_tool_plane(*, expect_tool: bool) -> None:
 
 
 @celery_app.task(name="guardian.run_tool")
-def run_tool(job_wire: dict) -> list[dict]:
-    """EXECUTION PLANE (no DB): run the provider in the sandbox, return RawEvidence."""
+def run_tool(signed: dict) -> list[dict]:
+    """EXECUTION PLANE (no DB): AUTHENTICATE the job, THEN run the provider. Return RawEvidence.
+
+    A queue message is untrusted. The signed envelope is verified (signature + expiry + replay) with
+    the tool plane's PUBLIC key BEFORE anything is reconstructed, a backend is chosen, nft rules are
+    built, or a provider runs. A forged/tampered/expired/replayed job is refused here.
+    """
     _enforce_tool_plane(expect_tool=True)
+    from guardian_common.job_signing import JobVerificationError, verify_job
+
     from guardian_scanner.tools import registry
     from guardian_scanner.tools.execution import execute_tool
+
+    try:
+        job_wire = verify_job(signed)      # untrusted → authenticated, before ANY execution work
+    except JobVerificationError as exc:
+        log.warning("run_tool_rejected", reason=str(exc))
+        return []
 
     job: ToolJob = job_from_wire(job_wire)
     provider = registry.tool_for(job.tool_key)
@@ -169,8 +182,10 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
     job = ToolJob(tenant_id=tenant_id, job_id=uuid.uuid4().hex, tool_key=tool_key,
                   scope=scope, settings=job_settings)
 
-    # Execution plane (no DB) → RawEvidence via result-return.
-    wire = run_tool.apply_async(args=[job_to_wire(job)], queue="tools").get(
+    # Execution plane (no DB) → RawEvidence via result-return. The job is signed so the tool plane
+    # can authenticate it (a forged run_tool message is refused there).
+    from guardian_common.job_signing import sign_job
+    wire = run_tool.apply_async(args=[sign_job(job_to_wire(job))], queue="tools").get(
         timeout=300, disable_sync_subtasks=False
     )
     evidences = [evidence_from_wire(w) for w in wire or []]
@@ -488,8 +503,9 @@ def dispatch_artifact_job(  # noqa: ANN001, PLR0911, PLR0913
     job = ToolJob(tenant_id=tenant_id, job_id=uuid.uuid4().hex, tool_key=tool_key,
                   scope=scope, settings=job_settings)
 
-    # Execution plane (no DB, no network) → RawEvidence via result-return.
-    wire = run_tool.apply_async(args=[job_to_wire(job)], queue="tools").get(
+    # Execution plane (no DB, no network) → RawEvidence via result-return. Signed for authenticity.
+    from guardian_common.job_signing import sign_job
+    wire = run_tool.apply_async(args=[sign_job(job_to_wire(job))], queue="tools").get(
         timeout=300, disable_sync_subtasks=False
     )
     evidences = [evidence_from_wire(w) for w in wire or []]
