@@ -370,7 +370,78 @@ def _bind_nmap_findings(session, tenant_id, tool_key, evidences):  # noqa: ANN00
     return bound
 
 
-_BINDERS.update({"dns_posture": _bind_and_derive_findings_strict, "nmap": _bind_nmap_findings})
+def _ct_upsert(ingestor, cache, node_type, key):  # noqa: ANN001, ANN202
+    """Upsert a CT-sourced graph node once per identity; cache and return its UUID."""
+    from guardian_core.discovery import DiscoveredAsset
+    from guardian_core.enums import DiscoverySource
+
+    ck = (node_type.value, key)
+    if ck not in cache:
+        cache[ck] = ingestor.upsert_node(DiscoveredAsset(
+            node_type=node_type, canonical_key=key, source=DiscoverySource.CT_LOG,
+            confidence=95, ownership_confidence=90, attributes={"public_dns": True},
+        ))
+    return cache[ck]
+
+
+def _bind_ct_surface_assets(session, tenant_id, tool_key, evidences):  # noqa: ANN001, ANN202
+    """Promote CT `discovered_asset` evidence into the World Model (ADR-0026 Option 2).
+
+    The trusted Control Plane opens a real `DiscoveryRun(trigger="tool")` and ingests each
+    discovered subdomain through the SAME `DbGraphIngestor` the discovery plane uses — one
+    provenance model, a real `discovery_run_id` (never NULL), reusing the existing
+    ownership/dedup/lifecycle. It creates NO Scan/Finding (an asset is inventory, not a
+    vulnerability). Ownership/customer is scoped by the parent domain's managed asset when one
+    exists (else a tenant-scoped, customer-less run, like scope-based discovery). The provider
+    boundary, Evidence chain, and graph schema are untouched.
+    """
+    from guardian_core.enums import EdgeRelation, NodeType
+    from guardian_db.models import DiscoveryRun
+
+    from guardian_scanner.discovery.ingestor import DbGraphIngestor
+    from guardian_scanner.tools.binding import resolve_asset
+
+    by_domain: dict[str, list] = {}
+    for e in evidences:
+        if e.kind == "discovered_asset":
+            by_domain.setdefault(str((e.data or {}).get("parent_domain") or ""), []).append(e)
+
+    now = dt.datetime.now(dt.UTC)
+    bound: list[tuple[str, int]] = []
+    for domain, items in sorted(by_domain.items()):
+        if not domain:
+            continue
+        parent_asset = resolve_asset(session, tenant_id=tenant_id, host=domain)
+        customer_id = parent_asset.customer_id if parent_asset is not None else None
+
+        run = DiscoveryRun(tenant_id=tenant_id, customer_id=customer_id, trigger="tool",
+                           status="running", seeds={"domains": [domain], "source": tool_key},
+                           started_at=now)
+        session.add(run)
+        session.flush()  # a real run id — nodes/edges are stamped with it, never NULL
+
+        ingestor = DbGraphIngestor(session, tenant_id=tenant_id, run_id=run.id)
+        cache: dict[tuple[str, str], uuid.UUID] = {}
+        dom_id = _ct_upsert(ingestor, cache, NodeType.DOMAIN, domain)
+        for e in items:
+            host = e.target
+            if host == domain:
+                continue  # the apex is the DOMAIN node itself, not a subdomain
+            sub_id = _ct_upsert(ingestor, cache, NodeType.SUBDOMAIN, host)
+            ingestor.link(src_id=sub_id, relation=EdgeRelation.SUBDOMAIN_OF.value, dst_id=dom_id,
+                          src_type=NodeType.SUBDOMAIN.value, dst_type=NodeType.DOMAIN.value,
+                          source="ct_log", confidence=95)
+
+        run.status = "completed"
+        run.finished_at = dt.datetime.now(dt.UTC)
+        run.stats = dict(ingestor.stats)
+        if customer_id is not None:
+            bound.append((str(customer_id), 0))  # no findings; drives owner graph enrichment
+    return bound
+
+
+_BINDERS.update({"dns_posture": _bind_and_derive_findings_strict, "nmap": _bind_nmap_findings,
+                 "ct_surface": _bind_ct_surface_assets})
 
 
 # ── Provider #2: artifact analysis (asset-anchored, non-network). Reuses the same rail. ──
