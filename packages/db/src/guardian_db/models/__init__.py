@@ -6,6 +6,14 @@ from guardian_db.models.billing import Plan, PlanEntitlement, Subscription, Usag
 from guardian_db.models.discovery import DiscoveryRun, DiscoveryScope
 from guardian_db.models.events import DomainEvent
 from guardian_db.models.evidence import EvidenceItem
+from guardian_db.models.governance import (
+    Approval,
+    Campaign,
+    CampaignMember,
+    CapabilityGrant,
+    PlatformGrant,
+    ToolCatalog,
+)
 from guardian_db.models.graph import GraphEdge
 from guardian_db.models.graph_nodes import GraphNode
 from guardian_db.models.knowledge import (
@@ -37,9 +45,13 @@ from guardian_db.models.tenancy import (
 __all__ = [
     "Advisory",
     "ApiKey",
+    "Approval",
     "Asset",
     "AuditLog",
     "Authorization",
+    "CapabilityGrant",
+    "Campaign",
+    "CampaignMember",
     "Customer",
     "CustomerContact",
     "DiscoveryRun",
@@ -56,6 +68,7 @@ __all__ = [
     "NodeEvent",
     "Plan",
     "PlanEntitlement",
+    "PlatformGrant",
     "Policy",
     "RemediationItem",
     "Report",
@@ -68,6 +81,7 @@ __all__ = [
     "Tenant",
     "TenantMembership",
     "TenantScannerConfig",
+    "ToolCatalog",
     "UsageRecord",
     "User",
     "Vulnerability",

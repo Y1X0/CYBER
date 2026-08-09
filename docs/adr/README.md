@@ -59,5 +59,6 @@ The nine foundational decisions (ADR-001 … ADR-009) that anchor the initial bu
 | [018](0018-pcap-artifact-analysis-provider.md) | Provider #2: offline PCAP/artifact analysis (asset-anchored, non-network, stdlib-only parser, fail-closed, inline-bounded ≤2 MB) |
 | [019](0019-dns-posture-and-provider-semantics.md) | Provider #3: offline DNS/email-security posture (absence-as-evidence) + unified Provider semantic contract + Tool Catalog schema + `verify_chain` prev_hash fix |
 | [021](0021-capability-governance-phase-a.md) | Capability Governance (Phase A): identity-gated tool execution — capability levels L0–L5 derived from primitives, role ceilings, platform owner, service-account scopes, actor in audit; no migration |
+| [022](0022-phase-b-persistent-governance.md) | Phase B: persistent authorization — platform_grants, campaigns, campaign_members, approvals, capability_grants, tool_catalog + audit-immutability trigger; first migration after 0009 (`0010_phase_b_governance`), additive + reversible |
 
-New ADRs start at **ADR-022** (ADR-020 reserved for the Nmap provider Discovery).
+New ADRs start at **ADR-023** (ADR-020 reserved for the Nmap provider Discovery).

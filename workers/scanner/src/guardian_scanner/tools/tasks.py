@@ -96,6 +96,7 @@ def _authorized_target_values(session, tenant_id: uuid.UUID, now: dt.datetime) -
 def dispatch_tool_job(  # noqa: ANN001, PLR0913
     self, tenant_id: str, tool_key: str, requested_targets: list[str], actor_id: str | None = None,
     human_approved: bool = False, settings: dict | None = None, policy: dict | None = None,
+    campaign_id: str | None = None, approval_id: str | None = None,
 ) -> dict:
     """TRUSTED Control Plane: identity → authorize → scope → policy → dispatch → persist."""
     _enforce_tool_plane(expect_tool=False)
@@ -111,12 +112,15 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
 
     # Control Plane: WHO may run this? (governance) then WHAT may it touch? (authz/scope).
     with session_scope() as session:
-        gov = evaluate_governance(session, tenant_id=tid, actor_id=actor_id, caps=caps)
+        gov = evaluate_governance(
+            session, tenant_id=tid, actor_id=actor_id, caps=caps, tool_key=tool_key,
+            campaign_id=campaign_id, approval_id=approval_id)
         record_audit(
             session, action="tool.capability.decision", tenant_id=tid, actor_id=gov.actor_uuid,
             entity_type="tool_job", entity_id=tool_key,
             metadata={"allowed": gov.allowed, "principal": gov.principal_kind,
-                      "level": gov.required_level, "reasons": list(gov.reasons)},
+                      "level": gov.required_level, "reasons": list(gov.reasons),
+                      "campaign_id": campaign_id},
         )
         if not gov.allowed:
             return {"status": "forbidden", "tool": tool_key, "principal": gov.principal_kind,
@@ -135,6 +139,18 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
         if not decision.allowed:
             return {"status": "denied", "tool": tool_key, "reasons": list(decision.reasons),
                     "requires_human_approval": decision.requires_human_approval}
+
+        # L3+ only: consume the single-use approval now that the whole gate has passed.
+        if gov.approval_id is not None:
+            from guardian_db.models import Approval
+            from sqlalchemy import update
+            consumed = session.execute(
+                update(Approval).where(Approval.id == gov.approval_id,
+                                       Approval.consumed_at.is_(None)).values(consumed_at=now)
+            )
+            if consumed.rowcount == 0:
+                return {"status": "forbidden", "tool": tool_key, "level": gov.required_level,
+                        "reasons": ["approval already consumed"]}
 
     job = ToolJob(tenant_id=tenant_id, job_id=uuid.uuid4().hex, tool_key=tool_key,
                   scope=scope, settings=settings or {})
@@ -348,7 +364,8 @@ def dispatch_artifact_job(  # noqa: ANN001, PLR0911, PLR0913
 
     # Capability governance FIRST: who is asking, and may they run this capability level here?
     with session_scope() as session:
-        gov = evaluate_governance(session, tenant_id=tid, actor_id=actor_id, caps=caps)
+        gov = evaluate_governance(session, tenant_id=tid, actor_id=actor_id, caps=caps,
+                                  tool_key=tool_key)
         record_audit(
             session, action="tool.capability.decision", tenant_id=tid, actor_id=gov.actor_uuid,
             entity_type="tool_job", entity_id=tool_key,
