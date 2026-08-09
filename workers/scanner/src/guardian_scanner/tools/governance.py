@@ -70,6 +70,20 @@ def _as_uuid(value: str) -> uuid.UUID | None:
         return None
 
 
+def _aware(ts: dt.datetime | None) -> dt.datetime | None:
+    """Normalize a datetime to timezone-aware UTC for comparison against `now`.
+
+    Some persisted governance timestamps come back naive (the models declare plain `DateTime`, i.e.
+    `timestamp without time zone`), and the platform writes every timestamp in UTC. Interpreting a
+    naive value as UTC keeps temporal checks correct while never mixing naive/aware operands, so an
+    expiry/window comparison can never raise "can't compare offset-naive and offset-aware".
+    Already-aware values pass through unchanged, so governance semantics are preserved exactly.
+    """
+    if ts is not None and ts.tzinfo is None:
+        return ts.replace(tzinfo=dt.UTC)
+    return ts
+
+
 def _is_platform_owner(session: Session, aid: str, actor_uuid: uuid.UUID | None) -> bool:
     if aid in _platform_owner_ids():
         return True
@@ -103,7 +117,7 @@ def _grant_ceiling(session, tenant_id, *, user_uuid, role, api_key_id, tool_key,
             CapabilityGrant.tenant_id == tenant_id, CapabilityGrant.revoked_at.is_(None))
     ).scalars()
     for g in rows:
-        if g.expires_at is not None and g.expires_at <= now:
+        if g.expires_at is not None and _aware(g.expires_at) <= now:
             continue
         matches = (
             (g.subject_kind == "user" and user_uuid is not None
@@ -142,9 +156,9 @@ def _validate_campaign(session, tenant_id, campaign_id, actor_uuid, required, no
         return "campaign not found in tenant"
     if camp.status != "active":
         return f"campaign is {camp.status}, not active"
-    if camp.starts_at is not None and camp.starts_at > now:
+    if camp.starts_at is not None and _aware(camp.starts_at) > now:
         return "campaign has not started"
-    if camp.ends_at is not None and camp.ends_at <= now:
+    if camp.ends_at is not None and _aware(camp.ends_at) <= now:
         return "campaign window has ended"
     if required > camp.max_capability_level:
         return "campaign does not authorize this capability level"
@@ -171,7 +185,7 @@ def _validate_approval(session, tenant_id, approval_id, *, required, tool_key,  
         return None, "approval revoked"
     if appr.consumed_at is not None:
         return None, "approval already consumed"
-    if appr.expires_at is not None and appr.expires_at <= now:
+    if appr.expires_at is not None and _aware(appr.expires_at) <= now:
         return None, "approval expired"
     if appr.capability_level < required:
         return None, "approval level too low"
@@ -218,7 +232,7 @@ def evaluate_governance(  # noqa: PLR0911, PLR0913
         else:
             apikey = session.get(ApiKey, actor_uuid)
             if (apikey is None or apikey.tenant_id != tenant_id or apikey.revoked_at is not None
-                    or (apikey.expires_at is not None and apikey.expires_at <= now)):
+                    or (apikey.expires_at is not None and _aware(apikey.expires_at) <= now)):
                 return _deny("none", None, required, "no valid identity in this tenant")
             scope_level = _service_scope_level(apikey.scopes)
             if scope_level is None:
