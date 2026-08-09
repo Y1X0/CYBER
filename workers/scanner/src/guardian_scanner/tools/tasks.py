@@ -45,10 +45,9 @@ log = get_logger("guardian.tools")
 # BEFORE any execution — the artifact travels inline in the ToolJob (no object storage, no table).
 _ARTIFACT_MAX_BYTES = 2 * 1024 * 1024
 
-# Tools whose host-binding honors the ADR-0019 semantic contract strictly: a Scan/ScanEngineRun is
-# created ONLY when a finding is actually derived (evidence-only otherwise). web_tls predates the
-# contract and keeps its eager binder; reconciling it is deferred technical debt (ADR-0019).
-_STRICT_BINDERS = frozenset({"dns_posture"})
+# Per-tool finding binders. Strict tools create a Scan/Finding ONLY when a finding is derived
+# (ADR-0019); web_tls keeps its eager default binder (reconciliation deferred). Populated below.
+_BINDERS: dict = {}
 
 
 def _enforce_tool_plane(*, expect_tool: bool) -> None:
@@ -164,9 +163,8 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
     # Evidence-first: persist the hash chain (primary truth), THEN derive findings only where the
     # evidence binds to exactly one asset. Evidence-only when there is no asset or more than one.
     # The semantic contract (ADR-0019) — a Scan/Finding is created ONLY when a finding is derived —
-    # is honored by the strict binder; web_tls keeps its existing binder (reconciliation deferred).
-    binder = (_bind_and_derive_findings_strict if tool_key in _STRICT_BINDERS
-              else _bind_and_derive_findings)
+    # is honored by the strict binders; web_tls keeps its existing binder (reconciliation deferred).
+    binder = _BINDERS.get(tool_key, _bind_and_derive_findings)
     with session_scope() as session:
         ids = persist_evidence_chain(session, tenant_id=tid, evidences=evidences)
         bound = binder(session, tid, tool_key, evidences)
@@ -280,6 +278,69 @@ def _bind_and_derive_findings_strict(session, tenant_id, tool_key, evidences):  
             ))
         bound.append((str(asset.customer_id), len(raws)))
     return bound
+
+
+def _asset_for_target_ip(session, tenant_id, ip, now):  # noqa: ANN001, ANN202
+    """The asset named by a valid, asset-bound authorization that cleared this IP target, or None.
+
+    nmap findings attach to an EXISTING asset (via Authorization.asset_id) only — the provider never
+    creates IP/Service nodes. A scope-based (asset_id-less) authorization ⇒ Evidence-only.
+    """
+    rows = session.execute(
+        select(Authorization).where(
+            Authorization.tenant_id == tenant_id, Authorization.revoked_at.is_(None),
+            Authorization.asset_id.isnot(None),
+            Authorization.valid_from <= now, Authorization.valid_until >= now)
+    ).scalars()
+    for a in rows:
+        for t in a.authorized_targets or []:
+            if str(t.get("value")) == str(ip):
+                return session.get(Asset, a.asset_id)
+    return None
+
+
+def _bind_nmap_findings(session, tenant_id, tool_key, evidences):  # noqa: ANN001, ANN202
+    """Bind nmap findings to the asset named by each target IP's authorization (ADR-0019 strict)."""
+    from guardian_scanner.normalize import to_finding
+    from guardian_scanner.tools import registry
+
+    provider = registry.tool_for(tool_key)
+    if provider is None:
+        return []
+    now = dt.datetime.now(dt.UTC)
+    by_ip: dict[str, list] = {}
+    for e in evidences:
+        if e.kind == "nmap_service":
+            by_ip.setdefault(e.target, []).append(e)
+
+    bound: list[tuple[str, int]] = []
+    for ip, ip_evidence in sorted(by_ip.items()):
+        asset = _asset_for_target_ip(session, tenant_id, ip, now)
+        if asset is None:
+            continue  # Evidence-only: no asset-bound authorization for this IP
+        raws = [r for r in (provider.normalize(e) for e in ip_evidence) if r is not None]
+        if not raws:
+            continue
+        customer = session.get(Customer, asset.customer_id)
+        criticality = customer.criticality if customer is not None else "medium"
+        scan = Scan(tenant_id=tenant_id, customer_id=asset.customer_id, asset_id=asset.id,
+                    trigger="tool", status="completed", requested_engines=[tool_key])
+        session.add(scan)
+        session.flush()
+        run = ScanEngineRun(scan_id=scan.id, engine=tool_key[:30], status="completed",
+                            tool_versions={tool_key: provider.version})
+        session.add(run)
+        session.flush()
+        for raw in raws:
+            session.add(to_finding(
+                raw, tenant_id=tenant_id, customer_id=asset.customer_id, scan_id=scan.id,
+                engine_run_id=run.id, asset_id=asset.id, exposure=asset.exposure,
+                asset_criticality=criticality, business_impact=criticality))
+        bound.append((str(asset.customer_id), len(raws)))
+    return bound
+
+
+_BINDERS.update({"dns_posture": _bind_and_derive_findings_strict, "nmap": _bind_nmap_findings})
 
 
 # ── Provider #2: artifact analysis (asset-anchored, non-network). Reuses the same rail. ──

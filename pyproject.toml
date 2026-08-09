@@ -85,6 +85,8 @@ web_tls = "guardian_scanner.tools.providers.web_tls_provider:WebTlsProvider"
 pcap_meta = "guardian_scanner.tools.providers.pcap_provider:PcapMetaProvider"
 # Offline DNS / email-security posture — posture branch (absence-as-evidence), no network, no deps.
 dns_posture = "guardian_scanner.tools.providers.dns_posture_provider:DnsPostureProvider"
+# Nmap TCP-connect active network discovery (L2) — argv-isolated, no root, stdlib XML, no python-nmap.
+nmap = "guardian_scanner.tools.providers.nmap_provider:NmapProvider"
 
 [tool.setuptools.packages.find]
 # Monorepo: one installable distribution discovering packages from every src root.

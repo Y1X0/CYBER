@@ -40,6 +40,8 @@ class EngineKey(str, Enum):
     PCAP_META = "pcap_meta"
     # Offline DNS / email-security posture provider (Framework — third, absence-as-evidence).
     DNS_POSTURE = "dns_posture"
+    # Nmap TCP-connect active network discovery provider (Framework — first active-binary, L2).
+    NMAP = "nmap"
 
 
 # Engines that actively probe a live target and therefore REQUIRE an authorization record
