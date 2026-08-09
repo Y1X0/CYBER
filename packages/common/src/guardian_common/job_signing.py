@@ -51,7 +51,9 @@ def _b64d(s: str) -> bytes:
 
 
 def _dev_allowed() -> bool:
-    return get_settings().env in ("local", "dev", "test")
+    # Use the platform's canonical dev-env set (local/dev/development/test/ci) — the same gate every
+    # other dev fallback uses. Production is never in it, so the dev keypair stays refused there.
+    return get_settings().is_local_or_dev
 
 
 def _private_key() -> Ed25519PrivateKey:

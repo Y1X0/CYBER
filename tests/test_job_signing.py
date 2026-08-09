@@ -92,6 +92,7 @@ def test_public_key_only_plane_cannot_sign(monkeypatch):
 
     class _S:
         env = "production"
+        is_local_or_dev = False                         # production ⇒ no dev-keypair fallback
         job_signing_private_key = ""
         job_signing_public_key = pub_b64
 
@@ -101,6 +102,7 @@ def test_public_key_only_plane_cannot_sign(monkeypatch):
     # …but it CAN still verify a job the dispatcher signed with the matching private key.
     class _D:
         env = "local"
+        is_local_or_dev = True
         job_signing_private_key = ""
         job_signing_public_key = ""
     monkeypatch.setattr(job_signing, "get_settings", lambda: _D())
