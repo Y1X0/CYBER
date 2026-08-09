@@ -61,5 +61,6 @@ The nine foundational decisions (ADR-001 … ADR-009) that anchor the initial bu
 | [021](0021-capability-governance-phase-a.md) | Capability Governance (Phase A): identity-gated tool execution — capability levels L0–L5 derived from primitives, role ceilings, platform owner, service-account scopes, actor in audit; no migration |
 | [022](0022-phase-b-persistent-governance.md) | Phase B: persistent authorization — platform_grants, campaigns, campaign_members, approvals, capability_grants, tool_catalog + audit-immutability trigger; first migration after 0009 (`0010_phase_b_governance`), additive + reversible |
 | [023](0023-nmap-active-network-discovery.md) | Nmap active network discovery provider (L2): argv-isolated TCP-connect scan, no root, no NSE/UDP/OS, bounded/killable subprocess, offline-first, conservative findings; OS-level egress isolation deferred |
+| [024](0024-execution-backend-uid-nft-egress.md) | Execution-backend seam + uid+nftables kernel-level egress isolation for external binaries (per-run uid, scope-derived nft allowlist, teardown, reaper); closes the ADR-023 gap; CAP_NET_ADMIN on worker-tools only; no migration |
 
-New ADRs start at **ADR-024** (ADR-020 reserved for the Nmap provider Discovery).
+New ADRs start at **ADR-025** (ADR-020 reserved for the Nmap provider Discovery).

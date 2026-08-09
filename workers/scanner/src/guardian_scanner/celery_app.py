@@ -3,9 +3,19 @@
 from __future__ import annotations
 
 from celery import Celery
+from celery.signals import worker_ready
 from guardian_common.config import get_settings
 
 settings = get_settings()
+
+
+@worker_ready.connect
+def _reap_isolation_orphans(**_kwargs) -> None:  # noqa: ANN003
+    """On tool-plane startup, delete nft egress tables orphaned by a crashed run."""
+    if not get_settings().tool_plane:
+        return
+    from guardian_scanner.tools.backends.uid_nft import reap_orphans
+    reap_orphans()
 
 celery_app = Celery(
     "guardian",

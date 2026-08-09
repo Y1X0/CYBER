@@ -151,10 +151,16 @@ services:
       redis:
         condition: service_healthy
     networks: [recon-cache]          # redis broker only; no route to the database or the API
+    # CAP_NET_ADMIN (worker-tools ONLY) lets the uid+nft backend confine an external binary's egress
+    # at the kernel, per run, from the EffectiveScope. NOT privileged; no CAP_NET_RAW (nmap -sT needs
+    # none). The container has its own netns, so its nft rules never touch the host or other workers.
+    cap_add: [NET_ADMIN]
     mem_limit: 1g
     cpus: 1.0
     pids_limit: 512
-    command: celery -A guardian_scanner.celery_app.celery_app worker --loglevel=info --concurrency=2 -Q tools
+    # concurrency=1: tool runs are serialized in this process so per-run uids are unique and one run's
+    # nft rules can never affect another. Scale out with more worker-tools replicas (each its own netns).
+    command: celery -A guardian_scanner.celery_app.celery_app worker --loglevel=info --concurrency=1 -Q tools
 
 volumes:
   pgdata:

@@ -32,7 +32,7 @@ from guardian_core.tool import (
     job_to_wire,
 )
 from guardian_db.audit import record_audit
-from guardian_db.models import Asset, Authorization, Customer, Scan, ScanEngineRun
+from guardian_db.models import Asset, Authorization, Customer, Scan, ScanEngineRun, ToolCatalog
 from guardian_db.session import session_scope
 from sqlalchemy import select
 
@@ -48,6 +48,19 @@ _ARTIFACT_MAX_BYTES = 2 * 1024 * 1024
 # Per-tool finding binders. Strict tools create a Scan/Finding ONLY when a finding is derived
 # (ADR-0019); web_tls keeps its eager default binder (reconciliation deferred). Populated below.
 _BINDERS: dict = {}
+
+# Default execution backend per tool when the catalog does not override it. External binaries get
+# the kernel-isolating uid+nft backend; everything else stays in-process. Admins can override via
+# tool_catalog.metadata["execution_backend"].
+_DEFAULT_BACKENDS = {"nmap": "uid_nft"}
+
+
+def _execution_backend_for(session, tool_key):  # noqa: ANN001, ANN202
+    """The isolation backend for a tool: catalog metadata override, else the code default."""
+    cat = session.get(ToolCatalog, tool_key)
+    if cat is not None and (cat.metadata_ or {}).get("execution_backend"):
+        return cat.metadata_["execution_backend"]
+    return _DEFAULT_BACKENDS.get(tool_key, "inproc")
 
 
 def _enforce_tool_plane(*, expect_tool: bool) -> None:
@@ -127,6 +140,7 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
 
         authorized = _authorized_target_values(session, tid, now)
         scope = derive_effective_scope(requested_targets or [], authorized, caps, policy)
+        backend_name = _execution_backend_for(session, tool_key)
         decision = evaluate_tool_policy(caps, scope, human_approved=human_approved)
         record_audit(
             session, action="tool.job.decision", tenant_id=tid, actor_id=gov.actor_uuid,
@@ -151,8 +165,9 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
                 return {"status": "forbidden", "tool": tool_key, "level": gov.required_level,
                         "reasons": ["approval already consumed"]}
 
+    job_settings = {**(settings or {}), "_execution_backend": backend_name}
     job = ToolJob(tenant_id=tenant_id, job_id=uuid.uuid4().hex, tool_key=tool_key,
-                  scope=scope, settings=settings or {})
+                  scope=scope, settings=job_settings)
 
     # Execution plane (no DB) → RawEvidence via result-return.
     wire = run_tool.apply_async(args=[job_to_wire(job)], queue="tools").get(

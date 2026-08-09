@@ -23,7 +23,30 @@ import ipaddress
 import os
 import signal
 import subprocess  # noqa: S404 - fixed argv, shell=False, process-group bounded
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+
+# The per-run unprivileged uid the external binary must drop to (set by the uid+nft backend). When
+# set, the binary runs as this uid so host nftables can confine its egress at the kernel by skuid.
+_run_uid: ContextVar[int | None] = ContextVar("guardian_run_uid", default=None)
+
+
+@contextmanager
+def run_as_uid(uid: int):
+    """Bind the ambient run-uid so a subsequently spawned binary drops to it before exec."""
+    token = _run_uid.set(uid)
+    try:
+        yield
+    finally:
+        _run_uid.reset(token)
+
+
+def _drop_privs(uid: int):  # pragma: no cover - runs in the forked child before exec
+    os.setgroups([])
+    os.setgid(uid)
+    os.setuid(uid)          # real=eff=saved=uid ⇒ root cannot be regained
+
 
 _HOST_TIMEOUT = "60s"
 _DEFAULT_WALL = 120          # seconds — outer kill deadline
@@ -75,10 +98,12 @@ def _killpg(proc: subprocess.Popen) -> None:
 def run_nmap(argv: list[str], *, wall_seconds: int = _DEFAULT_WALL,
              max_output: int = _MAX_OUTPUT) -> NmapResult:  # pragma: no cover - exercised via fakes
     """Run nmap in its own process group, bounded by wall time and output size. Never raises."""
+    uid = _run_uid.get()
+    preexec = (lambda: _drop_privs(uid)) if uid is not None else None
     try:
         proc = subprocess.Popen(  # noqa: S603 - argv is validated/fixed, shell=False
             argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL, start_new_session=True,
+            stdin=subprocess.DEVNULL, start_new_session=True, preexec_fn=preexec,
         )
     except FileNotFoundError:
         return NmapResult(status="not_installed")
