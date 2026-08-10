@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 import jwt
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from guardian_common.config import get_settings
 from guardian_common.security import decode_access_token
@@ -130,5 +130,21 @@ def require_reviewer(identity: Identity = Depends(get_current_identity)) -> Iden
     return identity
 
 
-def client_ip(x_forwarded_for: str | None = Header(default=None)) -> str | None:
-    return x_forwarded_for.split(",")[0].strip() if x_forwarded_for else None
+def client_ip(request: Request) -> str | None:
+    """Client IP for audit + rate limiting, from a TRUSTED source (P1-①).
+
+    X-Forwarded-For is client-spoofable. By default (GUARDIAN_TRUSTED_PROXY_COUNT=0) we use the
+    socket peer and IGNORE the header — an attacker cannot change their bucket by setting XFF. When
+    the app sits behind N trusted proxies that append XFF, set the count to N: the real client is
+    the entry just before those N trusted hops. An attacker can only PREPEND entries (to the left of
+    that position), so the selected IP cannot be forged. A header shorter than expected falls back
+    to the peer (fail-safe, never to an attacker-controlled value)."""
+    peer = request.client.host if request.client else None
+    n = get_settings().trusted_proxy_count
+    if n <= 0:
+        return peer
+    xff = request.headers.get("x-forwarded-for")
+    if not xff:
+        return peer
+    parts = [p.strip() for p in xff.split(",") if p.strip()]
+    return parts[-(n + 1)] if len(parts) >= n + 1 else peer

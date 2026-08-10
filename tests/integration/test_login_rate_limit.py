@@ -34,6 +34,12 @@ def _login(client, ip, email="nobody@example.com"):
                        json={"email": email, "password": "wrong-password"})
 
 
+def _login_xff(client, xff, email):
+    return client.post("/api/v1/auth/login",
+                       headers={"X-Forwarded-For": xff},
+                       json={"email": email, "password": "wrong-password"})
+
+
 def test_login_is_rate_limited_after_threshold(client_and_limiter):
     client, _lim = client_and_limiter
     codes = [_login(client, "203.0.113.7").status_code for _ in range(4)]
@@ -50,13 +56,15 @@ def test_rate_limit_sets_retry_after(client_and_limiter):
     assert int(resp.headers["Retry-After"]) >= 1
 
 
-def test_limit_is_per_source_ip(client_and_limiter):
-    # Distinct accounts isolate the IP dimension (the limiter also caps per-account, by design).
+def test_xff_and_email_rotation_cannot_bypass_the_limit(client_and_limiter):
+    # P1-①: the limiter keys on the TRUSTED socket peer (trusted_proxy_count=0 in ci), so rotating
+    # BOTH X-Forwarded-For AND the email per request no longer yields a fresh bucket — the CPU-DoS
+    # bypass is closed. All requests share the one peer bucket, so the threshold still fires.
     client, _lim = client_and_limiter
-    for _ in range(3):
-        _login(client, "203.0.113.9", email="ip9@example.com")
-    assert _login(client, "203.0.113.9", email="ip9@example.com").status_code == 429   # IP exhausted
-    assert _login(client, "198.51.100.4", email="ip4@example.com").status_code == 401  # other IP ok
+    codes = [_login_xff(client, f"{i}.{i}.{i}.{i}", email=f"u{i}@example.com").status_code
+             for i in range(1, 6)]
+    assert codes[:3] == [401, 401, 401]
+    assert 429 in codes[3:]                           # spoofing XFF + email did not escape the limit
 
 
 def test_429_is_identical_for_known_and_unknown_accounts(client_and_limiter):

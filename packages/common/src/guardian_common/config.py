@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     # gateway concern (this in-app limiter is per-process). 0 disables the limiter.
     auth_rate_limit_per_minute: int = 10
 
+    # Trusted reverse-proxy hop count (P1-①). X-Forwarded-For is client-spoofable, so by default (0)
+    # the client IP used for audit + rate limiting is the SOCKET PEER and XFF is ignored entirely.
+    # When the app runs behind N trusted proxies that append XFF, set this to N: the real client is
+    # then the XFF entry just before those N trusted hops, which an attacker cannot forge by
+    # prepending spoofed entries. Must match the actual proxy topology (enforced, not a convention).
+    trusted_proxy_count: int = 0
+
     # Envelope-encryption key for credential references (5A). Generate: openssl rand -hex 32.
     # Empty falls back to a dev-only key (refused outside local/dev, like the JWT secret). This is
     # the credential KMS master — it decrypts tenant secrets and must live ONLY on the trusted
