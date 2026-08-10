@@ -48,6 +48,20 @@ def _drop_privs(uid: int):  # pragma: no cover - runs in the forked child before
     os.setuid(uid)          # real=eff=saved=uid ⇒ root cannot be regained
 
 
+# The ONLY environment variables a spawned external binary inherits (P1-α). An ALLOWLIST, not a
+# denylist: the binary gets PATH (to resolve itself) + locale, and NOTHING else — so no GUARDIAN_*
+# secret (broker-seal key, JWT secret, credential KMS key, DB/Redis URLs, signing keys) can ever
+# leak into a compromised binary's /proc/self/environ. A future secret can't slip past an allowlist.
+_CHILD_ENV_ALLOWLIST = ("PATH", "LANG", "LC_ALL", "LC_CTYPE", "TZ")
+
+
+def _child_env() -> dict[str, str]:
+    """A minimal, secret-free environment for the spawned external binary (P1-α)."""
+    env = {k: os.environ[k] for k in _CHILD_ENV_ALLOWLIST if k in os.environ}
+    env.setdefault("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")  # never empty ⇒ binary still resolves
+    return env
+
+
 _HOST_TIMEOUT = "60s"
 _DEFAULT_WALL = 120          # seconds — outer kill deadline
 _MAX_OUTPUT = 4 * 1024 * 1024  # 4 MB XML cap; overflow ⇒ killed + failed
@@ -112,6 +126,7 @@ def run_nmap(argv: list[str], *, wall_seconds: int = _DEFAULT_WALL,
         proc = subprocess.Popen(  # noqa: S603 - argv is validated/fixed, shell=False
             argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL, start_new_session=True, preexec_fn=preexec,
+            env=_child_env(),   # P1-α: scrubbed env — the binary never inherits worker secrets
         )
     except FileNotFoundError:
         return NmapResult(status="not_installed")
