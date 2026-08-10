@@ -10,6 +10,7 @@ from guardian_db.models import User
 from sqlalchemy.orm import Session
 
 from guardian_api.deps import Identity, client_ip, get_current_identity, get_db
+from guardian_api.ratelimit import login_limiter
 from guardian_api.schemas import LoginRequest, MeResponse, TokenResponse
 
 router = APIRouter()
@@ -22,7 +23,20 @@ def login(
     db: Session = Depends(get_db),
     ip: str | None = Depends(client_ip),
 ) -> TokenResponse:
-    user = db.query(User).filter(User.email == body.email.lower()).first()
+    # Rate limit BEFORE the Argon2 verify (P1-γ): bounds guessing + CPU-exhaustion from one source.
+    # Keyed by IP and by account; the 429 is identical whether or not the account exists (no
+    # user-enumeration signal). Counting every attempt is fine — interactive logins stay well under.
+    limiter = login_limiter()
+    email = body.email.lower()
+    ok_ip, retry_ip = limiter.hit(f"ip:{ip or 'unknown'}")
+    ok_acct, retry_acct = limiter.hit(f"acct:{email}")
+    if not (ok_ip and ok_acct):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS, "too many login attempts",
+            headers={"Retry-After": str(int(max(retry_ip, retry_acct)) + 1)},
+        )
+
+    user = db.query(User).filter(User.email == email).first()
     # Constant-ish response regardless of which factor failed (avoid user enumeration).
     # When the user is unknown, still run one Argon2 verification so the response time does
     # not reveal whether the email exists (timing oracle).

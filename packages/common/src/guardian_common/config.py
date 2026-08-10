@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_ttl_minutes: int = 60
 
+    # Login rate limit (P1-γ): max /auth/login attempts per source IP and per account within a
+    # 60s sliding window. Bounds password guessing and Argon2 CPU-exhaustion from a single source
+    # BEFORE the hash runs. Raise it for shared-NAT deployments; a global limit across replicas is a
+    # gateway concern (this in-app limiter is per-process). 0 disables the limiter.
+    auth_rate_limit_per_minute: int = 10
+
     # Envelope-encryption key for credential references (5A). Generate: openssl rand -hex 32.
     # Empty falls back to a dev-only key (refused outside local/dev, like the JWT secret). This is
     # the credential KMS master — it decrypts tenant secrets and must live ONLY on the trusted
