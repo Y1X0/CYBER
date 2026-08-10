@@ -142,6 +142,15 @@ services:
     # so uvicorn is never exposed to the internet (Phase 3).
     networks: [backend]
     restart: unless-stopped
+    stop_grace_period: 30s        # let uvicorn drain in-flight requests before SIGKILL
+    # Container healthcheck = LIVENESS (/health, no DB) so a DB blip doesn't kill the API. The
+    # LB/orchestrator should gate TRAFFIC on READINESS (/health/ready, checks DB) — see docs 08.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     # Scale horizontally — every replica starts only AFTER seed completes, so no migration race.
     deploy:
       replicas: ${GUARDIAN_API_REPLICAS:-2}
@@ -177,6 +186,15 @@ services:
         condition: service_healthy
     networks: [backend]
     restart: unless-stopped
+    # acks_late + reject_on_worker_lost make a hard stop safe (task redelivers); still allow a warm
+    # drain. Health = the worker answers a Celery ping over the broker.
+    stop_grace_period: 120s
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A guardian_scanner.celery_app.celery_app inspect ping -d celery@$$(hostname) --timeout 5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   # ── Execution planes (DB-less, secret-minimal; joined ONLY to recon-cache) ──────────────────────
   worker-recon:
@@ -196,6 +214,13 @@ services:
         condition: service_healthy
     networks: [recon-cache]
     restart: unless-stopped
+    stop_grace_period: 120s
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A guardian_scanner.celery_app.celery_app inspect ping -d celery@$$(hostname) --timeout 5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   worker-tools:
     image: *app-image
@@ -218,3 +243,10 @@ services:
         condition: service_healthy
     networks: [recon-cache]
     restart: unless-stopped
+    stop_grace_period: 120s
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A guardian_scanner.celery_app.celery_app inspect ping -d celery@$$(hostname) --timeout 5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
