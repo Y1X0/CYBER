@@ -36,12 +36,12 @@ class _ConnSpy:
         return types.SimpleNamespace(close=lambda: None)   # a stand-in socket; no real network
 
 
-# ── the pin: connects to the validated IP, blocks internal, IPv4-mapped, rebinding ───────────────
+# ── the pin: validates EVERY connect, blocks internal / IPv4-mapped / rebinding / IDN ─────────────
 def test_pin_connects_to_the_validated_public_ip(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: _addrinfo("93.184.216.34"))
     spy = _ConnSpy()
     monkeypatch.setattr(socket, "create_connection", spy)     # becomes the "real" the pin wraps
-    with _pinned_egress("public.example"):
+    with _pinned_egress():
         socket.create_connection(("public.example", 443))
     assert spy.address == ("93.184.216.34", 443)              # pinned to the IP, not the hostname
 
@@ -51,7 +51,7 @@ def test_pin_connects_to_the_validated_public_ip(monkeypatch):
 def test_pin_blocks_internal_targets(monkeypatch, ip):
     monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: _addrinfo(ip))
     monkeypatch.setattr(socket, "create_connection", _ConnSpy())
-    with _pinned_egress("evil.example"), pytest.raises(PermissionError):
+    with _pinned_egress(), pytest.raises(PermissionError):
         socket.create_connection(("evil.example", 443))
 
 
@@ -59,7 +59,7 @@ def test_pin_blocks_ipv4_mapped_ipv6_metadata(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo",
                         lambda *a, **k: _addrinfo("::ffff:169.254.169.254"))
     monkeypatch.setattr(socket, "create_connection", _ConnSpy())
-    with _pinned_egress("evil.example"), pytest.raises(PermissionError):
+    with _pinned_egress(), pytest.raises(PermissionError):
         socket.create_connection(("evil.example", 443))
 
 
@@ -68,21 +68,39 @@ def test_pin_rebinding_multi_record_is_blocked(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo",
                         lambda *a, **k: _addrinfo("93.184.216.34", "10.1.2.3"))
     monkeypatch.setattr(socket, "create_connection", _ConnSpy())
-    with _pinned_egress("rebind.example"), pytest.raises(PermissionError):
+    with _pinned_egress(), pytest.raises(PermissionError):
         socket.create_connection(("rebind.example", 443))
 
 
-def test_pin_passes_through_non_target_host(monkeypatch):
+def test_pin_validates_idn_punycode_host_not_skipped(monkeypatch):
+    # P1-Ⓑ regression: httpcore connects with the IDNA/punycode host; it must be VALIDATED, not
+    # passed through on a Unicode-vs-punycode mismatch. An internal punycode target must be refused.
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: _addrinfo("169.254.169.254"))
+    monkeypatch.setattr(socket, "create_connection", _ConnSpy())
+    with _pinned_egress(), pytest.raises(PermissionError):
+        socket.create_connection(("xn--bcher-kva.example", 443))   # punycode host → still validated
+
+
+def test_pin_validates_and_pins_public_punycode_host(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: _addrinfo("93.184.216.34"))
     spy = _ConnSpy()
     monkeypatch.setattr(socket, "create_connection", spy)
-    with _pinned_egress("target.example"):
-        socket.create_connection(("other.host", 8080))       # not the pinned host → untouched
-    assert spy.address == ("other.host", 8080)
+    with _pinned_egress():
+        socket.create_connection(("xn--bcher-kva.example", 443))
+    assert spy.address == ("93.184.216.34", 443)              # punycode host validated + pinned
+
+
+def test_pin_validates_every_host_no_passthrough(monkeypatch):
+    # There is NO host-equality gate: ANY host connected during the window is validated (no bypass).
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: _addrinfo("10.9.9.9"))
+    monkeypatch.setattr(socket, "create_connection", _ConnSpy())
+    with _pinned_egress(), pytest.raises(PermissionError):
+        socket.create_connection(("anything.example", 8080))
 
 
 def test_pin_restores_create_connection():
     original = socket.create_connection
-    with _pinned_egress("h"):
+    with _pinned_egress():
         assert socket.create_connection is not original
     assert socket.create_connection is original              # restored on exit
 
@@ -109,14 +127,14 @@ def test_engine_pins_and_does_not_follow_redirects(monkeypatch):
     seen = {}
 
     @dast_engine.contextmanager
-    def _fake_pin(host):
-        seen["host"] = host
+    def _fake_pin():
+        seen["wrapped"] = True
         yield
 
     monkeypatch.setattr(dast_engine, "_pinned_egress", _fake_pin)
     monkeypatch.setattr("httpx.Client", _SpyClient)
     findings = list(DastEngine().run(_ctx("https://public.example/")))
-    assert seen.get("host") == "public.example"              # the GET is wrapped in the pin
+    assert seen.get("wrapped") is True                       # the GET is wrapped in the pin
     assert _SpyClient.last.get("follow_redirects") is False   # redirects not followed
     assert _SpyClient.last.get("timeout") == 10.0
     assert any("Content-Security-Policy" in f.title for f in findings)   # public target scanned

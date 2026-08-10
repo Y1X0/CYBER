@@ -10,7 +10,6 @@ from __future__ import annotations
 import socket
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from urllib.parse import urlsplit
 
 from guardian_core.enums import EngineKey, Severity
 from guardian_core.evidence import Evidence, EvidenceKind
@@ -21,25 +20,25 @@ from guardian_scanner.engines.base import EngineHealth, ScanContext
 
 
 @contextmanager
-def _pinned_egress(host: str) -> Iterator[None]:
-    """Pin outbound connections to `host` to a pre-validated PUBLIC IP for the enclosed request
-    (P1-②, DNS-rebinding/TOCTOU-safe).
+def _pinned_egress() -> Iterator[None]:
+    """Pin EVERY outbound connection made during the enclosed request to a pre-validated PUBLIC IP
+    (P1-②/P1-Ⓑ, DNS-rebinding + IDN safe).
 
-    The prior guard resolved the host, then handed the *hostname* to httpx, which re-resolved at
-    connect time — a low-TTL rebind between check and connect could still reach an internal address.
-    Here we intercept `socket.create_connection` (the chokepoint httpx/httpcore uses) and, at the
-    time, resolve+validate via the repo's `sandbox._resolve_public_address` (which blocks
-    private/loopback/link-local/metadata AND IPv4-mapped-IPv6, and returns ONE validated IP), then
-    connect to THAT IP. There is no second resolution, so rebinding cannot redirect the socket; TLS
-    SNI + Host stay the hostname, so certificate validation is unaffected. A rebind to an internal
-    address raises PermissionError → the caller fails closed.
+    We intercept `socket.create_connection` (the chokepoint httpx/httpcore uses) and, at connect
+    time, resolve+validate whatever host it is actually connecting to via the repo's
+    `sandbox._resolve_public_address` (blocks private/loopback/link-local/metadata AND
+    IPv4-mapped-IPv6, returns ONE validated IP), then connect to THAT IP. There is NO host-equality
+    comparison, so a Unicode-vs-IDNA/punycode mismatch cannot slip an unvalidated connection past —
+    every connect is validated. No second resolution ⇒ rebinding cannot redirect the socket; TLS
+    SNI/Host stay the hostname, so certificate validation is unaffected. The context wraps a single
+    GET (follow_redirects=False), so the only connection is the target; an internal target or rebind
+    raises PermissionError → the caller fails closed.
     """
     real_create_connection = socket.create_connection
 
     def _pinned(address, *args, **kwargs):  # noqa: ANN001, ANN202
-        h, port = address[0], address[1]
-        if h == host:
-            address = (sandbox._resolve_public_address(h, port), port)  # validate + pin, at connect
+        host, port = address[0], address[1]
+        address = (sandbox._resolve_public_address(host, port), port)  # validate + pin each connect
         return real_create_connection(address, *args, **kwargs)
 
     socket.create_connection = _pinned  # type: ignore[assignment]
@@ -145,22 +144,18 @@ class DastEngine:
         snap = ctx.asset_config.get("http_snapshot")
         if snap:
             return snap
-        # Live mode: ONE hardened GET against the authorized web asset (P1-β). SSRF discipline
-        # mirrors web_checks/ct_surface: the DAST engine runs on the scanner plane WITHOUT kernel
-        # egress isolation, so it must self-guard — refuse a target that resolves to a private/
-        # loopback/link-local/metadata address (DNS-rebinding), and NEVER follow a response-chosen
-        # redirect into a new (possibly internal/unauthorized) host.
+        # Live mode: ONE hardened GET against the authorized web asset. The DAST engine runs on the
+        # scanner plane WITHOUT kernel egress isolation, so it self-guards: every outbound socket
+        # is pinned to a validated PUBLIC IP (refusing private/loopback/link-local/metadata +
+        # IPv4-mapped-IPv6, rebinding- and IDN-safe), and it NEVER follows a redirect.
         url = ctx.asset_identifier
         if not url.startswith(("http://", "https://")):
-            return None
-        host = urlsplit(url).hostname
-        if not host:
             return None
         try:
             import httpx  # noqa: PLC0415
 
-            # Pin to a validated public IP; a rebind to internal raises, caught below (fail-closed).
-            with _pinned_egress(host), httpx.Client(follow_redirects=False, timeout=10.0) as client:
+            # Pin every connect to a validated public IP; internal/rebind raises, caught below.
+            with _pinned_egress(), httpx.Client(follow_redirects=False, timeout=10.0) as client:
                 resp = client.get(url, headers={"user-agent": "guardian-dast"})
             cookies = [
                 {
