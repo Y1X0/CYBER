@@ -108,7 +108,13 @@ def _free_uid(uid: int) -> None:
 
 # ── nftables helpers ──
 def _nft(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["nft", *args], capture_output=True, text=True, check=False)  # noqa: S603,S607
+    try:
+        return subprocess.run(["nft", *args], capture_output=True, text=True, check=False)  # noqa: S603,S607
+    except FileNotFoundError as exc:
+        # P1-ε: the kernel-egress backend REQUIRES nftables. If the binary is absent we cannot
+        # confine an external binary — fail closed with a clear error, never run unconfined.
+        raise IsolationError(
+            "nftables (nft) is not installed — cannot confine external-binary egress") from exc
 
 def _table(job_id: str) -> str:
     safe = "".join(c for c in job_id if c.isalnum() or c == "_")[:48]
@@ -150,7 +156,10 @@ def _install_rules(table: str, uid: int, job: ToolJob) -> None:
 
 
 def _delete_table(table: str) -> None:
-    _nft("delete", "table", "inet", table)  # ignore errors (may not exist)
+    try:
+        _nft("delete", "table", "inet", table)  # ignore errors (may not exist)
+    except IsolationError:
+        pass  # nft absent ⇒ nothing was ever created; teardown is a no-op (keeps `finally` clean)
 
 
 @contextmanager
@@ -169,8 +178,16 @@ def isolate(job: ToolJob):  # noqa: ANN201
 
 
 def reap_orphans() -> int:
-    """Delete any `guardian_run_*` tables left by a crashed run. Call at worker startup."""
-    listing = _nft("list", "tables", "inet")
+    """Delete any `guardian_run_*` tables left by a crashed run. Call at worker startup.
+
+    Best-effort cleanup: if nftables is unavailable it logs and returns 0 rather than aborting
+    worker startup — a missing binary is surfaced (fail-closed) at the actual run, not here.
+    """
+    try:
+        listing = _nft("list", "tables", "inet")
+    except IsolationError as exc:
+        log.warning("nft_unavailable_reaper_skipped", reason=str(exc))
+        return 0
     removed = 0
     for line in (listing.stdout or "").splitlines():
         parts = line.split()

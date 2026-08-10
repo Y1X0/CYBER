@@ -5,9 +5,12 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
-# git: required by the scanner worker to shallow-clone repo assets.
+# git: the scanner worker shallow-clones repo assets.
+# nftables (P1-ε): the uid_nft execution backend builds a per-run kernel egress allowlist with `nft`;
+# without the binary an external-binary run fails closed (never runs unconfined), so it MUST ship in
+# the image that runs worker-tools.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git curl \
+    && apt-get install -y --no-install-recommends git curl nftables \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
