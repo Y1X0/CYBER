@@ -30,7 +30,7 @@ def _prod(**over):
         env="production",
         database_url="postgresql+psycopg://guardian:guardian@db:5432/guardian?sslmode=verify-full",
         app_database_url="postgresql+psycopg://guardian_app:pw@db:5432/guardian?sslmode=verify-full",
-        redis_url="rediss://redis:6379/0",
+        redis_url="rediss://:rpw@redis:6379/0",
         encryption_key=_STRONG, jwt_secret=_STRONG,
         broker_seal_key=_STRONG + "-seal",  # P1-A: set and distinct from encryption_key
         bootstrap_admin_password="a-strong-admin-password",  # P1-B: default is refused in prod
@@ -49,7 +49,7 @@ def test_production_requires_rediss_scheme():
     # A non-TLS scheme of any shape is refused; only rediss:// clears the gate.
     with pytest.raises(ValidationError, match="TLS"):
         _prod(redis_url="redis://cache:6379/1")
-    s = _prod(redis_url="rediss://cache:6379/1")
+    s = _prod(redis_url="rediss://:rpw@cache:6379/1")
     assert s.redis_url.startswith("rediss://")
 
 

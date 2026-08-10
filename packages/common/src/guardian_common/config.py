@@ -29,6 +29,17 @@ def _postgres_enforces_tls(dsn: str) -> bool:
     return mode in _TLS_SSLMODES
 
 
+def _redis_is_authenticated(url: str) -> bool:
+    """True iff the Redis URL carries AUTH credentials — a non-empty password in userinfo (P1-δ).
+
+    Covers both legacy password-only (``redis://:pw@host``) and ACL user+password
+    (``redis://user:pw@host``); redis-py and kombu both consume the URL password for AUTH.
+    """
+    from urllib.parse import urlsplit
+
+    return bool(urlsplit(url).password)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="GUARDIAN_", env_file=".env", extra="ignore", case_sensitive=False
@@ -216,6 +227,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "GUARDIAN_REDIS_URL must use TLS (rediss://) outside local/dev — the broker and "
                 "result backend carry jobs and evidence"
+            )
+        # Redis authentication (P1-δ): an unauthenticated broker lets a compromised execution-plane
+        # worker read/tamper the queue, result backend, and replay-nonce store. Require AUTH/ACL
+        # credentials in the URL outside local/dev — all three clients derive from this one URL.
+        if not _redis_is_authenticated(self.redis_url):
+            raise ValueError(
+                "GUARDIAN_REDIS_URL must carry AUTH credentials (rediss://:PASSWORD@host or "
+                "user:PASSWORD@host) outside local/dev — an unauthenticated broker/replay store "
+                "lets a compromised execution-plane worker tamper the queue and defeat replay"
             )
         # Bootstrap-admin credential (P1-B): never boot production with the publicly-documented
         # default owner password — the seed would otherwise create a known-credential owner.

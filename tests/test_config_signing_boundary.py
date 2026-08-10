@@ -28,7 +28,7 @@ def _settings(**over):
         env="production",
         database_url="postgresql+psycopg://guardian:guardian@db:5432/guardian?sslmode=verify-full",
         app_database_url="postgresql+psycopg://guardian_app:pw@db:5432/guardian?sslmode=verify-full",
-        redis_url="rediss://redis:6379/0",
+        redis_url="rediss://:rpw@redis:6379/0",
         encryption_key=_STRONG, jwt_secret=_STRONG, broker_seal_key=_SEAL,
         bootstrap_admin_password="a-strong-admin-password",  # P1-B: default is refused in prod
         tool_plane=False, job_signing_private_key="", job_signing_public_key="",

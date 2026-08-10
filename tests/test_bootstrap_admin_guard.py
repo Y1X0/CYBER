@@ -20,7 +20,7 @@ def _prod(**over):
         env="production",
         database_url="postgresql+psycopg://guardian:guardian@db:5432/guardian?sslmode=verify-full",
         app_database_url="postgresql+psycopg://guardian_app:pw@db:5432/guardian?sslmode=verify-full",
-        redis_url="rediss://redis:6379/0",
+        redis_url="rediss://:rpw@redis:6379/0",
         jwt_secret=_STRONG, encryption_key=_STRONG, broker_seal_key=_STRONG + "-seal",
         bootstrap_admin_password="a-strong-admin-password",
     )

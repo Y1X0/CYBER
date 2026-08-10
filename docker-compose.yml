@@ -37,11 +37,16 @@ services:
 
   redis:
     image: redis:7-alpine
+    # P1-δ: the broker + result backend + replay-nonce store must be authenticated so a compromised
+    # execution-plane worker cannot anonymously read/tamper the queue or the nonce store. Every
+    # service connects with the password in its GUARDIAN_REDIS_URL. Production sets a strong value
+    # (config fail-fast requires AUTH credentials outside local/dev); this dev default is for local.
+    command: ["redis-server", "--requirepass", "${GUARDIAN_REDIS_PASSWORD:-dev-redis-pass}"]
     ports:
       - "6379:6379"
     networks: [backend, recon-cache]  # broker + result backend — the recon plane's only shared dep
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$${GUARDIAN_REDIS_PASSWORD:-dev-redis-pass}\" ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -56,7 +61,7 @@ services:
       # non-owner, RLS-enforced role. The `guardian_app` role is created by migration 0005.
       GUARDIAN_DATABASE_URL: postgresql+psycopg://guardian:guardian@db:5432/guardian
       GUARDIAN_APP_DATABASE_URL: postgresql+psycopg://guardian_app:guardian_app@db:5432/guardian
-      GUARDIAN_REDIS_URL: redis://redis:6379/0
+      GUARDIAN_REDIS_URL: redis://:${GUARDIAN_REDIS_PASSWORD:-dev-redis-pass}@redis:6379/0
       GUARDIAN_JWT_SECRET: change-me-dev-only-do-not-use-in-production
       # Credential KMS master: the API encrypts credentials, the default worker decrypts them at scan
       # time. Trusted DB-bound planes ONLY — never the execution planes (P1-A).
@@ -90,7 +95,7 @@ services:
       GUARDIAN_ENV: local
       # Worker uses the admin URL by design: engines run cross-tenant and bypass RLS legitimately.
       GUARDIAN_DATABASE_URL: postgresql+psycopg://guardian:guardian@db:5432/guardian
-      GUARDIAN_REDIS_URL: redis://redis:6379/0
+      GUARDIAN_REDIS_URL: redis://:${GUARDIAN_REDIS_PASSWORD:-dev-redis-pass}@redis:6379/0
       GUARDIAN_JWT_SECRET: change-me-dev-only-do-not-use-in-production
       GUARDIAN_ENCRYPTION_KEY: dev-only-encryption-key-change-me  # credential KMS master (decrypts secret_ref)
       # Broker-seal key (P1-A): the default plane dispatches tool jobs, so it seals/unseals broker
@@ -120,7 +125,7 @@ services:
       # 6C.4: NO DB credentials. The recon plane holds no database URL and has no network route to
       # the DB, so it is architecturally incapable of direct DB access. It returns evidence instead.
       GUARDIAN_DATABASE_URL: ""
-      GUARDIAN_REDIS_URL: redis://redis:6379/0
+      GUARDIAN_REDIS_URL: redis://:${GUARDIAN_REDIS_PASSWORD:-dev-redis-pass}@redis:6379/0
       # P1-A: the recon execution plane holds NO secrets — no JWT (never verifies tokens), no
       # credential KMS master, and no broker-seal key (it does not seal broker payloads). A compromise
       # here yields no key that decrypts credentials or forges platform JWTs. Prod refuses them here.
@@ -150,7 +155,7 @@ services:
     environment:
       GUARDIAN_ENV: local
       GUARDIAN_DATABASE_URL: ""      # NO DB credentials (execution plane is DB-incapable)
-      GUARDIAN_REDIS_URL: redis://redis:6379/0
+      GUARDIAN_REDIS_URL: redis://:${GUARDIAN_REDIS_PASSWORD:-dev-redis-pass}@redis:6379/0
       # P1-A: NO JWT secret (this plane never signs/verifies tokens) and NO credential KMS master
       # (it never decrypts stored credentials). It carries ONLY the broker-seal key, needed to unseal
       # the job it runs and seal the evidence it returns (P1-4). Prod refuses JWT/KMS-master here.
