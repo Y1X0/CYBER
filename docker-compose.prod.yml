@@ -1,0 +1,192 @@
+# ── Security Guardian Platform — PRODUCTION topology (reference) ─────────────────────────────────
+#
+# Provider-neutral production deployment on Compose (the project's reference orchestrator). The same
+# CONTRACT maps to Kubernetes — see docs/deployment/04-network-topology.md for the NetworkPolicy
+# mapping. This file is built up across the Deployment Readiness phases:
+#   P2 database ordering · P3 ingress/TLS · P4 network isolation · P6 redis · P8 probes/restart.
+#
+# RUN:
+#   export GUARDIAN_IMAGE=<registry>/security-guardian@sha256:<digest>   # pinned image, Phase 7
+#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d
+#
+# The migrate + seed one-shot jobs run to completion BEFORE any API replica starts (Phase 2 / P8),
+# so N replicas never race `alembic upgrade head` or the seed (fixes discovery finding D-04).
+#
+# EXTERNAL PRECONDITIONS (operator-provided, out of repo scope — see docs/deployment/*):
+#   * .env.production filled from .env.production.example (Phase 1). Never committed.
+#   * A pinned application image in GUARDIAN_IMAGE (Phase 7).
+#   * Managed Postgres + Redis (recommended) reached via the TLS URLs in .env.production; OR the
+#     self-hosted db/redis services below with operator-provided TLS certs (docs/deployment/02, 06).
+#   * TLS certificates for ingress (Phase 3) and, if self-hosting data stores, for db/redis.
+
+x-app-image: &app-image ${GUARDIAN_IMAGE:-security-guardian:local}
+
+# Shared control-plane secrets block (api, worker-default, and the migrate/seed jobs). The plane
+# split is enforced by which anchor each service references — execution planes use their own blocks
+# below and never see JWT / KMS-master / owner-nothing they must not hold.
+x-control-env: &control-env
+  GUARDIAN_ENV: ${GUARDIAN_ENV:-production}
+  GUARDIAN_LOG_LEVEL: ${GUARDIAN_LOG_LEVEL:-INFO}
+  GUARDIAN_DATABASE_URL: ${GUARDIAN_DATABASE_URL}
+  GUARDIAN_APP_DATABASE_URL: ${GUARDIAN_APP_DATABASE_URL}
+  GUARDIAN_REDIS_URL: ${GUARDIAN_REDIS_URL}
+  GUARDIAN_JWT_SECRET: ${GUARDIAN_JWT_SECRET}
+  GUARDIAN_ENCRYPTION_KEY: ${GUARDIAN_ENCRYPTION_KEY}
+  GUARDIAN_BROKER_SEAL_KEY: ${GUARDIAN_BROKER_SEAL_KEY}
+  GUARDIAN_JOB_SIGNING_PRIVATE_KEY: ${GUARDIAN_JOB_SIGNING_PRIVATE_KEY}
+  GUARDIAN_JOB_SIGNING_PUBLIC_KEY: ${GUARDIAN_JOB_SIGNING_PUBLIC_KEY}
+  GUARDIAN_BOOTSTRAP_TENANT: ${GUARDIAN_BOOTSTRAP_TENANT:-Your Org}
+  GUARDIAN_BOOTSTRAP_ADMIN_EMAIL: ${GUARDIAN_BOOTSTRAP_ADMIN_EMAIL:-admin@example.com}
+  GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD}
+
+networks:
+  # Full isolation rationale + K8s NetworkPolicy mapping in docs/deployment/04-network-topology.md.
+  edge:         # user-facing; only the ingress (Phase 3) is published here
+  backend:      # control plane + default worker reach db/redis here; NOT joined by recon/tools
+  recon-cache:  # the ONLY network the DB-less execution planes join: the redis broker, NO database
+
+volumes:
+  pgdata:       # Postgres data (self-hosted reference; managed DB users remove the db service)
+
+services:
+  # ── Data stores (self-hosted REFERENCE; prefer managed Postgres/Redis in production) ────────────
+  # These exist so the stack is runnable end-to-end on one host. Managed-datastore deployments delete
+  # db + redis here and point GUARDIAN_DATABASE_URL / GUARDIAN_REDIS_URL at the managed endpoints.
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${GUARDIAN_DB_SUPERUSER:-guardian}
+      POSTGRES_PASSWORD: ${GUARDIAN_DB_SUPERUSER_PASSWORD:?set GUARDIAN_DB_SUPERUSER_PASSWORD}
+      POSTGRES_DB: ${GUARDIAN_DB_NAME:-guardian}
+    # TLS (P1-C): the app DSNs require sslmode=verify-full, so a self-hosted db MUST enable TLS.
+    # Drop certs in ./infra/tls/postgres (server.crt/server.key, key 0600, owned by uid 70) and
+    # uncomment — see docs/deployment/02-database.md. Managed DBs terminate TLS for you.
+    #   command: ["postgres", "-c", "ssl=on",
+    #             "-c", "ssl_cert_file=/tls/server.crt", "-c", "ssl_key_file=/tls/server.key"]
+    #   volumes: [ "./infra/tls/postgres:/tls:ro" ]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks: [backend]           # DB is NOT on recon-cache — execution planes have no route to it
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${GUARDIAN_DB_SUPERUSER:-guardian} -d ${GUARDIAN_DB_NAME:-guardian}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    # Full production redis.conf (AOF persistence + AUTH + TLS) is wired in Phase 6. The reference
+    # command here mirrors the dev AUTH so the stack is runnable; Phase 6 replaces it with the conf.
+    command: ["redis-server", "--requirepass", "${GUARDIAN_REDIS_PASSWORD:?set GUARDIAN_REDIS_PASSWORD}"]
+    networks: [backend, recon-cache]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${GUARDIAN_REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── One-shot deployment jobs: migrate → seed (run to completion before the API serves) ──────────
+  migrate:
+    image: *app-image
+    environment: *control-env
+    # ONLY the schema migration. Deterministic, idempotent, converges to head 0011_web_checks_catalog.
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [backend]
+    restart: "no"               # a job, not a service — must exit 0, never loop
+
+  seed:
+    image: *app-image
+    environment: *control-env
+    # Idempotent bootstrap; fail-closed on the default admin password outside local/dev (P1-B).
+    command: ["python", "-m", "guardian_api.seed"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [backend]
+    restart: "no"
+
+  # ── Control plane ───────────────────────────────────────────────────────────────────────────────
+  api:
+    image: *app-image
+    environment:
+      <<: *control-env
+      GUARDIAN_TRUSTED_PROXY_COUNT: ${GUARDIAN_TRUSTED_PROXY_COUNT:-1}
+      GUARDIAN_CORS_ORIGINS: ${GUARDIAN_CORS_ORIGINS}
+      GUARDIAN_GITHUB_WEBHOOK_SECRET: ${GUARDIAN_GITHUB_WEBHOOK_SECRET:-}
+      GUARDIAN_ANTHROPIC_API_KEY: ${GUARDIAN_ANTHROPIC_API_KEY:-}
+    # NO alembic/seed here — migrations run once in the migrate job. Replicas only serve.
+    command: ["uvicorn", "guardian_api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [edge, backend]   # ingress reaches it on edge (Phase 3); db/redis on backend
+    restart: unless-stopped
+    # Scale horizontally — every replica starts only AFTER seed completes, so no migration race.
+    deploy:
+      replicas: ${GUARDIAN_API_REPLICAS:-2}
+
+  worker-default:
+    image: *app-image
+    environment:
+      <<: *control-env
+      GUARDIAN_SANDBOX_ENGINES: ${GUARDIAN_SANDBOX_ENGINES:-true}
+      GUARDIAN_RECON_PLANE: "false"
+    command: ["celery", "-A", "guardian_scanner.celery_app.celery_app", "worker",
+              "--loglevel=info", "--concurrency=4", "-Q", "default"]
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [backend]
+    restart: unless-stopped
+
+  # ── Execution planes (DB-less, secret-minimal; joined ONLY to recon-cache) ──────────────────────
+  worker-recon:
+    image: *app-image
+    environment:
+      GUARDIAN_ENV: ${GUARDIAN_ENV:-production}
+      GUARDIAN_LOG_LEVEL: ${GUARDIAN_LOG_LEVEL:-INFO}
+      GUARDIAN_DATABASE_URL: ""                # DB-incapable
+      GUARDIAN_REDIS_URL: ${GUARDIAN_REDIS_URL}
+      GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD}  # checked on all planes
+      GUARDIAN_SANDBOX_ENGINES: "true"
+      GUARDIAN_RECON_PLANE: "true"
+    command: ["celery", "-A", "guardian_scanner.celery_app.celery_app", "worker",
+              "--loglevel=info", "--concurrency=2", "-Q", "recon"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [recon-cache]
+    restart: unless-stopped
+
+  worker-tools:
+    image: *app-image
+    environment:
+      GUARDIAN_ENV: ${GUARDIAN_ENV:-production}
+      GUARDIAN_LOG_LEVEL: ${GUARDIAN_LOG_LEVEL:-INFO}
+      GUARDIAN_DATABASE_URL: ""                # DB-incapable
+      GUARDIAN_REDIS_URL: ${GUARDIAN_REDIS_URL}
+      GUARDIAN_BROKER_SEAL_KEY: ${GUARDIAN_BROKER_SEAL_KEY}          # unseal job / seal evidence only
+      GUARDIAN_JOB_SIGNING_PUBLIC_KEY: ${GUARDIAN_JOB_SIGNING_PUBLIC_KEY}  # verify-only; never private
+      GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD}
+      GUARDIAN_SANDBOX_ENGINES: "true"
+      GUARDIAN_TOOL_PLANE: "true"
+    # CAP_NET_ADMIN (worker-tools ONLY) for the uid+nft per-run kernel egress allowlist (P1-ε).
+    cap_add: [NET_ADMIN]
+    command: ["celery", "-A", "guardian_scanner.celery_app.celery_app", "worker",
+              "--loglevel=info", "--concurrency=1", "-Q", "tools"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [recon-cache]
+    restart: unless-stopped
