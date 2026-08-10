@@ -72,12 +72,15 @@ def test_tampered_scope_message_rejected_before_provider(monkeypatch):
 
 
 def test_valid_signed_message_executes(monkeypatch):
-    from guardian_scanner.tools.tasks import run_tool
+    from guardian_scanner.tools.tasks import _unseal_result, run_tool
     replay.reset_local_for_tests()
     _install_spy(monkeypatch)
     # The provider runs in the sandbox fork, so its evidence (not a parent-side flag) proves it ran.
     result = run_tool.apply(args=[sign_job(_wire())]).get()
-    assert len(result) == 1 and result[0]["kind"] == "spy"   # authenticated ⇒ runs normally
+    # P1-4: the execution plane returns evidence SEALED — never a plaintext list on the result backend.
+    assert list(result.keys()) == ["_sealed_result"]
+    evidence = _unseal_result(result)
+    assert len(evidence) == 1 and evidence[0]["kind"] == "spy"   # authenticated ⇒ runs normally
 
 
 def _record_backend(chosen):

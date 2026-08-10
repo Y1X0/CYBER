@@ -21,6 +21,7 @@ def _settings(**over):
 
     base = dict(
         env="production", database_url=_OWNER_URL, app_database_url=_APP_URL,
+        redis_url="rediss://db:6379/0",
         jwt_secret=_STRONG_JWT, encryption_key=_STRONG_KEY,
     )
     base.update(over)

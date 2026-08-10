@@ -147,6 +147,13 @@ class Settings(BaseSettings):
                 "GUARDIAN_JOB_SIGNING_PUBLIC_KEY must be set on the tool plane outside local/dev "
                 "so it can verify signed jobs"
             )
+        # Broker/result-backend confidentiality (P1-4): the broker carries signed jobs (sealed
+        # artifacts) and the result backend carries evidence; require TLS in transit off local/dev.
+        if not self.redis_url.startswith("rediss://"):
+            raise ValueError(
+                "GUARDIAN_REDIS_URL must use TLS (rediss://) outside local/dev — the broker and "
+                "result backend carry jobs and evidence"
+            )
         return self
 
 

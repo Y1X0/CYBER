@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import json
 import os
 import socket
 import struct
@@ -229,6 +230,46 @@ def test_observed_endpoints_do_not_become_assets():
     _dispatch(tid, aid, _HTTP_PCAP)                              # capture mentions 10.0.0.5/10.0.0.9
     after = {str(a.id) for a in _assets(tid)}
     assert after == before == {aid}                             # no asset invented for endpoints
+
+
+def test_raw_artifact_and_evidence_never_transit_the_broker_in_cleartext(monkeypatch):
+    """P1-4 end-to-end: in the full governed pcap flow, the exact wire that crosses to the `tools`
+    queue carries NO raw artifact, and the result payload that returns via the backend carries NO
+    plaintext evidence — yet the pipeline still derives the finding (seal → verify → unseal works)."""
+    tid, cid, uid = _tenant()
+    aid = _asset(tid, cid)
+    _authorize_asset(tid, cid, uid, aid)
+
+    from guardian_scanner.tools import tasks as tasks_mod
+    b64 = _b64(_HTTP_PCAP)
+    captured: dict = {}
+    real_apply = tasks_mod.run_tool.apply_async
+
+    def _spy(*args, **kwargs):
+        result = real_apply(*args, **kwargs)
+        signed = (kwargs.get("args") or args[0])[0]     # args=[signed_wire]
+        captured["job_wire"] = signed
+        captured["result"] = result.get()               # payload as it sits in the result backend
+        return result
+
+    monkeypatch.setattr(tasks_mod.run_tool, "apply_async", _spy)
+    res = tasks_mod.dispatch_artifact_job.apply(
+        args=[tid, "pcap_meta", aid, b64, _staff_actor(tid)]).get()
+    assert res["status"] == "completed" and res["findings"] == 1   # pipeline works THROUGH sealing
+
+    # (1) The signed job crossing to the tools plane: the raw artifact is absent from the whole wire.
+    job_blob = json.dumps(captured["job_wire"])
+    assert b64 not in job_blob                            # the customer artifact never sits plaintext
+    settings = captured["job_wire"]["job"]["settings"]
+    assert "artifact_b64" not in settings                 # moved under the sealed map
+    assert settings["_sealed"]["artifact_b64"]            # present but encrypted
+    assert "media_type" in settings                        # non-sensitive control field stays plaintext
+
+    # (2) The result payload returning via the backend: no plaintext evidence, only the sealed token.
+    result_blob = json.dumps(captured["result"])
+    assert "cleartext" not in result_blob.lower()         # the finding-bearing evidence body is opaque
+    assert "10.0.0.9" not in result_blob                  # observed endpoints don't leak either
+    assert list(captured["result"].keys()) == ["_sealed_result"]
 
 
 def test_evidence_is_tenant_isolated():

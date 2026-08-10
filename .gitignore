@@ -36,3 +36,4 @@ apps/web/dist/
 *.log
 /tmp/
 scratch/
+dump.rdb

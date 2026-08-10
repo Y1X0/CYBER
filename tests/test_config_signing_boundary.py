@@ -23,6 +23,7 @@ def _settings(**over):
         env="production",
         database_url="postgresql+psycopg://guardian:guardian@db:5432/guardian",
         app_database_url="postgresql+psycopg://guardian_app:pw@db:5432/guardian",
+        redis_url="rediss://redis:6379/0",
         encryption_key=_STRONG, jwt_secret=_STRONG,
         tool_plane=False, job_signing_private_key="", job_signing_public_key="",
     )

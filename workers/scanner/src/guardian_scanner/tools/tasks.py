@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import json
 import uuid
+from dataclasses import replace
 
 from guardian_common.config import get_settings
 from guardian_common.logging import get_logger
@@ -53,6 +55,58 @@ _BINDERS: dict = {}
 # the kernel-isolating uid+nft backend; everything else stays in-process. Admins can override via
 # tool_catalog.metadata["execution_backend"].
 _DEFAULT_BACKENDS = {"nmap": "uid_nft"}
+
+# Broker confidentiality (P1-4): sensitive DATA fields that must NEVER sit plaintext in the
+# broker/result backend. They are Fernet-encrypted (reusing GUARDIAN_ENCRYPTION_KEY, already on
+# every plane) before the job is signed, and decrypted on the tool plane after verification. The
+# CONTROL fields (_execution_backend, allow_live, actor_id, campaign/approval) stay plaintext inside
+# the signed payload — the Phase-C property that no security field lives outside the signature.
+_SEALED_SETTING_KEYS = ("artifact_b64", "snapshot", "xml", "ct")
+
+
+def _seal(value) -> str:  # noqa: ANN001
+    from guardian_common.crypto import encrypt_secret
+    return encrypt_secret(json.dumps(value, separators=(",", ":")))
+
+
+def _unseal(token: str):  # noqa: ANN201
+    from guardian_common.crypto import decrypt_secret
+    raw = decrypt_secret(token)
+    if raw is None:
+        raise ValueError("sealed payload could not be decrypted")
+    return json.loads(raw)
+
+
+def _seal_settings(settings: dict) -> dict:
+    """Move each sensitive DATA field into an encrypted `_sealed` map — nothing sensitive stays
+    plaintext in the wire that transits the broker."""
+    out = dict(settings)
+    sealed = {k: _seal(out.pop(k)) for k in _SEALED_SETTING_KEYS if k in out}
+    if sealed:
+        out["_sealed"] = sealed
+    return out
+
+
+def _unseal_settings(settings: dict) -> dict:
+    """Tool plane: decrypt sealed DATA fields back to plaintext for the provider (after verify)."""
+    out = dict(settings)
+    sealed = out.pop("_sealed", None)
+    if isinstance(sealed, dict):
+        for k, token in sealed.items():
+            out[k] = _unseal(token)
+    return out
+
+
+def _seal_result(wires: list[dict]) -> dict:
+    """Tool plane: encrypt returned evidence so it never sits plaintext in the result backend."""
+    return {"_sealed_result": _seal(wires)}
+
+
+def _unseal_result(result) -> list[dict]:  # noqa: ANN001
+    """Dispatcher: decrypt evidence from the result backend. A bare list (empty/reject) passes."""
+    if isinstance(result, dict) and "_sealed_result" in result:
+        return _unseal(result["_sealed_result"])
+    return list(result or [])
 
 
 def _execution_backend_for(session, tool_key):  # noqa: ANN001, ANN202
@@ -93,11 +147,13 @@ def run_tool(signed: dict) -> list[dict]:
         return []
 
     job: ToolJob = job_from_wire(job_wire)
+    job = replace(job, settings=_unseal_settings(job.settings))  # decrypt sealed DATA after verify
     provider = registry.tool_for(job.tool_key)
     if provider is None:
         return []
     evidence = execute_tool(provider, job)
-    return [evidence_to_wire(e) for e in evidence]
+    # Seal evidence so it never sits plaintext in the Redis result backend (P1-4).
+    return _seal_result([evidence_to_wire(e) for e in evidence])
 
 
 def _authorized_target_values(session, tenant_id: uuid.UUID, now: dt.datetime) -> list[str]:
@@ -178,17 +234,17 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
                 return {"status": "forbidden", "tool": tool_key, "level": gov.required_level,
                         "reasons": ["approval already consumed"]}
 
-    job_settings = {**(settings or {}), "_execution_backend": backend_name}
+    job_settings = _seal_settings({**(settings or {}), "_execution_backend": backend_name})
     job = ToolJob(tenant_id=tenant_id, job_id=uuid.uuid4().hex, tool_key=tool_key,
                   scope=scope, settings=job_settings)
 
     # Execution plane (no DB) → RawEvidence via result-return. The job is signed so the tool plane
-    # can authenticate it (a forged run_tool message is refused there).
+    # can authenticate it (a forged run_tool message is refused there); sensitive DATA is sealed.
     from guardian_common.job_signing import sign_job
     wire = run_tool.apply_async(args=[sign_job(job_to_wire(job))], queue="tools").get(
         timeout=300, disable_sync_subtasks=False
     )
-    evidences = [evidence_from_wire(w) for w in wire or []]
+    evidences = [evidence_from_wire(w) for w in _unseal_result(wire)]
 
     # Evidence-first: persist the hash chain (primary truth), THEN derive findings only where the
     # evidence binds to exactly one asset. Evidence-only when there is no asset or more than one.
@@ -569,17 +625,18 @@ def dispatch_artifact_job(  # noqa: ANN001, PLR0911, PLR0913
             return {"status": "denied", "tool": tool_key, "reasons": reasons}
         customer_id = str(asset.customer_id)
 
-    job_settings = dict(settings or {})
-    job_settings.update({"artifact_b64": artifact_b64, "media_type": media_type})
+    job_settings = _seal_settings(
+        {**(settings or {}), "artifact_b64": artifact_b64, "media_type": media_type})
     job = ToolJob(tenant_id=tenant_id, job_id=uuid.uuid4().hex, tool_key=tool_key,
                   scope=scope, settings=job_settings)
 
-    # Execution plane (no DB, no network) → RawEvidence via result-return. Signed for authenticity.
+    # Execution plane (no DB, no network) → RawEvidence via result-return. Signed for authenticity;
+    # the raw customer artifact is Fernet-sealed so it never sits plaintext in the broker.
     from guardian_common.job_signing import sign_job
     wire = run_tool.apply_async(args=[sign_job(job_to_wire(job))], queue="tools").get(
         timeout=300, disable_sync_subtasks=False
     )
-    evidences = [evidence_from_wire(w) for w in wire or []]
+    evidences = [evidence_from_wire(w) for w in _unseal_result(wire)]
 
     # Evidence-first: persist the hash chain (artifact sha256 is its root), THEN derive findings.
     with session_scope() as session:
