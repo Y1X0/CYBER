@@ -51,12 +51,18 @@ def _drop_privs(uid: int):  # pragma: no cover - runs in the forked child before
 _HOST_TIMEOUT = "60s"
 _DEFAULT_WALL = 120          # seconds — outer kill deadline
 _MAX_OUTPUT = 4 * 1024 * 1024  # 4 MB XML cap; overflow ⇒ killed + failed
+# Service/version detection (Provider #5): a fixed, conservative intensity — never --version-all,
+# never NSE. Capped so version probing stays well inside the locked "no fuzzing" boundary.
+_VERSION_INTENSITY = 2
 
 
-def build_nmap_argv(targets: list[str], ports: tuple[int, ...]) -> list[str]:
+def build_nmap_argv(targets: list[str], ports: tuple[int, ...], *,
+                    version_detection: bool = False) -> list[str]:
     """Build the full nmap argv from authorized IP targets + in-scope ports. Raises on bad input.
 
     TCP connect scan (`-sT`, no root), no host discovery (`-Pn`), no DNS (`-n`), XML to stdout.
+    With `version_detection`, adds `-sV --version-intensity 2` (Provider #5) — a bounded service
+    probe, still no NSE / UDP / OS / free-form args.
     """
     ip_targets: list[str] = []
     for t in targets:
@@ -68,8 +74,10 @@ def build_nmap_argv(targets: list[str], ports: tuple[int, ...]) -> list[str]:
         raise ValueError("nmap: no in-scope port")
     if any(p < 1 or p > 65535 for p in port_list):
         raise ValueError("nmap: port out of range")
+    version_flags = ["-sV", "--version-intensity", str(_VERSION_INTENSITY)] if version_detection \
+        else []
     return [
-        "nmap", "-sT", "-Pn", "-n", "--host-timeout", _HOST_TIMEOUT,
+        "nmap", "-sT", *version_flags, "-Pn", "-n", "--host-timeout", _HOST_TIMEOUT,
         "-oX", "-", "-p", ",".join(str(p) for p in port_list), *ip_targets,
     ]
 

@@ -89,6 +89,8 @@ dns_posture = "guardian_scanner.tools.providers.dns_posture_provider:DnsPostureP
 nmap = "guardian_scanner.tools.providers.nmap_provider:NmapProvider"
 # CT passive attack-surface discovery (L1) — in-proc, fixed-endpoint egress, anti-SSRF, no secrets.
 ct_surface = "guardian_scanner.tools.providers.ct_surface_provider:CtSurfaceProvider"
+# Nmap service/version detection (L2) — bounded -sV --version-intensity 2, external binary, uid_nft.
+nmap_service = "guardian_scanner.tools.providers.nmap_service_provider:NmapServiceProvider"
 
 [tool.setuptools.packages.find]
 # Monorepo: one installable distribution discovering packages from every src root.
