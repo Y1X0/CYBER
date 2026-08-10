@@ -18,7 +18,7 @@ import uuid
 
 import pytest
 from guardian_core.tool import EffectiveScope, ToolJob
-from guardian_scanner.tools.backends import get_backend
+from guardian_scanner.tools.backends import get_backend, uid_nft
 from guardian_scanner.tools.backends.inproc import InprocSandboxBackend
 from guardian_scanner.tools.backends.uid_nft import (
     UidNftBackend,
@@ -27,7 +27,17 @@ from guardian_scanner.tools.backends.uid_nft import (
     _table,
     isolate,
     reap_orphans,
+    set_worker_concurrency,
 )
+
+
+@pytest.fixture(autouse=True)
+def _single_allocator():
+    # These tests exercise the single-allocator isolation path; satisfy the P1-2 concurrency guard.
+    saved = uid_nft._worker_concurrency
+    set_worker_concurrency(1)
+    yield
+    uid_nft._worker_concurrency = saved
 
 # A world-accessible interpreter (the unprivileged run-uid must be able to exec it).
 _PY = "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable

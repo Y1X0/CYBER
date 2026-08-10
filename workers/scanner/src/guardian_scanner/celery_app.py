@@ -10,12 +10,16 @@ settings = get_settings()
 
 
 @worker_ready.connect
-def _reap_isolation_orphans(**_kwargs) -> None:  # noqa: ANN003
-    """On tool-plane startup, delete nft egress tables orphaned by a crashed run."""
+def _on_tool_worker_ready(sender=None, **_kwargs) -> None:  # noqa: ANN001, ANN003
+    """On tool-plane startup: record the ACTUAL worker concurrency (so uid_nft can hard-guard
+    against running with concurrency>1, which would break per-run uid uniqueness) and reap orphaned
+    nft tables left by a crashed run."""
     if not get_settings().tool_plane:
         return
-    from guardian_scanner.tools.backends.uid_nft import reap_orphans
-    reap_orphans()
+    from guardian_scanner.tools.backends import uid_nft
+    uid_nft.set_worker_concurrency(
+        uid_nft.detect_concurrency(sender, celery_app.conf.worker_concurrency))
+    uid_nft.reap_orphans()
 
 celery_app = Celery(
     "guardian",

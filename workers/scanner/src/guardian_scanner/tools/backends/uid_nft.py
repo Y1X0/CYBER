@@ -42,9 +42,53 @@ _WALL_SECONDS = 180
 _lock = threading.Lock()
 _used_uids: set[int] = set()
 
+# Actual pool size of THIS tool-plane worker, captured at worker_ready. The per-run uid allocator is
+# process-local, so its uniqueness guarantee holds ONLY when this worker is the sole allocator, i.e.
+# concurrency == 1. None = not yet observed ⇒ cannot prove single-allocator ⇒ fail closed.
+_worker_concurrency: int | None = None
+
 
 class IsolationError(RuntimeError):
     """Raised when kernel egress confinement cannot be established — the run must fail closed."""
+
+
+def set_worker_concurrency(n: int | None) -> None:
+    """Record this worker's actual concurrency (from worker_ready). Warns loudly if unsafe."""
+    global _worker_concurrency
+    _worker_concurrency = n
+    if n != 1:
+        log.critical("uid_nft_unsafe_concurrency", concurrency=n,
+                     detail="uid_nft live runs fail closed until worker concurrency is 1")
+
+
+def detect_concurrency(sender, conf_default=None) -> int | None:  # noqa: ANN001
+    """Best-effort ACTUAL pool size of a Celery worker (num_processes is authoritative)."""
+    pool = getattr(sender, "pool", None)
+    for value in (getattr(pool, "num_processes", None),
+                  getattr(sender, "concurrency", None),
+                  getattr(getattr(sender, "controller", None), "concurrency", None),
+                  conf_default):
+        if isinstance(value, int) and value > 0:
+            return value
+    return None
+
+
+def _assert_single_allocator() -> None:
+    """Hard guard: refuse to establish isolation unless this worker runs at concurrency == 1.
+
+    The uid allocator is process-local. Under Celery prefork with concurrency > 1, sibling children
+    each keep their own `_used_uids` and can hand out the SAME uid, whose `meta skuid` nft rules
+    share the one container netns — so run A could egress to run B's authorized scope. We therefore
+    fail closed (before any uid allocation or nft rule) unless single-allocator is proven — enforced
+    here at runtime, not left to rely on the `--concurrency=1` compose flag alone.
+    """
+    conc = _worker_concurrency
+    if conc is None:
+        raise IsolationError(
+            "uid_nft: worker concurrency unknown — refusing (cannot prove a single uid allocator)")
+    if conc != 1:
+        raise IsolationError(
+            f"uid_nft requires worker concurrency=1 for per-run uid uniqueness; got {conc}")
 
 
 # ── uid allocation (process-local, unique per concurrent run ⇒ no cross-run rule interference) ──
@@ -112,6 +156,7 @@ def _delete_table(table: str) -> None:
 @contextmanager
 def isolate(job: ToolJob):  # noqa: ANN201
     """Allocate a run-uid + install its kernel egress allowlist; tear both down on exit."""
+    _assert_single_allocator()  # hard guard FIRST — no uid allocated, no nft rule, if unsafe
     uid = _alloc_uid()
     table = _table(job.job_id)
     try:
