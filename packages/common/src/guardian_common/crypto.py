@@ -17,6 +17,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from guardian_common.config import get_settings
 
 _DEV_KEY = "dev-only-encryption-key-change-me"
+_DEV_SEAL_KEY = "dev-only-broker-seal-key-change-me"
 
 
 def _fernet_key(secret: str) -> bytes:
@@ -56,6 +57,33 @@ def decrypt_secret(token: str) -> str | None:
     """Decrypt a token produced by `encrypt_secret`. Returns None if it can't be decrypted."""
     try:
         return get_kms().decrypt(token.encode()).decode()
+    except (InvalidToken, ValueError):
+        return None
+
+
+@lru_cache
+def get_seal_kms() -> LocalKMSProvider:
+    """Broker-seal KMS (P1-A): a Fernet provider keyed by the DEDICATED `broker_seal_key`, separate
+    from the credential KMS master (`get_kms`). It protects sensitive job/result payloads on the
+    Redis broker/result backend (P1-4) — the execution plane holds only this key, not the master
+    that decrypts credentials. The dev sentinel is refused outside local/dev, like the master.
+    """
+    settings = get_settings()
+    key = settings.broker_seal_key or _DEV_SEAL_KEY
+    if not settings.is_local_or_dev and (not settings.broker_seal_key or key == _DEV_SEAL_KEY):
+        raise ValueError("GUARDIAN_BROKER_SEAL_KEY must be set to a strong value outside local/dev")
+    return LocalKMSProvider(key)
+
+
+def seal_secret(plaintext: str) -> str:
+    """Encrypt a broker payload with the broker-seal key → opaque token safe to sit on Redis."""
+    return get_seal_kms().encrypt(plaintext.encode()).decode()
+
+
+def unseal_secret(token: str) -> str | None:
+    """Decrypt a token produced by `seal_secret`. Returns None if it can't be decrypted."""
+    try:
+        return get_seal_kms().decrypt(token.encode()).decode()
     except (InvalidToken, ValueError):
         return None
 

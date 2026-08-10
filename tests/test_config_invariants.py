@@ -23,6 +23,7 @@ def _settings(**over):
         env="production", database_url=_OWNER_URL, app_database_url=_APP_URL,
         redis_url="rediss://db:6379/0",
         jwt_secret=_STRONG_JWT, encryption_key=_STRONG_KEY,
+        broker_seal_key=_STRONG_KEY + "-seal",  # P1-A: must be set and distinct from encryption_key
     )
     base.update(over)
     return Settings(**base)

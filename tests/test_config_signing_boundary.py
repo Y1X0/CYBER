@@ -16,6 +16,11 @@ from pydantic import ValidationError
 _PRIV = base64.b64encode(b"p" * 32).decode()
 _PUB = base64.b64encode(b"u" * 32).decode()
 _STRONG = "x" * 40
+_SEAL = "s" * 40  # broker-seal key, distinct from the encryption_key master (P1-A)
+
+# A valid production TOOL PLANE under P1-A carries NO JWT secret and NO credential KMS master — only
+# the broker-seal key (to unseal jobs / seal evidence) and the public signing key (to verify).
+_TOOL_PLANE_SECRETS = dict(jwt_secret="", encryption_key="", broker_seal_key=_SEAL)
 
 
 def _settings(**over):
@@ -24,7 +29,7 @@ def _settings(**over):
         database_url="postgresql+psycopg://guardian:guardian@db:5432/guardian",
         app_database_url="postgresql+psycopg://guardian_app:pw@db:5432/guardian",
         redis_url="rediss://redis:6379/0",
-        encryption_key=_STRONG, jwt_secret=_STRONG,
+        encryption_key=_STRONG, jwt_secret=_STRONG, broker_seal_key=_SEAL,
         tool_plane=False, job_signing_private_key="", job_signing_public_key="",
     )
     base.update(over)
@@ -45,11 +50,12 @@ def test_production_tool_plane_with_private_key_is_rejected():
 # ── production tool plane must carry the public key (fail-fast, not fail-at-first-job) ──────────────
 def test_production_tool_plane_without_public_key_is_rejected():
     with pytest.raises(ValidationError, match="PUBLIC_KEY must be set on the tool plane"):
-        _settings(tool_plane=True, job_signing_public_key="")
+        _settings(tool_plane=True, job_signing_public_key="", **_TOOL_PLANE_SECRETS)
 
 
 def test_production_tool_plane_with_public_key_only_is_valid():
-    s = _settings(tool_plane=True, job_signing_public_key=_PUB, job_signing_private_key="")
+    s = _settings(tool_plane=True, job_signing_public_key=_PUB, job_signing_private_key="",
+                  **_TOOL_PLANE_SECRETS)
     assert s.tool_plane is True and s.job_signing_private_key == ""
 
 

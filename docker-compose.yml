@@ -58,8 +58,12 @@ services:
       GUARDIAN_APP_DATABASE_URL: postgresql+psycopg://guardian_app:guardian_app@db:5432/guardian
       GUARDIAN_REDIS_URL: redis://redis:6379/0
       GUARDIAN_JWT_SECRET: change-me-dev-only-do-not-use-in-production
-      # Shared with the worker: the API encrypts credentials, the worker decrypts them at scan time.
+      # Credential KMS master: the API encrypts credentials, the default worker decrypts them at scan
+      # time. Trusted DB-bound planes ONLY — never the execution planes (P1-A).
       GUARDIAN_ENCRYPTION_KEY: dev-only-encryption-key-change-me
+      # Broker-seal key (P1-A): SEPARATE from the KMS master; seals sensitive job/result payloads on
+      # Redis (P1-4). Present on the control plane; must differ from GUARDIAN_ENCRYPTION_KEY in prod.
+      GUARDIAN_BROKER_SEAL_KEY: dev-only-broker-seal-key-change-me
     depends_on:
       db:
         condition: service_healthy
@@ -88,7 +92,10 @@ services:
       GUARDIAN_DATABASE_URL: postgresql+psycopg://guardian:guardian@db:5432/guardian
       GUARDIAN_REDIS_URL: redis://redis:6379/0
       GUARDIAN_JWT_SECRET: change-me-dev-only-do-not-use-in-production
-      GUARDIAN_ENCRYPTION_KEY: dev-only-encryption-key-change-me
+      GUARDIAN_ENCRYPTION_KEY: dev-only-encryption-key-change-me  # credential KMS master (decrypts secret_ref)
+      # Broker-seal key (P1-A): the default plane dispatches tool jobs, so it seals/unseals broker
+      # payloads (P1-4). Separate from the KMS master; must differ from it in prod.
+      GUARDIAN_BROKER_SEAL_KEY: dev-only-broker-seal-key-change-me
       # Turn on to run untrusted-input engines in the resource-limited sandbox (5A).
       GUARDIAN_SANDBOX_ENGINES: "false"
       GUARDIAN_RECON_PLANE: "false"  # DB plane — `run_discovery` runs here, `recon_collect` refuses
@@ -114,8 +121,9 @@ services:
       # the DB, so it is architecturally incapable of direct DB access. It returns evidence instead.
       GUARDIAN_DATABASE_URL: ""
       GUARDIAN_REDIS_URL: redis://redis:6379/0
-      GUARDIAN_JWT_SECRET: change-me-dev-only-do-not-use-in-production
-      GUARDIAN_ENCRYPTION_KEY: dev-only-encryption-key-change-me
+      # P1-A: the recon execution plane holds NO secrets — no JWT (never verifies tokens), no
+      # credential KMS master, and no broker-seal key (it does not seal broker payloads). A compromise
+      # here yields no key that decrypts credentials or forges platform JWTs. Prod refuses them here.
       # Active recon runs untrusted network work through the sandbox + egress allowlist.
       GUARDIAN_SANDBOX_ENGINES: "true"
       GUARDIAN_RECON_PLANE: "true"  # recon plane marker — `run_discovery` refuses to run here
@@ -143,8 +151,10 @@ services:
       GUARDIAN_ENV: local
       GUARDIAN_DATABASE_URL: ""      # NO DB credentials (execution plane is DB-incapable)
       GUARDIAN_REDIS_URL: redis://redis:6379/0
-      GUARDIAN_JWT_SECRET: change-me-dev-only-do-not-use-in-production
-      GUARDIAN_ENCRYPTION_KEY: dev-only-encryption-key-change-me  # no KMS use on this plane
+      # P1-A: NO JWT secret (this plane never signs/verifies tokens) and NO credential KMS master
+      # (it never decrypts stored credentials). It carries ONLY the broker-seal key, needed to unseal
+      # the job it runs and seal the evidence it returns (P1-4). Prod refuses JWT/KMS-master here.
+      GUARDIAN_BROKER_SEAL_KEY: dev-only-broker-seal-key-change-me
       GUARDIAN_SANDBOX_ENGINES: "true"
       GUARDIAN_TOOL_PLANE: "true"    # tool plane marker — the trusted dispatcher refuses to run here
     depends_on:

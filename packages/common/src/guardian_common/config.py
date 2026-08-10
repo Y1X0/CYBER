@@ -8,11 +8,12 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import field_validator, model_validator
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _DEV_JWT_SENTINEL = "change-me-dev-only-do-not-use-in-production"
 _DEV_ENCRYPTION_SENTINEL = "dev-only-encryption-key-change-me"
+_DEV_SEAL_SENTINEL = "dev-only-broker-seal-key-change-me"
 _LOCAL_ENVS = {"local", "dev", "development", "test", "ci"}
 
 
@@ -39,8 +40,17 @@ class Settings(BaseSettings):
     access_token_ttl_minutes: int = 60
 
     # Envelope-encryption key for credential references (5A). Generate: openssl rand -hex 32.
-    # Empty falls back to a dev-only key (refused outside local/dev, like the JWT secret).
+    # Empty falls back to a dev-only key (refused outside local/dev, like the JWT secret). This is
+    # the credential KMS master — it decrypts tenant secrets and must live ONLY on the trusted
+    # DB-bound planes (API, default worker), NEVER on the DB-less execution planes (P1-A).
     encryption_key: str = ""
+
+    # Broker-seal key (P1-A): a SEPARATE symmetric key encrypting sensitive job/result payloads on
+    # the Redis broker + result backend (P1-4). Deliberately DISTINCT from `encryption_key` so the
+    # execution plane — which runs untrusted external binaries — holds only this lower-value payload
+    # key and never the credential KMS master. Generate: openssl rand -hex 32. Empty falls back to a
+    # dev-only key (refused, and required to differ from encryption_key, outside local/dev).
+    broker_seal_key: str = ""
 
     # RLS: the API connects as a non-owner, RLS-enforced role. Falls back to the main URL in dev
     # (app-level tenant scoping still applies; production must set this to the guardian_app role).
@@ -101,25 +111,17 @@ class Settings(BaseSettings):
         """True only for local/dev-class environments. Staging is treated as production-grade."""
         return self.env.lower() in _LOCAL_ENVS
 
-    @field_validator("jwt_secret")
-    @classmethod
-    def _reject_dev_secret_in_prod(cls, v: str, info) -> str:  # noqa: ANN001
-        # Fail fast: never allow the sentinel secret outside local/dev.
-        env = (info.data.get("env") or "local").lower()
-        if env not in _LOCAL_ENVS and v == _DEV_JWT_SENTINEL:
-            raise ValueError("GUARDIAN_JWT_SECRET must be set to a strong value outside local/dev")
-        return v
-
     @model_validator(mode="after")
     def _enforce_production_invariants(self) -> Settings:
         """Fail fast at startup on misconfigurations that would silently weaken security.
 
         Job-signing key boundary (P1-3) is enforced FIRST and in ALL environments: the tool plane
         verifies with the public key only and must NEVER hold the private key, so a compromised or
-        mis-templated tool plane can never mint jobs. Outside local/dev we additionally require a
-        distinct RLS app-role URL (so requests never fall back to the RLS-bypassing owner), a real
-        encryption key, and the public signing key on the tool plane so it can verify. Staging
-        counts as production-grade (mirrors the JWT rule)."""
+        mis-templated tool plane can never mint jobs. Outside local/dev we additionally enforce the
+        secret-boundary between trusted DB-bound planes and the DB-less execution planes (P1-A): the
+        execution planes (tool/recon) must NOT carry the JWT secret or the credential KMS master,
+        and the broker-seal key must be set and DISTINCT from that master. Staging counts as
+        production-grade."""
         # Unconditional: the tool plane must never be configured with the private signing key.
         # (Dev/test/ci leave both keys empty and derive a fixed dev keypair in-process, so this
         # never trips there; it fires only when a private key is configured on the tool plane.)
@@ -131,15 +133,64 @@ class Settings(BaseSettings):
             )
         if self.is_local_or_dev:
             return self
-        if not self.app_database_url or self.app_database_url == self.database_url:
+
+        # The execution planes (tool/recon) run untrusted external binaries and hold NO DB. They
+        # must be secret-minimal: no token-forging JWT secret, no credential KMS master (P1-A).
+        is_execution_plane = self.tool_plane or self.recon_plane
+
+        # JWT secret boundary (P1-A): token-minting/verifying planes require a real secret; the
+        # execution planes never sign or verify tokens and must NOT hold a real one, so a hostile
+        # binary can never exfiltrate a key that forges platform JWTs.
+        if is_execution_plane:
+            if self.jwt_secret and self.jwt_secret != _DEV_JWT_SENTINEL:
+                raise ValueError(
+                    "GUARDIAN_JWT_SECRET must NOT be set on the tool/recon execution plane "
+                    "(GUARDIAN_TOOL_PLANE/GUARDIAN_RECON_PLANE=true): it never signs or verifies "
+                    "tokens, so holding it only creates a JWT-forgery exfiltration risk"
+                )
+        elif self.jwt_secret == _DEV_JWT_SENTINEL:
+            raise ValueError("GUARDIAN_JWT_SECRET must be set to a strong value outside local/dev")
+
+        # RLS app-role: only the DB-bound control plane needs it; execution planes are DB-less.
+        if not is_execution_plane and (
+            not self.app_database_url or self.app_database_url == self.database_url
+        ):
             raise ValueError(
                 "GUARDIAN_APP_DATABASE_URL must be set to the non-owner guardian_app role "
                 "(distinct from GUARDIAN_DATABASE_URL) outside local/dev — otherwise RLS is inert"
             )
-        if not self.encryption_key or self.encryption_key == _DEV_ENCRYPTION_SENTINEL:
+
+        # Credential KMS master (encryption_key) boundary (P1-A): required where credentials are
+        # encrypted/decrypted (API, default worker); FORBIDDEN on the execution planes so a tool
+        # compromise never yields the key that decrypts stored tenant credentials.
+        if is_execution_plane:
+            if self.encryption_key and self.encryption_key != _DEV_ENCRYPTION_SENTINEL:
+                raise ValueError(
+                    "GUARDIAN_ENCRYPTION_KEY (credential KMS master) must NOT be set on the "
+                    "tool/recon execution plane — it decrypts stored tenant credentials and must "
+                    "stay on the trusted DB-bound planes; the execution plane uses "
+                    "GUARDIAN_BROKER_SEAL_KEY for payload sealing"
+                )
+        elif not self.encryption_key or self.encryption_key == _DEV_ENCRYPTION_SENTINEL:
             raise ValueError(
                 "GUARDIAN_ENCRYPTION_KEY must be set to a strong value outside local/dev"
             )
+
+        # Broker-seal key (P1-A): the payload-seal key is separate from the credential KMS master
+        # and required on every plane that seals/unseals broker payloads — the tool plane (unseals a
+        # job, seals its evidence) and the control plane (seals a job, unseals results). The recon
+        # plane never seals. It MUST differ from encryption_key so the domains use distinct keys.
+        if not self.recon_plane:
+            if not self.broker_seal_key or self.broker_seal_key == _DEV_SEAL_SENTINEL:
+                raise ValueError(
+                    "GUARDIAN_BROKER_SEAL_KEY must be set to a strong value outside local/dev"
+                )
+            if self.broker_seal_key == self.encryption_key:
+                raise ValueError(
+                    "GUARDIAN_BROKER_SEAL_KEY must differ from GUARDIAN_ENCRYPTION_KEY — the "
+                    "broker payload-seal key and the credential KMS master must be separate keys"
+                )
+
         # Production tool plane must carry the public key: there is no dev keypair fallback outside
         # local/dev, so verification would otherwise fail-closed on the first job. Fail at startup.
         if self.tool_plane and not self.job_signing_public_key:

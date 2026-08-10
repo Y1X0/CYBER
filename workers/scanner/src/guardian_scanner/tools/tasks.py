@@ -57,21 +57,24 @@ _BINDERS: dict = {}
 _DEFAULT_BACKENDS = {"nmap": "uid_nft"}
 
 # Broker confidentiality (P1-4): sensitive DATA fields that must NEVER sit plaintext in the
-# broker/result backend. They are Fernet-encrypted (reusing GUARDIAN_ENCRYPTION_KEY, already on
-# every plane) before the job is signed, and decrypted on the tool plane after verification. The
-# CONTROL fields (_execution_backend, allow_live, actor_id, campaign/approval) stay plaintext inside
-# the signed payload — the Phase-C property that no security field lives outside the signature.
+# broker/result backend. They are Fernet-encrypted with the DEDICATED GUARDIAN_BROKER_SEAL_KEY
+# (P1-A — separate from the credential KMS master) before the job is signed, and decrypted on the
+# tool plane after verification. The CONTROL fields (_execution_backend, allow_live, actor_id,
+# campaign/approval) stay plaintext inside the signed payload — the Phase-C property that no
+# security field lives outside the signature.
 _SEALED_SETTING_KEYS = ("artifact_b64", "snapshot", "xml", "ct")
 
 
 def _seal(value) -> str:  # noqa: ANN001
-    from guardian_common.crypto import encrypt_secret
-    return encrypt_secret(json.dumps(value, separators=(",", ":")))
+    # P1-A: seal with the DEDICATED broker-seal key, never the credential KMS master — the execution
+    # plane holds only this key; a tool-plane compromise can't decrypt stored credentials.
+    from guardian_common.crypto import seal_secret
+    return seal_secret(json.dumps(value, separators=(",", ":")))
 
 
 def _unseal(token: str):  # noqa: ANN201
-    from guardian_common.crypto import decrypt_secret
-    raw = decrypt_secret(token)
+    from guardian_common.crypto import unseal_secret
+    raw = unseal_secret(token)
     if raw is None:
         raise ValueError("sealed payload could not be decrypted")
     return json.loads(raw)
