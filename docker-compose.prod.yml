@@ -128,11 +128,29 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    networks: [edge, backend]   # ingress reaches it on edge (Phase 3); db/redis on backend
+    # API is NOT on `edge` and publishes NO host port — only the ingress reaches it (on backend),
+    # so uvicorn is never exposed to the internet (Phase 3).
+    networks: [backend]
     restart: unless-stopped
     # Scale horizontally — every replica starts only AFTER seed completes, so no migration race.
     deploy:
       replicas: ${GUARDIAN_API_REPLICAS:-2}
+
+  # ── Ingress (Phase 3): the ONLY internet-facing service. Terminates TLS, redirects HTTP→HTTPS,
+  # sets X-Forwarded-For (→ GUARDIAN_TRUSTED_PROXY_COUNT=1), caps the request body, and proxies to
+  # the API on backend. TLS certs are operator-provided in ./infra/tls/nginx (infra/tls/README.md).
+  ingress:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./infra/nginx/guardian.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./infra/tls/nginx:/etc/nginx/tls:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - api
+    networks: [edge, backend]   # edge = public boundary; backend = reach the API. No DB/Redis route.
+    restart: unless-stopped
 
   worker-default:
     image: *app-image
