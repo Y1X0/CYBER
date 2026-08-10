@@ -114,9 +114,21 @@ class Settings(BaseSettings):
     def _enforce_production_invariants(self) -> Settings:
         """Fail fast at startup on misconfigurations that would silently weaken security.
 
-        Outside local/dev we require: (1) a distinct RLS app-role URL so requests never fall back to
-        the RLS-bypassing owner, and (2) a real encryption key so credentials aren't sealed with the
-        dev sentinel. Staging counts as production-grade here (mirrors the JWT rule)."""
+        Job-signing key boundary (P1-3) is enforced FIRST and in ALL environments: the tool plane
+        verifies with the public key only and must NEVER hold the private key, so a compromised or
+        mis-templated tool plane can never mint jobs. Outside local/dev we additionally require a
+        distinct RLS app-role URL (so requests never fall back to the RLS-bypassing owner), a real
+        encryption key, and the public signing key on the tool plane so it can verify. Staging
+        counts as production-grade (mirrors the JWT rule)."""
+        # Unconditional: the tool plane must never be configured with the private signing key.
+        # (Dev/test/ci leave both keys empty and derive a fixed dev keypair in-process, so this
+        # never trips there; it fires only when a private key is configured on the tool plane.)
+        if self.tool_plane and self.job_signing_private_key:
+            raise ValueError(
+                "GUARDIAN_JOB_SIGNING_PRIVATE_KEY must NEVER be set on the tool plane "
+                "(GUARDIAN_TOOL_PLANE=true): it verifies with the public key only and must be "
+                "unable to mint jobs"
+            )
         if self.is_local_or_dev:
             return self
         if not self.app_database_url or self.app_database_url == self.database_url:
@@ -127,6 +139,13 @@ class Settings(BaseSettings):
         if not self.encryption_key or self.encryption_key == _DEV_ENCRYPTION_SENTINEL:
             raise ValueError(
                 "GUARDIAN_ENCRYPTION_KEY must be set to a strong value outside local/dev"
+            )
+        # Production tool plane must carry the public key: there is no dev keypair fallback outside
+        # local/dev, so verification would otherwise fail-closed on the first job. Fail at startup.
+        if self.tool_plane and not self.job_signing_public_key:
+            raise ValueError(
+                "GUARDIAN_JOB_SIGNING_PUBLIC_KEY must be set on the tool plane outside local/dev "
+                "so it can verify signed jobs"
             )
         return self
 
