@@ -28,8 +28,8 @@ _STRONG = "x" * 40
 def _prod(**over):
     base = dict(
         env="production",
-        database_url="postgresql+psycopg://guardian:guardian@db:5432/guardian",
-        app_database_url="postgresql+psycopg://guardian_app:pw@db:5432/guardian",
+        database_url="postgresql+psycopg://guardian:guardian@db:5432/guardian?sslmode=verify-full",
+        app_database_url="postgresql+psycopg://guardian_app:pw@db:5432/guardian?sslmode=verify-full",
         redis_url="rediss://redis:6379/0",
         encryption_key=_STRONG, jwt_secret=_STRONG,
         broker_seal_key=_STRONG + "-seal",  # P1-A: set and distinct from encryption_key

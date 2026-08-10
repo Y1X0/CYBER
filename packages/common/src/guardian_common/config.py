@@ -16,6 +16,17 @@ _DEV_ENCRYPTION_SENTINEL = "dev-only-encryption-key-change-me"
 _DEV_SEAL_SENTINEL = "dev-only-broker-seal-key-change-me"
 _DEFAULT_BOOTSTRAP_PASSWORD = "ChangeMe123!"  # noqa: S105 - dev bootstrap default only
 _LOCAL_ENVS = {"local", "dev", "development", "test", "ci"}
+# libpq/psycopg establishes an encrypted connection ONLY for these sslmodes; disable/allow/prefer
+# either skip TLS or silently fall back to plaintext, so they are NOT accepted in production (P1-C).
+_TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
+
+
+def _postgres_enforces_tls(dsn: str) -> bool:
+    """True iff the Postgres DSN pins a TLS-enforcing sslmode in its query string (P1-C)."""
+    from urllib.parse import parse_qs, urlsplit
+
+    mode = (parse_qs(urlsplit(dsn).query).get("sslmode") or [""])[0].lower()
+    return mode in _TLS_SSLMODES
 
 
 class Settings(BaseSettings):
@@ -213,6 +224,16 @@ class Settings(BaseSettings):
                 "GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD must be changed from the default "
                 "outside local/dev"
             )
+        # PostgreSQL TLS (P1-C): the DB carries encrypted credentials, PII, and the evidence chain —
+        # require TLS in transit outside local/dev, symmetric with the Redis rediss:// rule. libpq
+        # honours the DSN's sslmode. Execution planes are DB-less (empty DSN) and skip the check.
+        for label, dsn in (("GUARDIAN_DATABASE_URL", self.database_url),
+                           ("GUARDIAN_APP_DATABASE_URL", self.app_database_url)):
+            if dsn and not _postgres_enforces_tls(dsn):
+                raise ValueError(
+                    f"{label} must enforce TLS (sslmode=require|verify-ca|verify-full) outside "
+                    "local/dev — the database connection carries credentials, PII, and evidence"
+                )
         return self
 
 

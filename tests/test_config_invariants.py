@@ -12,8 +12,8 @@ from pydantic import ValidationError
 
 _STRONG_JWT = "a-strong-secret-value-not-the-sentinel-0123456789"
 _STRONG_KEY = "a-strong-encryption-key-0123456789abcdef"
-_OWNER_URL = "postgresql+psycopg://guardian:guardian@db:5432/guardian"
-_APP_URL = "postgresql+psycopg://guardian_app:pw@db:5432/guardian"
+_OWNER_URL = "postgresql+psycopg://guardian:guardian@db:5432/guardian?sslmode=verify-full"
+_APP_URL = "postgresql+psycopg://guardian_app:pw@db:5432/guardian?sslmode=verify-full"
 
 
 def _settings(**over):

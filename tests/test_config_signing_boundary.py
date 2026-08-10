@@ -26,8 +26,8 @@ _TOOL_PLANE_SECRETS = dict(jwt_secret="", encryption_key="", broker_seal_key=_SE
 def _settings(**over):
     base = dict(
         env="production",
-        database_url="postgresql+psycopg://guardian:guardian@db:5432/guardian",
-        app_database_url="postgresql+psycopg://guardian_app:pw@db:5432/guardian",
+        database_url="postgresql+psycopg://guardian:guardian@db:5432/guardian?sslmode=verify-full",
+        app_database_url="postgresql+psycopg://guardian_app:pw@db:5432/guardian?sslmode=verify-full",
         redis_url="rediss://redis:6379/0",
         encryption_key=_STRONG, jwt_secret=_STRONG, broker_seal_key=_SEAL,
         bootstrap_admin_password="a-strong-admin-password",  # P1-B: default is refused in prod
