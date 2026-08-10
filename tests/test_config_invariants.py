@@ -24,6 +24,7 @@ def _settings(**over):
         redis_url="rediss://db:6379/0",
         jwt_secret=_STRONG_JWT, encryption_key=_STRONG_KEY,
         broker_seal_key=_STRONG_KEY + "-seal",  # P1-A: must be set and distinct from encryption_key
+        bootstrap_admin_password="a-strong-admin-password",  # P1-B: default is refused in prod
     )
     base.update(over)
     return Settings(**base)

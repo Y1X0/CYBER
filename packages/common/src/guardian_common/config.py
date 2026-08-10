@@ -14,6 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _DEV_JWT_SENTINEL = "change-me-dev-only-do-not-use-in-production"
 _DEV_ENCRYPTION_SENTINEL = "dev-only-encryption-key-change-me"
 _DEV_SEAL_SENTINEL = "dev-only-broker-seal-key-change-me"
+_DEFAULT_BOOTSTRAP_PASSWORD = "ChangeMe123!"  # noqa: S105 - dev bootstrap default only
 _LOCAL_ENVS = {"local", "dev", "development", "test", "ci"}
 
 
@@ -90,7 +91,7 @@ class Settings(BaseSettings):
 
     bootstrap_tenant: str = "Acme Security"
     bootstrap_admin_email: str = "admin@example.com"
-    bootstrap_admin_password: str = "ChangeMe123!"  # noqa: S105 - dev bootstrap default only
+    bootstrap_admin_password: str = _DEFAULT_BOOTSTRAP_PASSWORD
 
     # AI analyst (Phase 3). With no API key the platform uses the deterministic stub provider.
     anthropic_api_key: str = ""
@@ -204,6 +205,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "GUARDIAN_REDIS_URL must use TLS (rediss://) outside local/dev — the broker and "
                 "result backend carry jobs and evidence"
+            )
+        # Bootstrap-admin credential (P1-B): never boot production with the publicly-documented
+        # default owner password — the seed would otherwise create a known-credential owner.
+        if self.bootstrap_admin_password == _DEFAULT_BOOTSTRAP_PASSWORD:
+            raise ValueError(
+                "GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD must be changed from the default "
+                "outside local/dev"
             )
         return self
 

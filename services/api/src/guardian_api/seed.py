@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from guardian_common.config import get_settings
+from guardian_common.config import _DEFAULT_BOOTSTRAP_PASSWORD, get_settings
 from guardian_common.logging import configure_logging, get_logger
 from guardian_common.security import hash_password
 from guardian_core.enums import StaffRole
@@ -48,6 +48,13 @@ def _slugify(name: str) -> str:
 
 def seed() -> None:
     settings = get_settings()
+    # P1-B: fail closed before any write — never create the known-default owner credential outside
+    # local/dev, even if the startup config guard were somehow bypassed.
+    _default_pw = settings.bootstrap_admin_password == _DEFAULT_BOOTSTRAP_PASSWORD
+    if not settings.is_local_or_dev and _default_pw:
+        raise RuntimeError(
+            "refusing to seed the default bootstrap-admin password outside local/dev (P1-B)"
+        )
     with session_scope() as db:
         # Plans
         plan_by_key: dict[str, Plan] = {}

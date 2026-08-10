@@ -33,6 +33,7 @@ def _prod(**over):
         redis_url="rediss://redis:6379/0",
         encryption_key=_STRONG, jwt_secret=_STRONG,
         broker_seal_key=_STRONG + "-seal",  # P1-A: set and distinct from encryption_key
+        bootstrap_admin_password="a-strong-admin-password",  # P1-B: default is refused in prod
     )
     base.update(over)
     return Settings(**base)
