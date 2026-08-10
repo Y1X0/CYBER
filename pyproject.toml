@@ -91,6 +91,8 @@ nmap = "guardian_scanner.tools.providers.nmap_provider:NmapProvider"
 ct_surface = "guardian_scanner.tools.providers.ct_surface_provider:CtSurfaceProvider"
 # Nmap service/version detection (L2) — bounded -sV --version-intensity 2, external binary, uid_nft.
 nmap_service = "guardian_scanner.tools.providers.nmap_service_provider:NmapServiceProvider"
+# Templated web checks (L3) — in-proc httpx, curated source-controlled checks, anti-SSRF, no Nuclei.
+web_checks = "guardian_scanner.tools.providers.web_checks_provider:WebChecksProvider"
 
 [tool.setuptools.packages.find]
 # Monorepo: one installable distribution discovering packages from every src root.

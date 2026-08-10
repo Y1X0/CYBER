@@ -37,7 +37,11 @@ class CapabilityLevel(IntEnum):
 
 # category hints that raise a tool above its primitive-derived floor (for future providers).
 _EXPLOIT_CATEGORIES = frozenset({"exploit", "exploit_validation"})
-_SENSITIVE_CATEGORIES = frozenset({"credential", "auth_testing", "credential_testing"})
+# Active, higher-impact web checks (templated detection of exposed/sensitive resources) are L3:
+# more intrusive than L2 recon, credential-adjacent, and gated by campaign + approval.
+_SENSITIVE_CATEGORIES = frozenset(
+    {"credential", "auth_testing", "credential_testing", "web_checks"}
+)
 
 
 def derive_capability_level(caps: ToolCapabilities) -> CapabilityLevel:

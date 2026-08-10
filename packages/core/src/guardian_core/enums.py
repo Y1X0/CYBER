@@ -42,6 +42,8 @@ class EngineKey(str, Enum):
     DNS_POSTURE = "dns_posture"
     # Nmap TCP-connect active network discovery provider (Framework — first active-binary, L2).
     NMAP = "nmap"
+    # Templated web checks provider (Framework — first L3 SENSITIVE, in-proc curated detection).
+    WEB_CHECKS = "web_checks"
 
 
 # Engines that actively probe a live target and therefore REQUIRE an authorization record
