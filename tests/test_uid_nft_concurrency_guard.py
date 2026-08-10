@@ -93,7 +93,7 @@ def test_offline_run_bypasses_guard_and_isolation(monkeypatch):
     assert out == [] and "guard" not in called  # guard not invoked on the offline path
 
 
-# ── concurrency detection (what worker_ready feeds the guard) ───────────────────────────────────────
+# ── concurrency detection (what worker_init feeds the guard, then propagated to prefork children) ────
 def test_detect_concurrency_prefers_actual_pool_size():
     class _Pool:
         num_processes = 1

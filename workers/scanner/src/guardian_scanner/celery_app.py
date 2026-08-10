@@ -2,24 +2,47 @@
 
 from __future__ import annotations
 
+import os
+
 from celery import Celery
-from celery.signals import worker_ready
+from celery.signals import worker_init, worker_process_init
 from guardian_common.config import get_settings
 
 settings = get_settings()
 
+# The tool plane's concurrency, resolved in the MainProcess and passed to prefork children via the
+# environment. worker_ready fires AFTER the pool forks, so a child that runs `run_tool` would never
+# see a value set there and its uid_nft guard would fail-close every live run; worker_init fires
+# BEFORE the fork (verified), so the value is captured there and re-applied in each child.
+_TOOL_CONCURRENCY_ENV = "_GUARDIAN_TOOL_WORKER_CONCURRENCY"
 
-@worker_ready.connect
-def _on_tool_worker_ready(sender=None, **_kwargs) -> None:  # noqa: ANN001, ANN003
-    """On tool-plane startup: record the ACTUAL worker concurrency (so uid_nft can hard-guard
-    against running with concurrency>1, which would break per-run uid uniqueness) and reap orphaned
-    nft tables left by a crashed run."""
+
+@worker_init.connect
+def _tool_worker_init(sender=None, **_kwargs) -> None:  # noqa: ANN001, ANN003
+    """MainProcess init, BEFORE the prefork pool forks its children. Resolve THIS tool-plane
+    worker's actual concurrency and (a) stash it in the environment so every child inherits the real
+    value, (b) apply it locally for non-forking pools (solo/threads) and MainProcess-run tasks, and
+    (c) reap nft tables orphaned by a crashed run."""
     if not get_settings().tool_plane:
         return
     from guardian_scanner.tools.backends import uid_nft
-    uid_nft.set_worker_concurrency(
-        uid_nft.detect_concurrency(sender, celery_app.conf.worker_concurrency))
+    conc = uid_nft.detect_concurrency(sender, celery_app.conf.worker_concurrency)
+    if conc is not None:
+        os.environ[_TOOL_CONCURRENCY_ENV] = str(conc)
+    uid_nft.set_worker_concurrency(conc)
     uid_nft.reap_orphans()
+
+
+@worker_process_init.connect
+def _tool_worker_child_init(**_kwargs) -> None:  # noqa: ANN003
+    """Each prefork CHILD at startup (the process that actually runs `run_tool`): adopt the
+    concurrency the MainProcess resolved, read from the inherited environment — so the uid_nft
+    single-allocator guard sees the real value, not None (which would fail-close every live run)."""
+    if not get_settings().tool_plane:
+        return
+    from guardian_scanner.tools.backends import uid_nft
+    raw = os.environ.get(_TOOL_CONCURRENCY_ENV)
+    uid_nft.set_worker_concurrency(int(raw) if raw and raw.lstrip("-").isdigit() else None)
 
 celery_app = Celery(
     "guardian",
