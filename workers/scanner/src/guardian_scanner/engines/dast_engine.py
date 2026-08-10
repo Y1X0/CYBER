@@ -7,42 +7,46 @@ or performs one rate-limited GET in live mode. Active engine → `requires_autho
 
 from __future__ import annotations
 
-import ipaddress
 import socket
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from urllib.parse import urlsplit
 
 from guardian_core.enums import EngineKey, Severity
 from guardian_core.evidence import Evidence, EvidenceKind
 from guardian_core.findings import RawFinding
 
+from guardian_scanner import sandbox
 from guardian_scanner.engines.base import EngineHealth, ScanContext
 
 
-class _EgressBlocked(RuntimeError):
-    """A DAST live GET was refused by the SSRF guard (fail-closed)."""
+@contextmanager
+def _pinned_egress(host: str) -> Iterator[None]:
+    """Pin outbound connections to `host` to a pre-validated PUBLIC IP for the enclosed request
+    (P1-②, DNS-rebinding/TOCTOU-safe).
 
+    The prior guard resolved the host, then handed the *hostname* to httpx, which re-resolved at
+    connect time — a low-TTL rebind between check and connect could still reach an internal address.
+    Here we intercept `socket.create_connection` (the chokepoint httpx/httpcore uses) and, at the
+    time, resolve+validate via the repo's `sandbox._resolve_public_address` (which blocks
+    private/loopback/link-local/metadata AND IPv4-mapped-IPv6, and returns ONE validated IP), then
+    connect to THAT IP. There is no second resolution, so rebinding cannot redirect the socket; TLS
+    SNI + Host stay the hostname, so certificate validation is unaffected. A rebind to an internal
+    address raises PermissionError → the caller fails closed.
+    """
+    real_create_connection = socket.create_connection
 
-def _is_blocked_ip(ip: str) -> bool:
-    """True for any address DAST must never reach: private/loopback/link-local (incl. the cloud
-    metadata endpoint 169.254.169.254)/multicast/reserved/unspecified, or a non-literal."""
+    def _pinned(address, *args, **kwargs):  # noqa: ANN001, ANN202
+        h, port = address[0], address[1]
+        if h == host:
+            address = (sandbox._resolve_public_address(h, port), port)  # validate + pin, at connect
+        return real_create_connection(address, *args, **kwargs)
+
+    socket.create_connection = _pinned  # type: ignore[assignment]
     try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return True
-    return bool(addr.is_private or addr.is_loopback or addr.is_link_local
-                or addr.is_multicast or addr.is_reserved or addr.is_unspecified)
-
-
-def _assert_target_public(host: str) -> None:
-    """Resolve the target host and refuse if ANY address is non-public (DNS-rebinding defense)."""
-    infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
-    ips = sorted({info[4][0] for info in infos})
-    if not ips:
-        raise _EgressBlocked(f"no address for {host!r}")
-    for ip in ips:
-        if _is_blocked_ip(ip):
-            raise _EgressBlocked(f"{host!r} resolves to non-public {ip}")
+        yield
+    finally:
+        socket.create_connection = real_create_connection  # type: ignore[assignment]
 
 # header (lowercased) → (title, severity, cwe)
 _REQUIRED_HEADERS = {
@@ -153,13 +157,10 @@ class DastEngine:
         if not host:
             return None
         try:
-            _assert_target_public(host)          # fail-closed: refuse a non-public target
-        except _EgressBlocked:
-            return None
-        try:
             import httpx  # noqa: PLC0415
 
-            with httpx.Client(follow_redirects=False, timeout=10.0) as client:
+            # Pin to a validated public IP; a rebind to internal raises, caught below (fail-closed).
+            with _pinned_egress(host), httpx.Client(follow_redirects=False, timeout=10.0) as client:
                 resp = client.get(url, headers={"user-agent": "guardian-dast"})
             cookies = [
                 {

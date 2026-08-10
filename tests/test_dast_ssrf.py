@@ -1,23 +1,22 @@
-"""DAST engine SSRF boundaries (P1-β) — no live network.
+"""DAST engine SSRF / DNS-rebinding boundaries (P1-②) — no live network.
 
-The DAST engine's live GET runs on the scanner plane WITHOUT kernel egress isolation, so it must
-self-guard like web_checks/ct_surface: refuse a target resolving to a private/loopback/link-local/
-metadata address (DNS-rebinding), and never follow a response-chosen redirect into a new host.
+The DAST live GET runs on the scanner plane without kernel egress isolation, so it must be
+rebinding-safe: the connection is PINNED to a pre-validated public IP (via the repo's
+sandbox._resolve_public_address), so httpx cannot re-resolve the hostname to an internal address
+between check and connect. Private/loopback/link-local/metadata and IPv4-mapped-IPv6 are refused;
+redirects are not followed.
 """
 
 from __future__ import annotations
 
+import socket
+import types
+
 import pytest
+from guardian_scanner import sandbox
 from guardian_scanner.engines import dast_engine
 from guardian_scanner.engines.base import ScanContext
-from guardian_scanner.engines.dast_engine import (
-    DastEngine,
-    _assert_target_public,
-    _EgressBlocked,
-    _is_blocked_ip,
-)
-
-_PUBLIC = "93.184.216.34"
+from guardian_scanner.engines.dast_engine import DastEngine, _pinned_egress
 
 
 def _ctx(url):
@@ -25,17 +24,75 @@ def _ctx(url):
 
 
 def _addrinfo(*ips):
-    return [(2, 1, 6, "", (ip, 443)) for ip in ips]
+    return [(0, socket.SOCK_STREAM, 0, "", (ip, 443)) for ip in ips]
 
 
+class _ConnSpy:
+    def __init__(self):
+        self.address = None
+
+    def __call__(self, address, *a, **k):
+        self.address = address
+        return types.SimpleNamespace(close=lambda: None)   # a stand-in socket; no real network
+
+
+# ── the pin: connects to the validated IP, blocks internal, IPv4-mapped, rebinding ───────────────
+def test_pin_connects_to_the_validated_public_ip(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: _addrinfo("93.184.216.34"))
+    spy = _ConnSpy()
+    monkeypatch.setattr(socket, "create_connection", spy)     # becomes the "real" the pin wraps
+    with _pinned_egress("public.example"):
+        socket.create_connection(("public.example", 443))
+    assert spy.address == ("93.184.216.34", 443)              # pinned to the IP, not the hostname
+
+
+@pytest.mark.parametrize("ip", ["10.0.0.5", "127.0.0.1", "169.254.169.254", "192.168.1.1",
+                                "::1", "fe80::1"])
+def test_pin_blocks_internal_targets(monkeypatch, ip):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: _addrinfo(ip))
+    monkeypatch.setattr(socket, "create_connection", _ConnSpy())
+    with _pinned_egress("evil.example"), pytest.raises(PermissionError):
+        socket.create_connection(("evil.example", 443))
+
+
+def test_pin_blocks_ipv4_mapped_ipv6_metadata(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **k: _addrinfo("::ffff:169.254.169.254"))
+    monkeypatch.setattr(socket, "create_connection", _ConnSpy())
+    with _pinned_egress("evil.example"), pytest.raises(PermissionError):
+        socket.create_connection(("evil.example", 443))
+
+
+def test_pin_rebinding_multi_record_is_blocked(monkeypatch):
+    # Host resolves to a public AND an internal address ⇒ refused (defeats a multi-record rebind).
+    monkeypatch.setattr(socket, "getaddrinfo",
+                        lambda *a, **k: _addrinfo("93.184.216.34", "10.1.2.3"))
+    monkeypatch.setattr(socket, "create_connection", _ConnSpy())
+    with _pinned_egress("rebind.example"), pytest.raises(PermissionError):
+        socket.create_connection(("rebind.example", 443))
+
+
+def test_pin_passes_through_non_target_host(monkeypatch):
+    spy = _ConnSpy()
+    monkeypatch.setattr(socket, "create_connection", spy)
+    with _pinned_egress("target.example"):
+        socket.create_connection(("other.host", 8080))       # not the pinned host → untouched
+    assert spy.address == ("other.host", 8080)
+
+
+def test_pin_restores_create_connection():
+    original = socket.create_connection
+    with _pinned_egress("h"):
+        assert socket.create_connection is not original
+    assert socket.create_connection is original              # restored on exit
+
+
+# ── engine wiring: pin is applied, redirects not followed, fail-closed on block ──────────────────
 class _SpyClient:
-    """Records httpx.Client kwargs and the GET; returns a header-less 200 (⇒ findings)."""
-
     last: dict = {}
 
     def __init__(self, **kwargs):
         _SpyClient.last = dict(kwargs)
-        _SpyClient.last["constructed"] = True
 
     def __enter__(self):
         return self
@@ -44,76 +101,48 @@ class _SpyClient:
         return False
 
     def get(self, url, headers=None):  # noqa: ANN001
-        _SpyClient.last["get_url"] = url
-        import types
-
         return types.SimpleNamespace(headers={}, cookies=types.SimpleNamespace(jar=[]),
                                      url=url, status_code=200)
 
 
-def _forbid_client(*_a, **_k):
-    raise AssertionError("httpx.Client must NOT be constructed for a blocked target")
+def test_engine_pins_and_does_not_follow_redirects(monkeypatch):
+    seen = {}
 
+    @dast_engine.contextmanager
+    def _fake_pin(host):
+        seen["host"] = host
+        yield
 
-# ── the classifier ───────────────────────────────────────────────────────────────────────────────
-@pytest.mark.parametrize("ip", ["10.0.0.5", "127.0.0.1", "169.254.169.254", "192.168.1.1",
-                                "172.16.0.1", "::1", "fe80::1", "not-an-ip"])
-def test_internal_and_metadata_ips_are_blocked(ip):
-    assert _is_blocked_ip(ip) is True
-
-
-@pytest.mark.parametrize("ip", ["93.184.216.34", "1.1.1.1", "8.8.8.8"])
-def test_public_ips_are_allowed(ip):
-    assert _is_blocked_ip(ip) is False
-
-
-# ── the guard rejects non-public / rebinding targets, fail-closed ────────────────────────────────
-def test_private_target_rejected(monkeypatch):
-    monkeypatch.setattr(dast_engine.socket, "getaddrinfo", lambda *a, **k: _addrinfo("10.0.0.5"))
-    monkeypatch.setattr("httpx.Client", _forbid_client)
-    findings = list(DastEngine().run(_ctx("http://intranet.example/")))
-    assert findings == []                      # nothing probed, nothing leaked from the internal host
-
-
-def test_metadata_endpoint_rejected(monkeypatch):
-    monkeypatch.setattr(dast_engine.socket, "getaddrinfo",
-                        lambda *a, **k: _addrinfo("169.254.169.254"))
-    monkeypatch.setattr("httpx.Client", _forbid_client)
-    assert list(DastEngine().run(_ctx("http://169.254.169.254/latest/meta-data/"))) == []
-
-
-def test_dns_rebinding_any_internal_answer_is_rejected(monkeypatch):
-    # A host resolving to BOTH a public and an internal IP must be refused (rebinding defense).
-    monkeypatch.setattr(dast_engine.socket, "getaddrinfo",
-                        lambda *a, **k: _addrinfo(_PUBLIC, "10.1.2.3"))
-    monkeypatch.setattr("httpx.Client", _forbid_client)
-    assert list(DastEngine().run(_ctx("https://rebind.example/"))) == []
-
-
-def test_assert_target_public_raises_on_internal(monkeypatch):
-    monkeypatch.setattr(dast_engine.socket, "getaddrinfo", lambda *a, **k: _addrinfo("127.0.0.1"))
-    with pytest.raises(_EgressBlocked):
-        _assert_target_public("localhost.example")
-
-
-# ── authorized public target works, and redirects are NOT followed ───────────────────────────────
-def test_authorized_public_target_is_scanned(monkeypatch):
-    monkeypatch.setattr(dast_engine.socket, "getaddrinfo", lambda *a, **k: _addrinfo(_PUBLIC))
+    monkeypatch.setattr(dast_engine, "_pinned_egress", _fake_pin)
     monkeypatch.setattr("httpx.Client", _SpyClient)
     findings = list(DastEngine().run(_ctx("https://public.example/")))
-    # A header-less 200 yields the missing-security-header findings ⇒ the scan actually ran.
-    assert any("Content-Security-Policy" in f.title for f in findings)
+    assert seen.get("host") == "public.example"              # the GET is wrapped in the pin
+    assert _SpyClient.last.get("follow_redirects") is False   # redirects not followed
+    assert _SpyClient.last.get("timeout") == 10.0
+    assert any("Content-Security-Policy" in f.title for f in findings)   # public target scanned
 
 
-def test_redirects_are_not_followed_and_timeout_enforced(monkeypatch):
-    monkeypatch.setattr(dast_engine.socket, "getaddrinfo", lambda *a, **k: _addrinfo(_PUBLIC))
-    monkeypatch.setattr("httpx.Client", _SpyClient)
-    list(DastEngine().run(_ctx("https://public.example/")))
-    assert _SpyClient.last.get("constructed") is True
-    assert _SpyClient.last.get("follow_redirects") is False   # never chase a response Location
-    assert _SpyClient.last.get("timeout") == 10.0             # response/timeout bound preserved
+def test_engine_fails_closed_when_pin_blocks(monkeypatch):
+    class _BlockingClient(_SpyClient):
+        def get(self, url, headers=None):  # noqa: ANN001
+            raise PermissionError("egress denied: resolves to internal address")
+
+    monkeypatch.setattr("httpx.Client", _BlockingClient)
+    assert list(DastEngine().run(_ctx("http://intranet.example/"))) == []   # no findings, no leak
 
 
 def test_non_http_scheme_is_ignored(monkeypatch):
-    monkeypatch.setattr("httpx.Client", _forbid_client)
+    def _forbid(*_a, **_k):
+        raise AssertionError("no client for a non-http scheme")
+
+    monkeypatch.setattr("httpx.Client", _forbid)
     assert list(DastEngine().run(_ctx("ftp://public.example/"))) == []
+
+
+# ── the underlying validator (reused from sandbox) rejects internal, accepts public ──────────────
+def test_resolve_public_address_blocks_and_pins(monkeypatch):
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: _addrinfo("93.184.216.34"))
+    assert sandbox._resolve_public_address("public.example", 443) == "93.184.216.34"
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *a, **k: _addrinfo("169.254.169.254"))
+    with pytest.raises(PermissionError):
+        sandbox._resolve_public_address("evil.example", 443)
