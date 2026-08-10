@@ -47,6 +47,7 @@ networks:
 
 volumes:
   pgdata:       # Postgres data (self-hosted reference; managed DB users remove the db service)
+  redis-data:   # Redis AOF/RDB persistence (self-hosted reference; managed Redis users remove redis)
 
 services:
   # ── Data stores (self-hosted REFERENCE; prefer managed Postgres/Redis in production) ────────────
@@ -76,9 +77,18 @@ services:
 
   redis:
     image: redis:7-alpine
-    # Full production redis.conf (AOF persistence + AUTH + TLS) is wired in Phase 6. The reference
-    # command here mirrors the dev AUTH so the stack is runnable; Phase 6 replaces it with the conf.
-    command: ["redis-server", "--requirepass", "${GUARDIAN_REDIS_PASSWORD:?set GUARDIAN_REDIS_PASSWORD}"]
+    # Durability + policy from redis.conf (Phase 6); AUTH is layered here (secret, not in the file).
+    # TLS (self-hosted): the app requires rediss://, so add the TLS flags below with operator certs
+    # in ./infra/tls/redis (infra/tls/README.md) — or use managed Redis, which terminates TLS:
+    #   "--tls-port", "6379", "--port", "0",
+    #   "--tls-cert-file", "/tls/redis.crt", "--tls-key-file", "/tls/redis.key",
+    #   "--tls-ca-cert-file", "/tls/ca.crt",
+    command: ["redis-server", "/etc/redis/redis.conf",
+              "--requirepass", "${GUARDIAN_REDIS_PASSWORD:?set GUARDIAN_REDIS_PASSWORD}"]
+    volumes:
+      - ./infra/redis/redis.conf:/etc/redis/redis.conf:ro
+      - redis-data:/data                       # AOF/RDB persistence (survives restart)
+      # - ./infra/tls/redis:/tls:ro            # uncomment with the TLS flags above
     networks: [backend, recon-cache]
     restart: unless-stopped
     healthcheck:
