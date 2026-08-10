@@ -21,7 +21,6 @@ import datetime as dt
 import hashlib
 import json
 import secrets
-import threading
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -33,13 +32,9 @@ from guardian_common.config import get_settings
 
 _DEFAULT_TTL_SECONDS = 300
 _MAX_FUTURE_SKEW = 60
-_NONCE_CACHE_MAX = 20_000
 
 # Deterministic dev keypair seed (local/dev only) — both planes derive the same keypair in-process.
 _DEV_SEED = hashlib.sha256(b"guardian-dev-job-signing-do-not-use-in-prod").digest()
-
-_seen_nonces: dict[str, float] = {}
-_nonce_lock = threading.Lock()
 
 
 class JobVerificationError(RuntimeError):
@@ -95,18 +90,6 @@ def sign_job(job_wire: dict, *, ttl_seconds: int = _DEFAULT_TTL_SECONDS) -> dict
     }
 
 
-def _check_nonce(nonce: str, expires_epoch: float, now_epoch: float) -> None:
-    with _nonce_lock:
-        if len(_seen_nonces) > _NONCE_CACHE_MAX:
-            for k, v in list(_seen_nonces.items()):
-                if v <= now_epoch:
-                    del _seen_nonces[k]
-        prior = _seen_nonces.get(nonce)
-        if prior is not None and prior > now_epoch:
-            raise JobVerificationError("replayed nonce")
-        _seen_nonces[nonce] = expires_epoch
-
-
 def verify_job(signed: dict) -> dict:
     """Tool plane: authenticate an envelope and return the trusted job wire, or raise."""
     if not isinstance(signed, dict):
@@ -136,7 +119,16 @@ def verify_job(signed: dict) -> dict:
     except InvalidSignature as exc:
         raise JobVerificationError("bad signature") from exc
 
-    _check_nonce(nonce, expires.timestamp(), now.timestamp())
+    # Single-use across ALL workers/hosts (P1-1): reserve the nonce in the shared store. A replay of
+    # this envelope to any other worker/process is rejected here — before the job is reconstructed.
+    from guardian_common.replay import ReplayStoreUnavailable, reserve_nonce
+    ttl = int(max(1, expires.timestamp() - now.timestamp()))
+    try:
+        fresh = reserve_nonce(nonce, ttl)
+    except ReplayStoreUnavailable as exc:
+        raise JobVerificationError("replay store unavailable") from exc
+    if not fresh:
+        raise JobVerificationError("replayed nonce")
     if not isinstance(job_wire, dict):
         raise JobVerificationError("malformed job")
     return job_wire

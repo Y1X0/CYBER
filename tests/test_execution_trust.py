@@ -7,7 +7,7 @@ forced onto the uid+nft backend regardless of what the job settings say.
 
 from __future__ import annotations
 
-from guardian_common import job_signing
+from guardian_common import replay
 from guardian_common.job_signing import sign_job
 from guardian_core.tool import EffectiveScope, RawEvidence, ToolJob, job_to_wire
 
@@ -53,7 +53,7 @@ def _install_spy(monkeypatch, external=False):
 
 def test_forged_unsigned_message_rejected_before_provider(monkeypatch):
     from guardian_scanner.tools.tasks import run_tool
-    job_signing._seen_nonces.clear()
+    replay.reset_local_for_tests()
     _install_spy(monkeypatch)
     forged = {"job": _wire(), "issued_at": "x", "expires_at": "x", "nonce": "n", "sig": "AA=="}
     result = run_tool.apply(args=[forged]).get()
@@ -63,7 +63,7 @@ def test_forged_unsigned_message_rejected_before_provider(monkeypatch):
 
 def test_tampered_scope_message_rejected_before_provider(monkeypatch):
     from guardian_scanner.tools.tasks import run_tool
-    job_signing._seen_nonces.clear()
+    replay.reset_local_for_tests()
     _install_spy(monkeypatch)
     signed = sign_job(_wire())
     signed["job"]["scope"]["targets"] = ["9.9.9.9"]      # attacker rewrites the scope after signing
@@ -73,7 +73,7 @@ def test_tampered_scope_message_rejected_before_provider(monkeypatch):
 
 def test_valid_signed_message_executes(monkeypatch):
     from guardian_scanner.tools.tasks import run_tool
-    job_signing._seen_nonces.clear()
+    replay.reset_local_for_tests()
     _install_spy(monkeypatch)
     # The provider runs in the sandbox fork, so its evidence (not a parent-side flag) proves it ran.
     result = run_tool.apply(args=[sign_job(_wire())]).get()

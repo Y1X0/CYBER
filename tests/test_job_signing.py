@@ -14,7 +14,7 @@ import datetime as dt
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from guardian_common import job_signing
+from guardian_common import job_signing, replay
 from guardian_common.job_signing import JobVerificationError, sign_job, verify_job
 
 _JOB = {
@@ -30,9 +30,9 @@ _JOB = {
 
 @pytest.fixture(autouse=True)
 def _fresh_nonce_cache():
-    job_signing._seen_nonces.clear()
+    replay.reset_local_for_tests()
     yield
-    job_signing._seen_nonces.clear()
+    replay.reset_local_for_tests()
 
 
 def test_valid_signed_job_roundtrips():
