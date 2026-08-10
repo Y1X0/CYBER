@@ -1,0 +1,114 @@
+name: Release
+
+# Build, scan, and (opt-in) publish the production image. Runs ONLY on a version tag or a manual
+# dispatch — never on ordinary branch pushes, so it does not interfere with CI. The registry is
+# CONFIGURABLE (repo vars); publishing is opt-in. The repo picks no external registry — it defaults
+# to GHCR (this repo's own home) and pushes only when you tag a release or ask it to.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Push the built image to the registry"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write        # used only when publishing to GHCR; harmless otherwise
+
+env:
+  # Override with repo/org variables to target any registry; defaults to GHCR for this repo.
+  REGISTRY: ${{ vars.GUARDIAN_REGISTRY || 'ghcr.io' }}
+  IMAGE_NAME: ${{ vars.GUARDIAN_IMAGE_NAME || github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve config
+        id: cfg
+        run: |
+          publish=false
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ inputs.publish }}" = "true" ]; then
+            publish=true
+          fi
+          image="$(echo "${REGISTRY}/${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
+          tag="${GITHUB_REF_NAME:-manual}"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "image=$image"     >> "$GITHUB_OUTPUT"
+          echo "tag=$tag"         >> "$GITHUB_OUTPUT"
+          echo "Building $image:$tag (publish=$publish)"
+
+      # Build into the local docker so we can assert + scan the EXACT artifact before any push.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile
+          load: true
+          push: false
+          tags: ${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.tag }}
+
+      - name: Assert non-root runtime and no baked secrets
+        run: |
+          ref="${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.tag }}"
+          user="$(docker inspect --format '{{.Config.User}}' "$ref")"
+          [ "$user" = "guardian" ] || { echo "::error::image runs as '$user', expected non-root guardian"; exit 1; }
+          if docker inspect --format '{{json .Config.Env}}' "$ref" | grep -qi 'GUARDIAN_'; then
+            echo "::error::a GUARDIAN_* value is baked into the image env — secrets must be injected at runtime"; exit 1
+          fi
+          echo "image runs as $user; no GUARDIAN_* baked in"
+
+      - name: Install (for SBOM)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Generate SBOM
+        run: python tools/generate_sbom.py sbom.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: guardian-sbom
+          path: sbom.json
+
+      - name: Dependency vulnerability scan (pip-audit)
+        continue-on-error: true   # advisory, matching CI's gate tiering (not a release blocker)
+        run: pip-audit --desc --strict
+
+      - name: Image vulnerability scan (Trivy)
+        continue-on-error: true   # advisory; base-image CVEs shouldn't hard-block a release
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.tag }}
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+
+      - name: Publish + record digest (opt-in)
+        if: steps.cfg.outputs.publish == 'true'
+        run: |
+          ref="${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.tag }}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login "$REGISTRY" -u "${{ github.actor }}" --password-stdin
+          docker push "$ref"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$ref")"
+          echo "Published: $digest"
+          echo "$digest" > image-digest.txt
+          echo "### Released image" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "$digest" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload digest
+        if: steps.cfg.outputs.publish == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-digest
+          path: image-digest.txt

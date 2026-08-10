@@ -1,0 +1,46 @@
+# Keep the build context small and secret-free. The Dockerfile COPYs only pyproject.toml, README.md,
+# alembic.ini, packages/, services/, workers/ — everything else is excluded here so it can never end
+# up in an image layer.
+
+# VCS / tooling
+.git
+.github
+.gitignore
+
+# Secrets & local env (belt-and-braces: these must NEVER enter an image)
+.env
+.env.*
+!.env.production.example
+infra/tls
+*.pem
+*.key
+*.crt
+
+# Python build/test cruft
+.venv
+venv
+__pycache__
+**/__pycache__
+*.py[cod]
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Repo content not needed at runtime
+tests
+docs
+cli
+apps
+sbom.json
+dump.rdb
+scratch
+
+# Compose / deployment descriptors (not part of the app image)
+docker-compose*.yml
+infra/k8s
+infra/nginx
+infra/redis
+infra/scripts
