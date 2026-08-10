@@ -7,10 +7,12 @@ failure degrades the scan to `partial` rather than failing the whole run (doc 01
 from __future__ import annotations
 
 import datetime as dt
+import os
 import shutil
 import subprocess  # noqa: S404 - used with a fixed argv, no shell
 import tempfile
 import uuid
+from urllib.parse import urlsplit
 
 from guardian_common.config import get_settings
 from guardian_common.crypto import decrypt_json
@@ -61,11 +63,45 @@ def _now() -> dt.datetime:
     return dt.datetime.now(dt.UTC)
 
 
+def _clone_host(url: str) -> str | None:
+    """Extract the host from a clone URL — http(s)://host/… or the scp-like git@host:path."""
+    if url.startswith(("http://", "https://")):
+        return urlsplit(url).hostname
+    if url.startswith("git@"):
+        return url[4:].split(":", 1)[0] or None
+    return None
+
+
+def _clone_port(url: str) -> int:
+    if url.startswith("https://"):
+        return 443
+    if url.startswith("git@"):
+        return 22
+    return 80
+
+
+def _git_env(home: str) -> dict[str, str]:
+    """Minimal, secret-free environment for `git clone` (P1-Ⓐ). An ALLOWLIST: no GUARDIAN_* secret
+    (KMS master, JWT, broker-seal key, DB/Redis URLs) is inherited by the git child; the host git
+    config/.netrc are isolated (HOME → the throwaway workspace, system config ignored); and no
+    interactive/credential prompt can block or leak host credentials."""
+    return {
+        "PATH": os.environ.get("PATH", "/usr/sbin:/usr/bin:/sbin:/bin"),
+        "HOME": home,                       # isolate from host ~/.gitconfig / ~/.netrc
+        "GIT_CONFIG_NOSYSTEM": "1",         # ignore /etc/gitconfig
+        "GIT_TERMINAL_PROMPT": "0",         # never prompt for / block on credentials
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+    }
+
+
 def _prepare_workspace(asset: Asset) -> tuple[str | None, str | None, str | None]:
     """Return (workspace_path, inline_content, tempdir_to_cleanup).
 
-    Priority: explicit inline content (tests/demo) → local path → shallow git clone.
-    Cloning is best-effort and network-restricted at the infra layer (sandbox egress allowlist).
+    Priority: explicit inline content (tests/demo) → local path → shallow git clone. The clone
+    target is tenant-controlled, so before cloning we resolve its host and REFUSE any private/
+    loopback/link-local/metadata (incl. IPv4-mapped-IPv6) address (P1-Ⓐ SSRF guard, reusing the
+    repo's `sandbox._resolve_public_address`), run git with redirects disabled (so a redirect can't
+    bounce to an internal host) and with a scrubbed, secret-free environment.
     """
     cfg = asset.config or {}
     if cfg.get("inline_content"):
@@ -73,13 +109,22 @@ def _prepare_workspace(asset: Asset) -> tuple[str | None, str | None, str | None
     if cfg.get("local_path"):
         return str(cfg["local_path"]), None, None
     if asset.kind == "repo" and asset.identifier.startswith(("http://", "https://", "git@")):
+        host = _clone_host(asset.identifier)
+        if not host:
+            raise RuntimeError("workspace preparation failed: unparseable clone host")
+        try:
+            sandbox._resolve_public_address(host, _clone_port(asset.identifier))  # reject internal
+        except PermissionError as exc:
+            raise RuntimeError(f"workspace preparation refused: {exc}") from exc
         tmp = tempfile.mkdtemp(prefix="guardian_ws_")
         try:
-            subprocess.run(  # noqa: S603,S607 - fixed argv, no shell, timeout-bounded
-                ["git", "clone", "--depth", "1", asset.identifier, tmp],  # noqa: S607
+            subprocess.run(  # noqa: S603 - fixed argv, no shell, timeout-bounded, scrubbed env
+                ["git", "-c", "http.followRedirects=false", "-c", "credential.helper=",  # noqa: S607
+                 "clone", "--depth", "1", asset.identifier, tmp],
                 check=True,
                 capture_output=True,
                 timeout=_CLONE_TIMEOUT,
+                env=_git_env(tmp),
             )
             return tmp, None, tmp
         except (subprocess.SubprocessError, OSError) as exc:
