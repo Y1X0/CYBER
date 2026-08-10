@@ -1,0 +1,160 @@
+# ── Security Guardian Platform — plane isolation as Kubernetes NetworkPolicies (REFERENCE) ───────
+#
+# OPTIONAL reference. The repo's runnable orchestrator is Docker Compose (docker-compose.prod.yml);
+# these portable NetworkPolicy objects reproduce the SAME plane isolation if you deploy on
+# Kubernetes. They pick no cloud and no CNI-specific feature — any NetworkPolicy-capable CNI
+# (Calico, Cilium, etc.) enforces them.
+#
+# Invariants reproduced (identical to the compose network membership):
+#   * Execution planes (worker-recon, worker-tools) can reach Redis + the internet, but NEVER the
+#     database and NEVER the API. This is the network-level complement to the in-process egress
+#     allowlist (guardian_scanner.egress) and the tool-plane uid+nft kernel egress guard.
+#   * The database accepts connections ONLY from the API and worker-default.
+#   * The API is reachable only via the ingress; the database/Redis are never internet-published.
+#
+# Fill the two cluster-specific CIDRs marked <POD_CIDR>/<SERVICE_CIDR> for your cluster, then:
+#   kubectl -n guardian apply -f infra/k8s/networkpolicies.yaml
+#
+# Expected pod labels: app=guardian, plane in {api,worker-default,worker-recon,worker-tools,db,redis,ingress}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: guardian
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  # Deny everything by default; the policies below re-open exactly what each plane needs.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: guardian
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# API — reachable only from the ingress; may reach db, redis, and the internet (AI/webhooks).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: api, namespace: guardian }
+spec:
+  podSelector: { matchLabels: { app: guardian, plane: api } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: guardian, plane: ingress } }
+      ports: [ { protocol: TCP, port: 8000 } ]
+  egress:
+    - to: [ { podSelector: { matchLabels: { app: guardian, plane: db } } } ]
+      ports: [ { protocol: TCP, port: 5432 } ]
+    - to: [ { podSelector: { matchLabels: { app: guardian, plane: redis } } } ]
+      ports: [ { protocol: TCP, port: 6379 } ]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 ]
+      ports: [ { protocol: TCP, port: 443 } ]
+---
+# worker-default — trusted plane; may reach db, redis, and the internet (engines).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: worker-default, namespace: guardian }
+spec:
+  podSelector: { matchLabels: { app: guardian, plane: worker-default } }
+  policyTypes: [Ingress, Egress]
+  ingress: []                       # workers open no inbound listener
+  egress:
+    - to: [ { podSelector: { matchLabels: { app: guardian, plane: db } } } ]
+      ports: [ { protocol: TCP, port: 5432 } ]
+    - to: [ { podSelector: { matchLabels: { app: guardian, plane: redis } } } ]
+      ports: [ { protocol: TCP, port: 6379 } ]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 ]
+---
+# worker-recon — DB-less execution plane. Redis + internet ONLY; NO database, NO API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: worker-recon, namespace: guardian }
+spec:
+  podSelector: { matchLabels: { app: guardian, plane: worker-recon } }
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to: [ { podSelector: { matchLabels: { app: guardian, plane: redis } } } ]
+      ports: [ { protocol: TCP, port: 6379 } ]
+    # Internet for probing, but the `except` blocks RFC1918 + link-local (incl. 169.254.169.254
+    # metadata) at the network layer — belt-and-braces with the in-process egress guard.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 ]
+---
+# worker-tools — DB-less execution plane. Redis + internet ONLY; NO database, NO API.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: worker-tools, namespace: guardian }
+spec:
+  podSelector: { matchLabels: { app: guardian, plane: worker-tools } }
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to: [ { podSelector: { matchLabels: { app: guardian, plane: redis } } } ]
+      ports: [ { protocol: TCP, port: 6379 } ]
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [ 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16 ]
+---
+# Database — accepts ONLY api + worker-default. Recon/tools have no route here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: db, namespace: guardian }
+spec:
+  podSelector: { matchLabels: { app: guardian, plane: db } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: guardian, plane: api } }
+        - podSelector: { matchLabels: { app: guardian, plane: worker-default } }
+      ports: [ { protocol: TCP, port: 5432 } ]
+---
+# Redis — broker/result/nonce store; reachable from all four planes, never internet-published.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: redis, namespace: guardian }
+spec:
+  podSelector: { matchLabels: { app: guardian, plane: redis } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app: guardian, plane: api } }
+        - podSelector: { matchLabels: { app: guardian, plane: worker-default } }
+        - podSelector: { matchLabels: { app: guardian, plane: worker-recon } }
+        - podSelector: { matchLabels: { app: guardian, plane: worker-tools } }
+      ports: [ { protocol: TCP, port: 6379 } ]
+---
+# Ingress — the only internet-facing pod; may reach the API only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: ingress, namespace: guardian }
+spec:
+  podSelector: { matchLabels: { app: guardian, plane: ingress } }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - {}                            # from the LB / internet (scope to your LB source as needed)
+  egress:
+    - to: [ { podSelector: { matchLabels: { app: guardian, plane: api } } } ]
+      ports: [ { protocol: TCP, port: 8000 } ]
