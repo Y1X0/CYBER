@@ -7,13 +7,42 @@ or performs one rate-limited GET in live mode. Active engine → `requires_autho
 
 from __future__ import annotations
 
+import ipaddress
+import socket
 from collections.abc import Iterable
+from urllib.parse import urlsplit
 
 from guardian_core.enums import EngineKey, Severity
 from guardian_core.evidence import Evidence, EvidenceKind
 from guardian_core.findings import RawFinding
 
 from guardian_scanner.engines.base import EngineHealth, ScanContext
+
+
+class _EgressBlocked(RuntimeError):
+    """A DAST live GET was refused by the SSRF guard (fail-closed)."""
+
+
+def _is_blocked_ip(ip: str) -> bool:
+    """True for any address DAST must never reach: private/loopback/link-local (incl. the cloud
+    metadata endpoint 169.254.169.254)/multicast/reserved/unspecified, or a non-literal."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    return bool(addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_multicast or addr.is_reserved or addr.is_unspecified)
+
+
+def _assert_target_public(host: str) -> None:
+    """Resolve the target host and refuse if ANY address is non-public (DNS-rebinding defense)."""
+    infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    ips = sorted({info[4][0] for info in infos})
+    if not ips:
+        raise _EgressBlocked(f"no address for {host!r}")
+    for ip in ips:
+        if _is_blocked_ip(ip):
+            raise _EgressBlocked(f"{host!r} resolves to non-public {ip}")
 
 # header (lowercased) → (title, severity, cwe)
 _REQUIRED_HEADERS = {
@@ -112,14 +141,26 @@ class DastEngine:
         snap = ctx.asset_config.get("http_snapshot")
         if snap:
             return snap
-        # Live mode: one safe GET. Best-effort; egress is restricted at the sandbox layer.
+        # Live mode: ONE hardened GET against the authorized web asset (P1-β). SSRF discipline
+        # mirrors web_checks/ct_surface: the DAST engine runs on the scanner plane WITHOUT kernel
+        # egress isolation, so it must self-guard — refuse a target that resolves to a private/
+        # loopback/link-local/metadata address (DNS-rebinding), and NEVER follow a response-chosen
+        # redirect into a new (possibly internal/unauthorized) host.
         url = ctx.asset_identifier
         if not url.startswith(("http://", "https://")):
+            return None
+        host = urlsplit(url).hostname
+        if not host:
+            return None
+        try:
+            _assert_target_public(host)          # fail-closed: refuse a non-public target
+        except _EgressBlocked:
             return None
         try:
             import httpx  # noqa: PLC0415
 
-            resp = httpx.get(url, timeout=10.0, follow_redirects=True)
+            with httpx.Client(follow_redirects=False, timeout=10.0) as client:
+                resp = client.get(url, headers={"user-agent": "guardian-dast"})
             cookies = [
                 {
                     "name": c.name,
