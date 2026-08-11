@@ -15,7 +15,12 @@ from guardian_common.config import get_settings
 @lru_cache
 def _client() -> Celery:
     settings = get_settings()
-    return Celery("guardian-api", broker=settings.redis_url, backend=settings.redis_url)
+    app = Celery("guardian-api", broker=settings.redis_url, backend=settings.redis_url)
+    # Publish to the queue the workers actually consume (`default`). Celery's built-in default queue
+    # is `celery`, which no worker consumes — so API-published run_scan/analyze_scan/run_discovery
+    # would strand there and never execute. Mirrors task_default_queue on the worker's celery_app.
+    app.conf.task_default_queue = "default"
+    return app
 
 
 def enqueue_scan(scan_id: str) -> None:

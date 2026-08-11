@@ -61,6 +61,11 @@ celery_app = Celery(
 )
 
 celery_app.conf.update(
+    # Unrouted tasks (run_scan, analyze_scan, enrich_graph) publish to the DEFAULT queue, and the
+    # workers consume `default`. Celery's built-in default queue is `celery`, which no worker
+    # consumes — so API-triggered scans would never run. Pin the default queue to `default`.
+    # (task_routes below still pins the plane-isolated tasks to their own queues.)
+    task_default_queue="default",
     task_acks_late=True,  # redeliver on worker crash; tasks are idempotent
     task_reject_on_worker_lost=True,
     task_track_started=True,
