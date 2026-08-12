@@ -83,14 +83,36 @@ jobs:
         continue-on-error: true   # advisory, matching CI's gate tiering (not a release blocker)
         run: pip-audit --desc --strict
 
-      - name: Image vulnerability scan (Trivy)
-        continue-on-error: true   # advisory; base-image CVEs shouldn't hard-block a release
-        uses: aquasecurity/trivy-action@v0.29.0
-        with:
-          image-ref: ${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.tag }}
-          format: table
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
+      # Deterministic Trivy: pinned binary downloaded from the official Trivy GitHub release, verified
+      # against that release's official checksums file before it runs. No third-party install/composite
+      # action, no floating ref. A missing release/checksum, a checksum mismatch, or any HIGH/CRITICAL
+      # finding fails the job (advisory bypass is disabled), so the publish step below never runs on an
+      # unscanned or vulnerable image.
+      # NOTE: checksums are fetched from the same release channel as the binary — this gives artifact
+      # integrity + reproducibility, NOT full protection against a compromise of that upstream release
+      # itself. Keyless signature (provenance) verification is deferred (its official sources were not
+      # verifiable in the build-authoring environment).
+      - name: Image vulnerability scan (Trivy — pinned binary, official checksum)
+        env:
+          TRIVY_VERSION: "0.58.1"   # exact, explicitly pinned release (no floating ref)
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"; cd "$work"
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          asset="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          # Official release asset + official checksums file from the SAME pinned release.
+          # curl -f => a missing release/version/checksum returns non-zero and (set -e) FAILS here.
+          curl -fsSL -o "$asset"        "${base}/${asset}"
+          curl -fsSL -o checksums.txt   "${base}/trivy_${TRIVY_VERSION}_checksums.txt"
+          # Extract ONLY the Linux-64bit tarball's line from the official checksums; empty => FAIL.
+          line="$(grep -E "  ${asset//./\\.}\$" checksums.txt || true)"
+          [ -n "$line" ] || { echo "no checksum line for ${asset} (wrong version/asset?)"; exit 1; }
+          echo "$line" | sha256sum -c -           # mismatch/truncation => non-zero => job FAILS
+          tar -xzf "$asset" trivy
+          # Scan the LOCALLY built image (build step used load:true) BEFORE the publish step.
+          # --exit-code 1 => any fixed HIGH/CRITICAL fails the job, blocking the push.
+          "./trivy" image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+            "${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.tag }}"
 
       - name: Publish + record digest (opt-in)
         if: steps.cfg.outputs.publish == 'true'
