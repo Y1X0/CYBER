@@ -40,7 +40,7 @@ jobs:
             publish=true
           fi
           image="$(echo "${REGISTRY}/${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')"
-          tag="${GITHUB_REF_NAME:-manual}"
+          tag="sha-${GITHUB_SHA:0:12}"   # immutable, slash-free (branch refs contain '/', invalid as a docker tag)
           echo "publish=$publish" >> "$GITHUB_OUTPUT"
           echo "image=$image"     >> "$GITHUB_OUTPUT"
           echo "tag=$tag"         >> "$GITHUB_OUTPUT"
