@@ -94,7 +94,7 @@ jobs:
       # verifiable in the build-authoring environment).
       - name: Image vulnerability scan (Trivy — pinned binary, official checksum)
         env:
-          TRIVY_VERSION: "0.58.1"   # exact, explicitly pinned release (no floating ref)
+          TRIVY_VERSION: "0.72.0"   # exact, explicitly pinned release (no floating ref)
         run: |
           set -euo pipefail
           work="$(mktemp -d)"; cd "$work"
