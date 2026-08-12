@@ -114,6 +114,39 @@ jobs:
           "./trivy" image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
             "${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.tag }}"
 
+      # DIAGNOSTIC ONLY — does NOT gate. Re-runs the SAME pinned+checksum-verified Trivy against the
+      # SAME built image (load:true) with JSON + --list-all-pkgs to capture PkgName/InstalledVersion/
+      # PkgPath/PkgIdentifier/VulnerabilityID/Target. Runs even when the gating scan above failed
+      # (if: always()); has NO --exit-code and NO continue-on-error on the gate, so it changes nothing
+      # about the gate. Emits trivy.json for inspection, then it is uploaded as an artifact.
+      - name: Trivy JSON diagnostic (non-gating)
+        if: always()
+        env:
+          TRIVY_VERSION: "0.72.0"
+        run: |
+          set -euo pipefail
+          work="$(mktemp -d)"; cd "$work"
+          base="https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}"
+          asset="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          curl -fsSL -o "$asset"      "${base}/${asset}"
+          curl -fsSL -o checksums.txt "${base}/trivy_${TRIVY_VERSION}_checksums.txt"
+          line="$(grep -E "  ${asset//./\\.}\$" checksums.txt || true)"
+          [ -n "$line" ] || { echo "no checksum line for ${asset}"; exit 1; }
+          echo "$line" | sha256sum -c -
+          tar -xzf "$asset" trivy
+          "./trivy" image --format json --list-all-pkgs \
+            --output "$GITHUB_WORKSPACE/trivy.json" \
+            "${{ steps.cfg.outputs.image }}:${{ steps.cfg.outputs.tag }}"
+          echo "wrote trivy.json ($(wc -c < "$GITHUB_WORKSPACE/trivy.json") bytes)"
+
+      - name: Upload Trivy JSON diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-json-diagnostic
+          path: trivy.json
+          if-no-files-found: warn
+
       - name: Publish + record digest (opt-in)
         if: steps.cfg.outputs.publish == 'true'
         run: |
