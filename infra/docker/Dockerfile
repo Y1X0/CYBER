@@ -21,7 +21,8 @@ COPY packages ./packages
 COPY services ./services
 COPY workers ./workers
 
-RUN pip install --upgrade pip && pip install -e .
+# setuptools >=78.1.1 fixes CVE-2025-47273 (path traversal); upgraded in-image before the install.
+RUN pip install --upgrade pip "setuptools>=78.1.1" && pip install -e .
 
 # Drop privileges.
 RUN useradd --create-home --uid 10001 guardian && chown -R guardian:guardian /app
