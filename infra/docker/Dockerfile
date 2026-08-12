@@ -22,7 +22,15 @@ COPY services ./services
 COPY workers ./workers
 
 # setuptools >=78.1.1 fixes CVE-2025-47273 (path traversal); upgraded in-image before the install.
-RUN pip install --upgrade pip "setuptools>=78.1.1" && pip install -e .
+# Then drop pip's bundled vendoring manifests (bom.cdx.json = CycloneDX SBOM, vendor.txt = pin list).
+# These describe pip's OWN internal _vendor copies (setuptools 70.3.0 / msgpack 1.1.2), not the
+# runtime packages (which are the upgraded 84.0.0 / 1.2.1). Trivy's SBOM analyzer parses them and
+# mis-attributes those vendored versions as image findings. They are build/maintenance metadata only
+# (bom.cdx.json is never read by pip; vendor.txt is read solely by the `pip debug` subcommand), so
+# removing them clears the false attribution at its source without touching any runtime dependency.
+RUN pip install --upgrade pip "setuptools>=78.1.1" && pip install -e . \
+    && vendor="$(python -c 'import os, pip._vendor as v; print(os.path.dirname(v.__file__))')" \
+    && rm -f "$vendor/bom.cdx.json" "$vendor/vendor.txt"
 
 # Drop privileges.
 RUN useradd --create-home --uid 10001 guardian && chown -R guardian:guardian /app
