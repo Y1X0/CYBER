@@ -250,6 +250,27 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                     run.error = str(exc)[:2000]
                     engine_statuses.append("failed")
                     log.error("engine_failed", engine=engine_key, scan_id=scan_id, error=str(exc))
+        except Exception as exc:  # noqa: BLE001 - a failure OUTSIDE the per-engine guard (workspace
+            # preparation, engine lookup, ScanContext build …) must still put the scan in a terminal
+            # FAILED state with the error recorded. Otherwise the exception escapes session_scope,
+            # which rolls back the RUNNING write and strands the scan at `queued` forever with no
+            # error. Mirror the asset/customer-missing guard above: set a terminal status + audit,
+            # then return rather than re-raise.
+            scan.status = ScanStatus.FAILED.value
+            scan.error = str(exc)[:2000]
+            scan.finished_at = _now()
+            log.error("scan_failed", scan_id=scan_id, error=str(exc))
+            record_audit(
+                session,
+                action="scan.failed",
+                tenant_id=scan.tenant_id,
+                customer_id=scan.customer_id,
+                actor_id=scan.created_by,
+                entity_type="scan",
+                entity_id=str(scan.id),
+                metadata={"status": scan.status, "error": scan.error},
+            )
+            return {"scan_id": scan_id, "status": scan.status}
         finally:
             if cleanup:
                 shutil.rmtree(cleanup, ignore_errors=True)

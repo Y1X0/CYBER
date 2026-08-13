@@ -90,3 +90,67 @@ def test_scan_produces_persisted_findings():
             .all()
         )
         assert audit, "scan completion must be audited"
+
+
+def test_scan_marked_failed_when_workspace_prep_fails(monkeypatch):
+    """F2 regression: a failure BEFORE the per-engine guard (e.g. workspace preparation raising on
+    an unreachable/unresolvable clone target) must leave the scan in a terminal FAILED state with
+    the error recorded — never stranded at `queued` by a rolled-back RUNNING write."""
+    from guardian_db.models import Asset, AuditLog, Customer, Scan, Tenant
+    from guardian_db.session import session_scope
+    from guardian_scanner import tasks
+
+    slug = f"itest-{uuid.uuid4().hex[:8]}"
+    with session_scope() as db:
+        tenant = Tenant(name="ITest", slug=slug, mode="hybrid")
+        db.add(tenant)
+        db.flush()
+        customer = Customer(tenant_id=tenant.id, name="ITest Co", criticality="high")
+        db.add(customer)
+        db.flush()
+        asset = Asset(
+            tenant_id=tenant.id,
+            customer_id=customer.id,
+            name="repo",
+            kind="repo",
+            identifier="https://example.invalid/demo.git",
+            exposure="public",
+        )
+        db.add(asset)
+        db.flush()
+        scan = Scan(
+            tenant_id=tenant.id,
+            customer_id=customer.id,
+            asset_id=asset.id,
+            trigger="manual",
+            status="queued",
+            requested_engines=["secrets"],
+            stats={},
+        )
+        db.add(scan)
+        db.flush()
+        scan_id = str(scan.id)
+        tenant_id = tenant.id
+
+    # Force the pre-engine workspace preparation to fail (unreachable repo / clone error / DNS).
+    def _boom(_asset):
+        raise RuntimeError("workspace preparation failed: simulated clone failure")
+
+    monkeypatch.setattr(tasks, "_prepare_workspace", _boom)
+
+    result = tasks.run_scan.apply(args=[scan_id]).get()
+    assert result["status"] == "failed"
+
+    with session_scope() as db:
+        scan = db.get(Scan, uuid.UUID(scan_id))
+        # The scan must NOT be stranded at `queued`; it is terminal-FAILED with the error persisted.
+        assert scan.status == "failed", f"scan stranded at {scan.status!r} instead of failed"
+        assert scan.error and "workspace preparation failed" in scan.error
+        assert scan.finished_at is not None
+
+        audit = (
+            db.query(AuditLog)
+            .filter(AuditLog.tenant_id == tenant_id, AuditLog.action == "scan.failed")
+            .all()
+        )
+        assert audit, "scan failure must be audited"
