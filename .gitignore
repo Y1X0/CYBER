@@ -23,6 +23,7 @@ htmlcov/
 !.env.production.example
 *.pem
 *.key
+*.crt
 
 # Node / frontend
 node_modules/

@@ -1,8 +1,9 @@
 # TLS certificates (operator-provided — NOT in Git)
 
 Certificate material is a deployment secret and an **external provisioning step**. Nothing here is
-committed: `*.pem`, `*.key`, and `*.crt` are git-ignored (`.gitignore`). This directory only
-documents what to place where.
+committed: `*.pem`, `*.key`, and `*.crt` are all git-ignored (see the `# Env & secrets` block in
+`.gitignore`), so only this README and the directory layout are tracked — never a key or certificate.
+This directory only documents what to place where.
 
 ```
 infra/tls/
