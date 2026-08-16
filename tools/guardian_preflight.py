@@ -19,10 +19,14 @@ IMPORTANT: run this BEFORE `alembic upgrade head`. Check A2 is the F1 gate.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from urllib.parse import parse_qs, urlsplit
 
 TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
+# Any URI-shaped token may carry a password. Scrub before printing an exception: libpq echoes the
+# whole connection string in some errors, which would otherwise land in a CI log verbatim.
+_URI = re.compile(r"(?i)\b(?:postgres(?:ql)?(?:\+\w+)?|rediss?)://\S*")
 results: list[tuple[str, str, str, str]] = []  # (id, title, verdict, detail)
 
 
@@ -45,15 +49,24 @@ def redact(dsn: str) -> str:
         return "<unparseable>"
 
 
+def safe(exc: BaseException, limit: int = 130) -> str:
+    """Render an exception for printing with any embedded connection URI scrubbed."""
+    first = str(exc).splitlines()[0] if str(exc) else ""
+    return f"{type(exc).__name__}: {_URI.sub('<dsn-redacted>', first)}"[:limit]
+
+
 def libpq(dsn: str) -> str:
     """SQLAlchemy DSN -> libpq URL (strip the +psycopg driver suffix)."""
     return dsn.replace("+psycopg", "")
 
 
 # ── inputs ────────────────────────────────────────────────────────────────────
-OWNER = os.environ.get("GUARDIAN_DATABASE_URL", "")
-APP = os.environ.get("GUARDIAN_APP_DATABASE_URL", "")
-REDIS_URL = os.environ.get("GUARDIAN_REDIS_URL", "")
+# Strip surrounding whitespace. A secret pasted with a leading space is invisible in the UI but
+# stops libpq recognising the URI prefix: it falls back to keyword/value parsing and dies on the
+# `=` in `?sslmode=...` with a confusing "invalid connection option" error.
+OWNER = os.environ.get("GUARDIAN_DATABASE_URL", "").strip()
+APP = os.environ.get("GUARDIAN_APP_DATABASE_URL", "").strip()
+REDIS_URL = os.environ.get("GUARDIAN_REDIS_URL", "").strip()
 
 print("Guardian cutover preflight — sections A & B")
 print("=" * 78)
@@ -80,7 +93,7 @@ else:
             conn = psycopg.connect(libpq(OWNER), connect_timeout=10)
         except Exception as e:  # noqa: BLE001
             record("A1", "PostgreSQL 16 + UTF8", False,
-                   f"connect failed: {type(e).__name__}: {e}"[:150])
+                   f"connect failed: {safe(e)}")
 
         if conn is not None:
             # A1 — server version + server_encoding
@@ -97,7 +110,7 @@ else:
                     + ("" if utf8 else "  <-- MUST be UTF8; recreate the database"),
                 )
             except Exception as e:  # noqa: BLE001
-                record("A1", "PostgreSQL 16 + UTF8", False, f"{type(e).__name__}: {e}"[:150])
+                record("A1", "PostgreSQL 16 + UTF8", False, safe(e))
 
             # A2 — THE F1 GATE: text must come back as str, not bytes
             try:
@@ -111,7 +124,7 @@ else:
                     + ("" if is_str else "  <-- set PGCLIENTENCODING=UTF8 (env, not code)"),
                 )
             except Exception as e:  # noqa: BLE001
-                record("A2", "F1 client encoding (str)", False, f"{type(e).__name__}: {e}"[:150])
+                record("A2", "F1 client encoding (str)", False, safe(e))
 
             # A2b — SQLAlchemy must resolve the server version (the exact local-drill failure)
             try:
@@ -121,14 +134,26 @@ else:
                 with eng.connect():
                     svi = eng.dialect.server_version_info
                 record("A2b", "SQLAlchemy version parse", True, f"server_version_info={svi}")
-            except ImportError:
-                record("A2b", "SQLAlchemy version parse", None,
-                       "sqlalchemy absent (run inside the image)")
+            except ImportError as e:
+                # ModuleNotFoundError subclasses ImportError, so a dialect that fails to load
+                # ("postgresql.psycopg") lands here too. Name the missing module rather than
+                # blaming SQLAlchemy, which is a runtime dependency and should always be present.
+                missing = getattr(e, "name", None) or "?"
+                absent = missing.split(".")[0] == "sqlalchemy"
+                record("A2b", "SQLAlchemy version parse", None if absent else False,
+                       f"import failed for '{missing}' — "
+                       + ("sqlalchemy itself is missing; run inside the image"
+                          if absent else "dialect load failure; alembic WILL fail"))
             except Exception as e:  # noqa: BLE001
                 record("A2b", "SQLAlchemy version parse", False,
-                       f"{type(e).__name__}: {e}"[:150] + "  <-- alembic WILL fail")
+                       safe(e) + "  <-- alembic WILL fail")
 
-            # A3 — sslmode present in the DSN query string AND the session is encrypted
+            # A3 — TLS. The proof is that we are connected at all: with a TLS-enforcing sslmode
+            # libpq aborts the handshake unless the session is encrypted ("server does not support
+            # SSL, but SSL was required"), so reaching this line IS the evidence. pg_stat_ssl is
+            # reported for information only and is NOT part of the verdict: providers that front
+            # Postgres with a TLS-terminating proxy (Neon, PgBouncer-style poolers) legitimately
+            # report ssl=false on the backend while the client link is encrypted.
             mode = (parse_qs(urlsplit(OWNER).query).get("sslmode") or [""])[0].lower()
             in_dsn = mode in TLS_SSLMODES
             try:
@@ -138,10 +163,18 @@ else:
                 live_ssl, tlsver = (row[0], row[1]) if row else (False, None)
             except Exception:  # noqa: BLE001
                 live_ssl, tlsver = False, None
+            if not in_dsn:
+                note = ("  <-- sslmode must be IN the URL query string "
+                        "(require|verify-ca|verify-full)")
+            elif mode != "verify-full":
+                note = f"  <-- encrypted, but '{mode}' does not verify the server certificate"
+            else:
+                note = ""
+            proof = "connected under a TLS-enforcing mode; " if in_dsn else ""
             record(
-                "A3", "TLS enforced in DSN", bool(in_dsn and live_ssl),
-                f"sslmode={mode or '<missing>'}; live ssl={live_ssl} {tlsver or ''}"
-                + ("" if in_dsn else "  <-- sslmode must be IN the URL query string"),
+                "A3", "TLS enforced in DSN", in_dsn,
+                f"sslmode={mode or '<missing>'}; {proof}"
+                f"pg_stat_ssl={live_ssl} {tlsver or ''}(informational)" + note,
             )
 
 # ── A4 : guardian_app role (only meaningful after migration 0005) ─────────────
@@ -154,12 +187,12 @@ if conn is not None:
             record("A4", "guardian_app role safe", None,
                    "role absent — expected until `alembic upgrade head` runs (creates it in 0005)")
         else:
-            safe = (not row[0]) and (not row[1])
-            record("A4", "guardian_app role safe", safe,
+            role_ok = (not row[0]) and (not row[1])
+            record("A4", "guardian_app role safe", role_ok,
                    f"superuser={row[0]} bypassrls={row[1]}"
-                   + ("" if safe else "  <-- API refuses to start; RLS would be inert"))
+                   + ("" if role_ok else "  <-- API refuses to start; RLS would be inert"))
     except Exception as e:  # noqa: BLE001
-        record("A4", "guardian_app role safe", False, f"{type(e).__name__}: {e}"[:150])
+        record("A4", "guardian_app role safe", False, safe(e))
 
     # A4b — can the app role actually authenticate?
     if APP:
@@ -173,7 +206,7 @@ if conn is not None:
             record("A4b", "app DSN authenticates", who_s == "guardian_app", f"current_user={who_s}")
         except Exception as e:  # noqa: BLE001
             record("A4b", "app DSN authenticates", False,
-                   f"{type(e).__name__}: {e}"[:110] + "  <-- set the role password AFTER migrate")
+                   safe(e) + "  <-- role is created by migration 0005")
 
 # ── A5 : the two DSNs must differ ─────────────────────────────────────────────
 if OWNER and APP:
@@ -218,7 +251,7 @@ else:
     except ImportError:
         record("B1b", "Redis live TLS ping", False, "redis-py not installed — run inside the image")
     except Exception as e:  # noqa: BLE001
-        record("B1b", "Redis live TLS ping", False, f"{type(e).__name__}: {e}"[:150])
+        record("B1b", "Redis live TLS ping", False, safe(e))
 
 # ── report ────────────────────────────────────────────────────────────────────
 print()
