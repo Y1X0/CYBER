@@ -92,8 +92,21 @@ else:
         try:
             conn = psycopg.connect(libpq(OWNER), connect_timeout=10)
         except Exception as e:  # noqa: BLE001
+            # A refused connection and an unroutable address look alike in libpq's message, so
+            # report what the name actually resolves to. A host with AAAA records only is
+            # unreachable from an IPv4-only network however the DSN is spelled.
+            import socket
+
+            hostname = urlsplit(OWNER).hostname or ""
+            fams = []
+            for fam, label in ((socket.AF_INET, "A"), (socket.AF_INET6, "AAAA")):
+                try:
+                    n = len(socket.getaddrinfo(hostname, 5432, fam))
+                    fams.append(f"{label}={n}")
+                except OSError:
+                    fams.append(f"{label}=0")
             record("A1", "PostgreSQL 16 + UTF8", False,
-                   f"connect failed: {safe(e)}")
+                   f"connect failed: {safe(e, 90)} [dns {' '.join(fams)}]")
 
         if conn is not None:
             # A1 — server version + server_encoding
