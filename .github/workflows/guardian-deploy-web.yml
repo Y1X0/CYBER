@@ -57,7 +57,7 @@ jobs:
           REPO_URL: ${{ github.server_url }}/${{ github.repository }}
         run: |
           python3 - <<'PY'
-          import json, os, sys, urllib.error, urllib.request
+          import json, os, sys, time, urllib.error, urllib.request
 
           API = "https://api.render.com/v1"
           key = (os.environ.get("RENDER_API_KEY") or "").strip()
@@ -120,7 +120,24 @@ jobs:
           call("PUT", f"/services/{sid}/routes", routes)
           print("  routes      : applied")
 
+          # Creating a site does not build it, and the routes answer before any asset exists —
+          # which is why /api/* worked while / did not. Ask for a build and wait for it.
+          dep = call("POST", f"/services/{sid}/deploys", {})
+          did = (dep.get("deploy") or dep).get("id")
+          print(f"  build       : triggered {did}")
+          status = "unknown"
+          for _ in range(40):
+              time.sleep(15)
+              d = call("GET", f"/services/{sid}/deploys/{did}")
+              status = (d.get("deploy") or d).get("status", "unknown")
+              if status in ("live", "build_failed", "update_failed", "canceled", "deactivated"):
+                  break
+              print(f"    ...{status}")
+          print(f"  build status: {status}")
+
           detail = call("GET", f"/services/{sid}")
           url = (detail.get("serviceDetails") or {}).get("url") or "(pending)"
           print(f"  public url  : {url}")
+          if status != "live":
+              sys.exit(f"static site build ended as {status}")
           PY
