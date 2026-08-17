@@ -1,0 +1,126 @@
+# Publish the React front end as a Render static site.
+#
+# The SPA calls the API with a relative path and relies on a dev-server proxy, so serving it from
+# a second origin would break every request. Rather than change the application, the site carries
+# a rewrite that forwards /api/* to the API service: the browser keeps talking to one origin, so
+# the relative paths keep working and no CORS configuration is needed.
+#
+# This builds the front end only. The API image is untouched and is not rebuilt.
+name: Guardian Deploy Web
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "plan = report what would be created; apply = create the site"
+        type: choice
+        required: true
+        default: plan
+        options: [plan, apply]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guardian-deploy-web
+  cancel-in-progress: false
+
+env:
+  SITE_NAME: guardian-web
+  API_ORIGIN: https://guardian-api-pjp3.onrender.com
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build here first. A failure caught in CI is cheaper to read than one buried in a
+      # provider build log, and it proves the published commit actually compiles.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build the front end
+        working-directory: apps/web
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+          echo "  artifacts:"; ls -1 dist | sed 's/^/    /'
+
+      - name: Create the static site with the API rewrite
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          MODE: ${{ inputs.mode }}
+          BRANCH: ${{ github.ref_name }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.error, urllib.request
+
+          API = "https://api.render.com/v1"
+          key = (os.environ.get("RENDER_API_KEY") or "").strip()
+          mode = os.environ.get("MODE", "plan")
+          name = os.environ["SITE_NAME"]
+          api_origin = os.environ["API_ORIGIN"]
+          if not key:
+              sys.exit("RENDER_API_KEY is empty")
+
+          def call(method, path, body=None):
+              req = urllib.request.Request(
+                  f"{API}{path}", method=method,
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={"Authorization": f"Bearer {key}", "Accept": "application/json",
+                           **({"Content-Type": "application/json"} if body is not None else {})})
+              try:
+                  with urllib.request.urlopen(req, timeout=45) as r:
+                      raw = r.read()
+                      return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as e:
+                  raise SystemExit(f"Render API {e.code} on {method} {path}: {e.read().decode()[:300]}")
+
+          owner = call("GET", "/owners")[0]["owner"]["id"]
+
+          # Order matters. The API rule has to be matched before the single-page fallback, or
+          # every request would be answered with index.html. Render also skips rules when a real
+          # file exists at the path, so built assets are served directly.
+          routes = [
+              {"type": "rewrite", "source": "/api/*", "destination": f"{api_origin}/api/*"},
+              {"type": "rewrite", "source": "/*", "destination": "/index.html"},
+          ]
+          print(f"  workspace   : {owner}")
+          print(f"  repo/branch : {os.environ['REPO_URL']} @ {os.environ['BRANCH']}")
+          print("  build       : cd apps/web && npm install && npm run build")
+          print("  publish     : apps/web/dist")
+          for r in routes:
+              print(f"  rewrite     : {r['source']} -> {r['destination']}")
+
+          if mode != "apply":
+              print("PLAN ONLY — nothing was created.")
+              raise SystemExit(0)
+
+          sites = call("GET", f"/services?name={name}&limit=20")
+          found = next((s["service"] for s in sites if s["service"]["name"] == name), None)
+          if found:
+              sid = found["id"]
+              print(f"  site        : exists ({sid})")
+          else:
+              svc = call("POST", "/services", {
+                  "type": "static_site", "name": name, "ownerId": owner,
+                  "repo": os.environ["REPO_URL"], "branch": os.environ["BRANCH"],
+                  "autoDeploy": "no",
+                  "serviceDetails": {
+                      "buildCommand": "cd apps/web && npm install && npm run build",
+                      "publishPath": "apps/web/dist",
+                  }})
+              sid = (svc.get("service") or svc)["id"]
+              print(f"  site        : created {sid}")
+
+          call("PUT", f"/services/{sid}/routes", routes)
+          print("  routes      : applied")
+
+          detail = call("GET", f"/services/{sid}")
+          url = (detail.get("serviceDetails") or {}).get("url") or "(pending)"
+          print(f"  public url  : {url}")
+          PY
