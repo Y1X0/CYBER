@@ -49,7 +49,7 @@ def redact(dsn: str) -> str:
         return "<unparseable>"
 
 
-def safe(exc: BaseException, limit: int = 400) -> str:
+def safe(exc: BaseException, limit: int = 1200) -> str:
     """Render an exception for printing with any embedded connection URI scrubbed.
 
     Keep every line. psycopg tries each resolved address in turn and joins one error per
