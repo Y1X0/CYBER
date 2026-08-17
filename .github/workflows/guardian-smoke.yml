@@ -1,0 +1,147 @@
+# End-to-end smoke against the deployed stack. Read-mostly: it authenticates, reads through the
+# restricted role, creates one customer, and checks that unauthenticated access is refused.
+#
+# Runs against the public URL, so it exercises TLS, the platform router, the API, PostgreSQL and
+# Redis together — the same path a browser takes. Nothing here touches the image or the code.
+name: Guardian Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: "Base URL of the deployed API"
+        type: string
+        required: true
+        default: https://guardian-api-pjp3.onrender.com
+      web_url:
+        description: "Base URL of the static site"
+        type: string
+        required: true
+        default: https://guardian-web-412r.onrender.com
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guardian-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: End-to-end checks
+        env:
+          API: ${{ inputs.api_url }}
+          WEB: ${{ inputs.web_url }}
+          ADMIN_PW: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, time, urllib.error, urllib.request
+
+          API = os.environ["API"].rstrip("/")
+          WEB = os.environ["WEB"].rstrip("/")
+          PW = os.environ.get("ADMIN_PW") or ""
+          if not PW:
+              sys.exit("GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD is not available to this job")
+
+          results = []
+          def record(cid, title, ok, detail=""):
+              results.append((cid, title, "PASS" if ok else "BLOCK", detail))
+
+          def http(method, url, body=None, token=None, timeout=90):
+              req = urllib.request.Request(
+                  url, method=method,
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={"Accept": "application/json",
+                           **({"Content-Type": "application/json"} if body is not None else {}),
+                           **({"Authorization": f"Bearer {token}"} if token else {})})
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as r:
+                      raw = r.read()
+                      return r.status, (json.loads(raw) if raw else {})
+              except urllib.error.HTTPError as e:
+                  raw = e.read()
+                  try:
+                      return e.code, json.loads(raw)
+                  except Exception:
+                      return e.code, {"_raw": raw.decode()[:200]}
+              except Exception as e:
+                  return 0, {"_err": f"{type(e).__name__}: {e}"[:200]}
+
+          # G0 — the free plan sleeps when idle, so give the first request room to wake the
+          # instance rather than reporting a cold start as an outage.
+          code = 0
+          for attempt in range(6):
+              code, _ = http("GET", f"{API}/health")
+              if code == 200:
+                  break
+              time.sleep(10)
+          record("G0", "API reachable over TLS", code == 200, f"GET /health -> {code}")
+          if code != 200:
+              for r in results: print(r)
+              sys.exit("API did not answer; stopping before the authenticated checks")
+
+          code, body = http("GET", f"{API}/health/ready")
+          record("G1", "readiness (db + broker)", code == 200, f"-> {code} {json.dumps(body)[:80]}")
+
+          # G2 — unauthenticated access must be refused before anything else is trusted.
+          code, _ = http("GET", f"{API}/api/v1/auth/me")
+          record("G2", "anonymous /me refused", code in (401, 403), f"-> {code}")
+
+          # G3 — a wrong password must not succeed, and must not reveal whether the account exists.
+          code, _ = http("POST", f"{API}/api/v1/auth/login",
+                         {"email": "admin@example.com", "password": "definitely-not-the-password"})
+          record("G3", "wrong password refused", code in (401, 429), f"-> {code}")
+
+          # G4 — the real login: exercises PostgreSQL, Argon2 and JWT issuance.
+          code, body = http("POST", f"{API}/api/v1/auth/login",
+                            {"email": "admin@example.com", "password": PW})
+          token = (body or {}).get("access_token") or (body or {}).get("token")
+          record("G4", "owner login issues a token", code == 200 and bool(token),
+                 f"-> {code}, token={'yes' if token else 'no'}")
+          if not token:
+              for r in results: print(r)
+              sys.exit("no token; cannot continue the authenticated path")
+
+          # G5 — identity resolution runs through the restricted role and tenant scoping.
+          code, me = http("GET", f"{API}/api/v1/auth/me", token=token)
+          record("G5", "authenticated /me", code == 200,
+                 f"-> {code} {json.dumps(me)[:110]}")
+
+          # G6 — a read through row-level security.
+          code, customers = http("GET", f"{API}/api/v1/customers", token=token)
+          n = len(customers) if isinstance(customers, list) else "?"
+          record("G6", "list customers (RLS read)", code == 200, f"-> {code}, count={n}")
+
+          # G7 — a write, proving the app role may insert under its policies.
+          stamp = os.environ.get("GITHUB_RUN_ID", "manual")
+          code, created = http("POST", f"{API}/api/v1/customers",
+                               {"name": f"smoke-{stamp}", "criticality": "low"}, token=token)
+          cid = (created or {}).get("id")
+          record("G7", "create customer (RLS write)", code == 201 and bool(cid), f"-> {code}")
+
+          # G8 — the new row is visible on read-back: the write really committed.
+          code, after = http("GET", f"{API}/api/v1/customers", token=token)
+          seen = any((c.get("id") == cid) for c in after) if isinstance(after, list) else False
+          record("G8", "created row reads back", code == 200 and seen, f"-> {code}, found={seen}")
+
+          # G9 — the front end is served and carries the API rewrite.
+          code, _ = http("GET", f"{WEB}/")
+          record("G9", "web app served", code == 200, f"GET {WEB}/ -> {code}")
+          code, _ = http("GET", f"{WEB}/api/v1/auth/me")
+          record("G10", "web -> API rewrite live", code in (401, 403),
+                 f"same-origin /api proxied, unauth -> {code}")
+
+          print(f"\n{'ID':<5} {'CHECK':<28} {'VERDICT':<8} DETAIL")
+          print("-" * 78)
+          blocks = 0
+          for cid_, title, verdict, detail in results:
+              if verdict == "BLOCK":
+                  blocks += 1
+              print(f"{cid_:<5} {title:<28} {verdict:<8} {detail}")
+          print("-" * 78)
+          print(f"{len(results)} checks · {blocks} BLOCK")
+          sys.exit(min(blocks, 120))
+          PY
