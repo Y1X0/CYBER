@@ -57,6 +57,8 @@ celery_app = Celery(
         "guardian_scanner.discovery.tasks",
         # Security Tool Framework (Phase 1): dispatch (trusted) + run_tool (execution plane).
         "guardian_scanner.tools.tasks",
+        # The sweep that turns tenant schedules into queued work (WP-A3).
+        "guardian_scanner.scheduling",
     ],
 )
 
@@ -84,5 +86,27 @@ celery_app.conf.update(
         "guardian.dispatch_tool_job": {"queue": "default"},
         "guardian.dispatch_artifact_job": {"queue": "default"},
         "guardian.run_tool": {"queue": "tools"},
+        "guardian.sweep_schedules": {"queue": "default"},
+        "guardian.sync_feeds": {"queue": "default"},
     },
+    # Recurring work. Beat fires these; per-tenant cadence lives in the `schedules` table, because
+    # a static config file cannot be edited through the API and cannot hold one customer's timing
+    # separately from another's.
+    beat_schedule={
+        "sweep-schedules": {
+            "task": "guardian.sweep_schedules",
+            # Every five minutes. The sweep is cheap (one indexed query) and this bounds how late
+            # a schedule can fire to well under the shortest cadence the table permits.
+            "schedule": 300.0,
+        },
+        "sync-vulnerability-feeds": {
+            "task": "guardian.sync_feeds",
+            # Daily. KEV and EPSS change on that cadence, and a fresher pull would cost rate limit
+            # without changing an answer.
+            "schedule": 86400.0,
+        },
+    },
+    # Beat's own bookkeeping. Without a persistent schedule file a restarted beat re-fires
+    # everything it thinks it missed.
+    beat_max_loop_interval=60,
 )

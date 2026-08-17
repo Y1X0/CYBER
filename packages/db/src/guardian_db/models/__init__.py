@@ -34,6 +34,7 @@ from guardian_db.models.scanning import (
     Scan,
     ScanEngineRun,
 )
+from guardian_db.models.scheduling import Schedule
 from guardian_db.models.tenancy import (
     Customer,
     CustomerContact,
@@ -72,6 +73,7 @@ __all__ = [
     "Policy",
     "RemediationItem",
     "Report",
+    "Schedule",
     "ReportApproval",
     "ReportSection",
     "Scan",
