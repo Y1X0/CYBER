@@ -58,7 +58,10 @@ jobs:
           GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
           GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
         run: |
-          docker run --rm --sysctl net.ipv6.conf.all.disable_ipv6=1 \
+          # glibc returns AAAA first here and psycopg connects to the first address
+          # only; this precedence rule puts IPv4 ahead so the reachable family wins.
+          printf 'precedence ::ffff:0:0/96  100\n' > "$RUNNER_TEMP/gai.conf"
+          docker run --rm -v "$RUNNER_TEMP/gai.conf:/etc/gai.conf:ro" \
             -e GUARDIAN_DATABASE_URL -e GUARDIAN_APP_DATABASE_URL -e GUARDIAN_REDIS_URL \
             -v "$PWD/tools/guardian_preflight.py:/tmp/guardian_preflight.py:ro" \
             "$IMAGE" python /tmp/guardian_preflight.py
@@ -73,7 +76,8 @@ jobs:
           GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
           GUARDIAN_APP_DB_PASSWORD: ${{ secrets.GUARDIAN_APP_DB_PASSWORD }}
         run: |
-          docker run --rm --sysctl net.ipv6.conf.all.disable_ipv6=1 -w /app \
+          printf 'precedence ::ffff:0:0/96  100\n' > "$RUNNER_TEMP/gai.conf"
+          docker run --rm -v "$RUNNER_TEMP/gai.conf:/etc/gai.conf:ro" -w /app \
             -e GUARDIAN_ENV -e GUARDIAN_DATABASE_URL -e GUARDIAN_APP_DATABASE_URL \
             -e GUARDIAN_APP_DB_PASSWORD \
             "$IMAGE" alembic upgrade head
@@ -85,6 +89,7 @@ jobs:
           GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
           GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
         run: |
-          docker run --rm --sysctl net.ipv6.conf.all.disable_ipv6=1 -w /app \
+          printf 'precedence ::ffff:0:0/96  100\n' > "$RUNNER_TEMP/gai.conf"
+          docker run --rm -v "$RUNNER_TEMP/gai.conf:/etc/gai.conf:ro" -w /app \
             -e GUARDIAN_ENV -e GUARDIAN_DATABASE_URL -e GUARDIAN_APP_DATABASE_URL \
             "$IMAGE" python -m guardian_api.seed
