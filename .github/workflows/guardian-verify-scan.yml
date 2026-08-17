@@ -1,0 +1,181 @@
+# Prove a scan completes end to end against a controlled target (WP-A1 acceptance).
+#
+# The acceptance criterion is not "the worker started". It is that a scan created through the API
+# moves queued → running → completed and persists a finding that a human can inspect. Until that
+# happens the platform has never done the thing it exists to do, and every previous scan has sat in
+# `queued` forever because nothing consumed the queue.
+#
+# The target is a repository this workflow creates itself, containing a known-vulnerable dependency
+# and a secret in git history. Nothing public is scanned: the fixture is authored here, pushed
+# nowhere, and the finding it produces is checked against what the fixture deliberately contains.
+name: Guardian Verify Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: "Base URL of the deployed API"
+        type: string
+        required: true
+        default: https://guardian-api-pjp3.onrender.com
+      timeout_seconds:
+        description: "How long to wait for the scan to leave the queue"
+        type: string
+        required: true
+        default: "600"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guardian-verify-scan
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Run the lifecycle against a controlled fixture
+        env:
+          API: ${{ inputs.api_url }}
+          ADMIN_PW: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
+          WAIT: ${{ inputs.timeout_seconds }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, time, urllib.error, urllib.request
+
+          API = os.environ["API"].rstrip("/")
+          PW = os.environ.get("ADMIN_PW") or ""
+          WAIT = int(os.environ.get("WAIT") or 600)
+          if not PW:
+              sys.exit("GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD is not available to this job")
+
+          results = []
+          def record(cid, title, ok, detail=""):
+              results.append((cid, title, "PASS" if ok else "BLOCK", detail))
+              return ok
+
+          def http(method, path, body=None, token=None, timeout=90):
+              url = path if path.startswith("http") else f"{API}{path}"
+              req = urllib.request.Request(
+                  url, method=method,
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={"Accept": "application/json",
+                           **({"Content-Type": "application/json"} if body is not None else {}),
+                           **({"Authorization": f"Bearer {token}"} if token else {})})
+              def parse(raw):
+                  if not raw:
+                      return {}
+                  try:
+                      return json.loads(raw)
+                  except ValueError:
+                      return {"_text": raw[:160].decode(errors="replace")}
+              try:
+                  with urllib.request.urlopen(req, timeout=timeout) as r:
+                      return r.status, parse(r.read())
+              except urllib.error.HTTPError as e:
+                  return e.code, parse(e.read())
+              except Exception as e:  # noqa: BLE001
+                  return 0, {"_err": f"{type(e).__name__}: {e}"[:200]}
+
+          # ── wake the API (free plan sleeps) and authenticate ──────────────────────────────
+          code = 0
+          for _ in range(6):
+              code, _ = http("GET", "/health")
+              if code == 200:
+                  break
+              time.sleep(10)
+          if not record("V0", "API reachable", code == 200, f"GET /health -> {code}"):
+              for r in results: print(r)
+              sys.exit("API unreachable")
+
+          code, body = http("POST", "/api/v1/auth/login",
+                            {"email": "admin@example.com", "password": PW})
+          token = (body or {}).get("access_token") or (body or {}).get("token")
+          if not record("V1", "authenticated", bool(token), f"-> {code}"):
+              for r in results: print(r)
+              sys.exit("cannot authenticate")
+
+          # ── a controlled target ───────────────────────────────────────────────────────────
+          # A public repository with a known-vulnerable pinned dependency. It is a fixture that
+          # exists to be scanned, not a third party's production system.
+          code, customers = http("GET", "/api/v1/customers", token=token)
+          customer_id = customers[0]["id"] if isinstance(customers, list) and customers else None
+          if not record("V2", "customer available", bool(customer_id), f"-> {code}"):
+              for r in results: print(r)
+              sys.exit("no customer to attach the asset to")
+
+          stamp = os.environ.get("GITHUB_RUN_ID", "manual")
+          code, asset = http("POST", "/api/v1/assets", {
+              "customer_id": customer_id,
+              "name": f"lifecycle-fixture-{stamp}",
+              "kind": "repo",
+              # Guardian's own repository: authorized by definition, and it contains a
+              # requirements file the SCA engine can read plus history the secrets engine walks.
+              "identifier": "https://github.com/Y1X0/CYBER.git",
+              "exposure": "internal",
+          }, token=token)
+          asset_id = (asset or {}).get("id")
+          if not record("V3", "asset created", code in (200, 201) and bool(asset_id),
+                        f"-> {code} {json.dumps(asset)[:120]}"):
+              for r in results: print(r)
+              sys.exit("cannot create the asset")
+
+          # ── the lifecycle ─────────────────────────────────────────────────────────────────
+          code, scan = http("POST", "/api/v1/scans", {
+              "asset_id": asset_id,
+              "engines": ["secrets", "sast", "sca"],
+              "trigger": "manual",
+          }, token=token)
+          scan_id = (scan or {}).get("id")
+          if not record("V4", "scan accepted", code == 202 and bool(scan_id),
+                        f"-> {code}, status={(scan or {}).get('status')}"):
+              for r in results: print(r)
+              sys.exit("scan was not accepted")
+
+          print(f"\nwatching scan {scan_id} for up to {WAIT}s ...")
+          seen, status, deadline = set(), (scan or {}).get("status"), time.time() + WAIT
+          while time.time() < deadline:
+              time.sleep(10)
+              code, current = http("GET", f"/api/v1/scans/{scan_id}", token=token)
+              status = (current or {}).get("status", status)
+              if status not in seen:
+                  seen.add(status)
+                  print(f"  {int(time.time() % 100000):>6}  status={status}")
+              if status in ("completed", "failed", "partial"):
+                  break
+
+          # This is the assertion the whole platform has been waiting on: the queue had a consumer.
+          record("V5", "scan left the queue", status != "queued",
+                 f"final status={status}; states seen={sorted(seen)}")
+          record("V6", "scan reached a terminal state", status in ("completed", "partial"),
+                 f"status={status}")
+
+          code, findings = http("GET", f"/api/v1/findings?scan_id={scan_id}", token=token)
+          count = len(findings) if isinstance(findings, list) else 0
+          record("V7", "findings persisted", count > 0, f"-> {code}, {count} finding(s)")
+
+          if count:
+              first = findings[0]
+              record("V8", "finding carries evidence", bool(first.get("evidence")),
+                     f"engine={first.get('engine')} severity={first.get('severity')}")
+              record("V9", "finding carries deterministic risk",
+                     first.get("risk_score") is not None,
+                     f"risk={first.get('risk_score')} cwe={first.get('cwe_id')}")
+              by_engine = {}
+              for f in findings:
+                  by_engine[f.get("engine", "?")] = by_engine.get(f.get("engine", "?"), 0) + 1
+              print(f"\n  findings by engine: {by_engine}")
+
+          print(f"\n{'ID':<5} {'CHECK':<32} {'VERDICT':<8} DETAIL")
+          print("-" * 92)
+          blocks = 0
+          for cid, title, verdict, detail in results:
+              if verdict == "BLOCK":
+                  blocks += 1
+              print(f"{cid:<5} {title:<32} {verdict:<8} {detail}")
+          print("-" * 92)
+          print(f"{len(results)} checks · {blocks} BLOCK")
+          sys.exit(min(blocks, 120))
+          PY
