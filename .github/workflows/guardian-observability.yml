@@ -1,0 +1,132 @@
+# Alerting on the platform side: make Render mail the account when a deploy or a service fails.
+#
+# The Guardian Watch workflow probes from outside and catches "the site is down". It cannot see a
+# deploy that failed and rolled back, an instance that is restart-looping, or a health check that
+# is flapping — Render knows those first. This turns on the provider's own failure notifications
+# so both halves are covered.
+#
+# It reads the current settings before writing, and only sets keys that the API actually returned,
+# so it adapts to the account's schema instead of guessing at it. Run with mode=inspect first:
+# nothing is modified and the current configuration is printed.
+#
+# Email addresses are masked in the output. No secret is printed.
+name: Guardian Observability
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "inspect = show current settings; apply = enable failure notifications"
+        type: choice
+        required: true
+        default: inspect
+        options: [inspect, apply]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guardian-observability
+  cancel-in-progress: false
+
+env:
+  API_SERVICE: srv-da18rq0u01pc739npf20
+  WEB_SERVICE: srv-da196i8jo6nc7384s360
+
+jobs:
+  configure:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Inspect and configure notifications
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, sys, urllib.error, urllib.request
+
+          BASE = "https://api.render.com/v1"
+          key = (os.environ.get("RENDER_API_KEY") or "").strip()
+          mode = os.environ.get("MODE", "inspect")
+          if not key:
+              sys.exit("RENDER_API_KEY is empty")
+
+          _EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+          def mask(obj):
+              """The account email is not a secret, but it does not belong in a public log."""
+              return _EMAIL.sub("<email>", json.dumps(obj, indent=2, sort_keys=True))
+
+          def call(method, path, body=None, tolerate=()):
+              req = urllib.request.Request(
+                  f"{BASE}{path}", method=method,
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={"Authorization": f"Bearer {key}", "Accept": "application/json",
+                           **({"Content-Type": "application/json"} if body is not None else {})})
+              try:
+                  with urllib.request.urlopen(req, timeout=45) as r:
+                      raw = r.read()
+                      return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as e:
+                  if e.code in tolerate:
+                      return {"_status": e.code, "_body": e.read().decode()[:200]}
+                  raise SystemExit(f"Render API {e.code} on {method} {path}: "
+                                   f"{e.read().decode()[:300]}")
+
+          owner = call("GET", "/owners")[0]["owner"]["id"]
+          print(f"workspace: {owner}\n")
+
+          # --- what the platform currently knows -------------------------------------------
+          print("=== owner notification settings ===")
+          settings = call("GET", "/notification-settings", tolerate=(404,))
+          print(mask(settings))
+
+          for name, sid in (("api", os.environ["API_SERVICE"]),
+                            ("web", os.environ["WEB_SERVICE"])):
+              print(f"\n=== {name} service ({sid}) ===")
+              svc = call("GET", f"/services/{sid}")
+              details = svc.get("serviceDetails") or {}
+              print(f"  suspended    : {svc.get('suspended')}")
+              print(f"  health check : {details.get('healthCheckPath') or '(none)'}")
+              print(f"  url          : {details.get('url')}")
+              deploys = call("GET", f"/services/{sid}/deploys?limit=1")
+              if deploys:
+                  d = (deploys[0].get("deploy") or deploys[0])
+                  print(f"  last deploy  : {d.get('status')} at {d.get('finishedAt')}")
+              override = call("GET", f"/notification-overrides/{sid}", tolerate=(404,))
+              print(f"  notify override: {mask(override)}")
+
+          if mode != "apply":
+              print("\nINSPECT ONLY — nothing was changed.")
+              raise SystemExit(0)
+
+          # --- turn on failure notifications ------------------------------------------------
+          # Only send keys the API itself returned. Inventing a field name is how a PATCH ends up
+          # silently ignored or rejected, and the shape differs between accounts.
+          desired = {"emailEnabled": True, "notificationsToSend": "failure",
+                     "previewNotificationsEnabled": False}
+          if "_status" in settings:
+              print("\nowner notification settings are not exposed on this account "
+                    f"(HTTP {settings['_status']}) — skipping the owner-level write")
+          else:
+              payload = {k: v for k, v in desired.items() if k in settings}
+              skipped = sorted(set(desired) - set(payload))
+              if payload:
+                  updated = call("PATCH", "/notification-settings", payload)
+                  print("\nowner notification settings updated:")
+                  print(mask(updated))
+              if skipped:
+                  print(f"  not present in this account's schema, left alone: {skipped}")
+
+          # Per-service overrides inherit the owner setting unless explicitly set. Clearing them
+          # keeps one place to change the policy later.
+          for name, sid in (("api", os.environ["API_SERVICE"]),
+                            ("web", os.environ["WEB_SERVICE"])):
+              res = call("PATCH", f"/notification-overrides/{sid}",
+                         {"notificationsToSend": "default"}, tolerate=(400, 404, 422))
+              status = res.get("_status")
+              print(f"  {name}: override -> "
+                    + ("inherits owner setting" if not status else f"unchanged (HTTP {status})"))
+
+          print("\nNo secret was printed.")
+          PY

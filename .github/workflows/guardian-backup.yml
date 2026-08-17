@@ -1,0 +1,208 @@
+# Backup verification: dump production, restore it into a throwaway PostgreSQL, and prove the
+# restored copy matches row for row.
+#
+# Neon already provides the backup itself — continuous WAL retention with point-in-time restore,
+# which no cron job can improve on. What that does NOT tell you is whether the data can actually
+# come back: a backup nobody has restored is a hope, not a backup. This workflow closes that gap
+# by performing the restore for real, every day, and failing loudly when it stops matching.
+#
+# The dump never leaves the runner. This repository is public, so uploading it as an artifact
+# would publish the production database; it is written to a temporary directory, compared, and
+# deleted in a finally block. Nothing sensitive is printed — only table names, row counts and
+# sizes.
+#
+# The application image is not involved and is not rebuilt.
+name: Guardian Backup Verify
+
+on:
+  schedule:
+    # 03:17 UTC. Off the hour on purpose: everything scheduled at :00 competes for runners.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guardian-backup
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Dump, restore, compare
+        env:
+          GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
+        run: |
+          python3 - <<'PY'
+          import os, re, secrets, shutil, subprocess, sys, time
+          from urllib.parse import urlsplit, urlunsplit
+
+          TMP = os.environ["RUNNER_TEMP"]
+          WORK = os.path.join(TMP, "backup")
+          ENVF = os.path.join(TMP, "pg.env")
+          IMAGE = "postgres:16"
+          results = []
+
+          def record(cid, title, ok, detail=""):
+              results.append((cid, title, "PASS" if ok else "BLOCK", detail))
+              return ok
+
+          raw = (os.environ.get("GUARDIAN_DATABASE_URL") or "").strip()
+          if not raw:
+              sys.exit("GUARDIAN_DATABASE_URL is not available to this job")
+
+          # The stored DSN carries SQLAlchemy's driver suffix (postgresql+psycopg). libpq rejects
+          # it, so strip the suffix and keep everything else — including sslmode and sslrootcert,
+          # which is what makes verify-full work against Neon.
+          parts = urlsplit(raw)
+          src = urlunsplit(("postgresql", parts.netloc, parts.path, parts.query, ""))
+          dbname = (parts.path or "/").lstrip("/") or "postgres"
+
+          # Password for the throwaway instance. It exists for the length of this job and is
+          # reachable only on the runner's loopback.
+          local_pw = secrets.token_urlsafe(32)
+          tgt = f"postgresql://postgres:{local_pw}@127.0.0.1:5432/verify"
+
+          def write_envfile():
+              # Both DSNs go into a 0600 file that docker reads directly, so no connection string
+              # ever appears in a command line, a process list, or this log.
+              fd = os.open(ENVF, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+              with os.fdopen(fd, "w") as f:
+                  f.write(f"PGURI={src}\nTGTURI={tgt}\n")
+
+          def run(cmd, check=True):
+              p = subprocess.run(cmd, capture_output=True, text=True)
+              if check and p.returncode != 0:
+                  raise RuntimeError(f"{cmd[0]} exited {p.returncode}: {scrub(p.stderr)[:400]}")
+              return p
+
+          _SECRET = re.compile("|".join(re.escape(s) for s in (src, tgt, local_pw)))
+          def scrub(text):
+              """Never let a DSN reach the log, including through an error message."""
+              return _SECRET.sub("<redacted>", text or "")
+
+          def pg(args, check=True):
+              """Run a client tool in a container that can reach both Neon and the loopback."""
+              return run(["docker", "run", "--rm", "--network", "host", "--env-file", ENVF,
+                          "-v", f"{WORK}:/bk", IMAGE, "bash", "-c", args], check=check)
+
+          # Exact counts for every table in one round trip. count(*) cannot be parameterised over
+          # a table name, so each count is run through query_to_xml and read back out.
+          COUNTS = """
+          SELECT table_name || '=' ||
+                 (xpath('/row/c/text()', query_to_xml(
+                     format('select count(*) as c from %I.%I', table_schema, table_name),
+                     false, true, '')))[1]::text
+          FROM information_schema.tables
+          WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+          ORDER BY table_name;
+          """
+
+          def counts(uri_var):
+              out = pg(f'psql "${uri_var}" -Atq -c "{COUNTS.strip()}"').stdout
+              return dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+
+          os.makedirs(WORK, exist_ok=True)
+          container = None
+          try:
+              write_envfile()
+
+              # --- B1: take the dump -------------------------------------------------------
+              t0 = time.time()
+              pg('pg_dump -Fc --no-sync -f /bk/dump.pgc "$PGURI"')
+              size = os.path.getsize(os.path.join(WORK, "dump.pgc"))
+              record("B1", "pg_dump completes", size > 0,
+                     f"{size:,} bytes in {time.time()-t0:.1f}s from {dbname}")
+
+              # --- B2: the dump carries the security objects, not just the tables ----------
+              toc = pg("pg_restore -l /bk/dump.pgc").stdout
+              kinds = {k: len(re.findall(rf"^\d+;.*\b{k}\b", toc, re.M))
+                       for k in ("TABLE DATA", "POLICY", "ROW SECURITY", "ACL", "INDEX")}
+              record("B2", "dump includes RLS objects",
+                     kinds["POLICY"] > 0 and kinds["ROW SECURITY"] > 0 and kinds["ACL"] > 0,
+                     " ".join(f"{k}={v}" for k, v in kinds.items()))
+
+              # --- source-side truth, read before anything is restored ---------------------
+              src_counts = counts("PGURI")
+              src_rev = pg('psql "$PGURI" -Atqc '
+                           '"select version_num from alembic_version"').stdout.strip()
+
+              # --- B3: restore into a throwaway instance -----------------------------------
+              container = "guardian-restore-target"
+              run(["docker", "run", "-d", "--name", container, "--network", "host",
+                   "-e", f"POSTGRES_PASSWORD={local_pw}", "-e", "POSTGRES_DB=verify", IMAGE])
+              ready = False
+              for _ in range(30):
+                  time.sleep(2)
+                  if run(["docker", "exec", container, "pg_isready", "-q"],
+                         check=False).returncode == 0:
+                      ready = True
+                      break
+              if not ready:
+                  raise RuntimeError("the throwaway PostgreSQL never became ready")
+
+              # Policies name guardian_app, so the role has to exist before they can be created.
+              # It gets no password and no login: this instance holds a copy for comparison only.
+              pg('psql "$TGTURI" -qc "CREATE ROLE guardian_app NOLOGIN"')
+              restore = pg("pg_restore --no-owner --no-privileges --exit-on-error "
+                           '-d "$TGTURI" /bk/dump.pgc', check=False)
+              record("B3", "pg_restore succeeds", restore.returncode == 0,
+                     f"exit={restore.returncode} {scrub(restore.stderr).strip()[:120]}")
+
+              # --- B4/B5: the restored copy is the same database ---------------------------
+              tgt_counts = counts("TGTURI")
+              record("B4", "same tables restored",
+                     set(src_counts) == set(tgt_counts),
+                     f"{len(src_counts)} source / {len(tgt_counts)} restored"
+                     + (f", missing={sorted(set(src_counts) - set(tgt_counts))[:5]}"
+                        if set(src_counts) != set(tgt_counts) else ""))
+              differing = {t: (src_counts[t], tgt_counts.get(t))
+                           for t in src_counts if tgt_counts.get(t) != src_counts[t]}
+              total = sum(int(v) for v in src_counts.values())
+              record("B5", "every row count matches", not differing,
+                     f"{total:,} rows across {len(src_counts)} tables"
+                     + (f"; differs: {list(differing.items())[:4]}" if differing else ""))
+
+              # --- B6: the backup captured the schema version the application expects ------
+              tgt_rev = pg('psql "$TGTURI" -Atqc '
+                           '"select version_num from alembic_version"').stdout.strip()
+              record("B6", "migration head preserved", bool(src_rev) and src_rev == tgt_rev,
+                     f"alembic_version={src_rev or '(none)'}")
+
+              # Row counts are the headline evidence; print them so a drift is readable rather
+              # than just asserted.
+              print("\n  table                          rows")
+              for t in sorted(src_counts, key=lambda k: -int(src_counts[k]))[:15]:
+                  print(f"  {t:<30} {int(src_counts[t]):>6}")
+          except Exception as exc:
+              # Report the failure as a BLOCK and still print the table. Letting the traceback
+              # escape would lose the checks that already passed, and a raw traceback is exactly
+              # where an unscrubbed connection string would surface.
+              record("B!", "run aborted", False, scrub(f"{type(exc).__name__}: {exc}")[:160])
+          finally:
+              # The dump is a full copy of production. It must not outlive this step, and this
+              # repository is public, so it is never uploaded anywhere.
+              shutil.rmtree(WORK, ignore_errors=True)
+              if os.path.exists(ENVF):
+                  os.remove(ENVF)
+              if container:
+                  subprocess.run(["docker", "rm", "-f", container], capture_output=True)
+              gone = not os.path.exists(WORK) and not os.path.exists(ENVF)
+              record("B7", "dump and DSNs wiped", gone, "temporary copies removed")
+
+          print(f"\n{'ID':<5} {'CHECK':<28} {'VERDICT':<8} DETAIL")
+          print("-" * 92)
+          blocks = 0
+          for cid, title, verdict, detail in results:
+              if verdict == "BLOCK":
+                  blocks += 1
+              print(f"{cid:<5} {title:<28} {verdict:<8} {detail}")
+          print("-" * 92)
+          print(f"{len(results)} checks · {blocks} BLOCK")
+          print("\nPoint-in-time recovery itself is Neon's continuous WAL retention; this run "
+                "proves the data is restorable, not that the retention window is long enough.")
+          sys.exit(min(blocks, 120))
+          PY
