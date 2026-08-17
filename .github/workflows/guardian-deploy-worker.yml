@@ -176,7 +176,16 @@ jobs:
           GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
         run: |
           python3 - <<'PY'
-          import json, os, sys, time, urllib.error, urllib.request
+          import json, os, sys, time, traceback, urllib.error, urllib.request
+
+          # The previous run printed "registry: reusing ghcr-guardian" and then exited 1 with no
+          # reason at all — the script swallowed its own failure, which is the exact pattern that
+          # has already cost this project several rounds. Every exit now says why.
+          def die(message: str, exc: BaseException | None = None) -> None:
+              print(f"\n##[error]worker provisioning failed: {message}")
+              if exc is not None:
+                  print("".join(traceback.format_exception(exc))[-1500:])
+              sys.exit(1)
 
           API = "https://api.render.com/v1"
           key = (os.environ.get("RENDER_API_KEY") or "").strip()
@@ -202,7 +211,9 @@ jobs:
               except urllib.error.HTTPError as e:
                   if e.code in tolerate:
                       return {"_status": e.code}
-                  raise SystemExit(f"Render API {e.code} on {method} {path}: {e.read().decode()[:400]}")
+                  die(f"Render API {e.code} on {method} {path}: {e.read().decode()[:600]}")
+              except Exception as exc:  # noqa: BLE001 - a transport failure must not exit silently
+                  die(f"Render API transport failure on {method} {path}", exc)
 
           owner = call("GET", "/owners")[0]["owner"]["id"]
           print(f"  workspace : {owner}")
@@ -238,8 +249,17 @@ jobs:
               cred_id = cred["id"]
               print("  registry  : created ghcr-guardian")
 
-          svcs = call("GET", f"/services?name={name}&limit=20")
-          found = next((s["service"] for s in svcs if s["service"]["name"] == name), None)
+          raw = call("GET", f"/services?name={name}&limit=20")
+          # The list endpoint returns [{cursor, service}], but a filtered or paginated response can
+          # come back as a bare object. Normalising here beats a TypeError with no context.
+          items = raw if isinstance(raw, list) else (raw.get("services") or raw.get("items") or [])
+          services = []
+          for item in items:
+              svc = item.get("service") if isinstance(item, dict) and "service" in item else item
+              if isinstance(svc, dict) and svc.get("name"):
+                  services.append(svc)
+          print(f"  existing    : {len(services)} service(s) matched name={name!r}")
+          found = next((s for s in services if s.get("name") == name), None)
           if found:
               sid = found["id"]
               print(f"  service   : exists ({sid}) — updating image")
@@ -256,7 +276,11 @@ jobs:
                       "env": "image", "region": os.environ["REGION"],
                       "plan": os.environ["PLAN_TIER"], "numInstances": 1,
                   }})
-              sid = (svc.get("service") or svc)["id"]
+              created = svc.get("service") if isinstance(svc, dict) and "service" in svc else svc
+              sid = (created or {}).get("id")
+              if not sid:
+                  die(f"Render accepted the create but returned no service id: "
+                      f"{json.dumps(svc)[:400]}")
               print(f"  service   : created {sid}")
 
           deploys = call("GET", f"/services/{sid}/deploys?limit=1")
