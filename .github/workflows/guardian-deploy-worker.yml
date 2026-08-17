@@ -76,15 +76,25 @@ jobs:
         if: inputs.mode != 'apply'
         run: |
           IMG=ghcr.io/y1x0/cyber-scanner:sha-${{ github.sha }}
+          cat > /tmp/verify.sh <<'SH'
+          set -e
           for tool in trivy gitleaks osv-scanner syft grype semgrep checkov git; do
             printf '  %-14s ' "$tool"
-            docker run --rm --entrypoint sh "$IMG" -c "command -v $tool >/dev/null && $tool --version 2>&1 | head -1" \
-              || { echo "MISSING"; exit 1; }
+            if command -v "$tool" >/dev/null 2>&1; then
+              "$tool" --version 2>&1 | head -1
+            else
+              echo "MISSING"; exit 1
+            fi
           done
-          echo "  engine health:"
-          docker run --rm --entrypoint python "$IMG" -c \
-            "from guardian_scanner.registry import health_report; r=health_report(); \
-print(f\"    ok={r['ok']} failed={r['failed']} degraded={r['degraded']} missing={r['missing_tools']}\")"
+          SH
+          docker run --rm --entrypoint sh -v /tmp/verify.sh:/verify.sh:ro "$IMG" /verify.sh
+          cat > /tmp/health.py <<'PY'
+          from guardian_scanner.registry import health_report
+          r = health_report()
+          print(f"  engine health: ok={r['ok']} failed={r['failed']} "
+                f"degraded={r['degraded']} missing={r['missing_tools']}")
+          PY
+          docker run --rm --entrypoint python -v /tmp/health.py:/health.py:ro "$IMG" /health.py
 
       - name: Provision the Render background worker
         if: inputs.mode == 'apply'
