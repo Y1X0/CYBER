@@ -49,10 +49,15 @@ def redact(dsn: str) -> str:
         return "<unparseable>"
 
 
-def safe(exc: BaseException, limit: int = 130) -> str:
-    """Render an exception for printing with any embedded connection URI scrubbed."""
-    first = str(exc).splitlines()[0] if str(exc) else ""
-    return f"{type(exc).__name__}: {_URI.sub('<dsn-redacted>', first)}"[:limit]
+def safe(exc: BaseException, limit: int = 400) -> str:
+    """Render an exception for printing with any embedded connection URI scrubbed.
+
+    Keep every line. psycopg tries each resolved address in turn and joins one error per
+    attempt, so showing only the first line reports whichever address happened to be tried
+    first and hides the reason the others failed — which is usually the real fault.
+    """
+    text = " | ".join(ln.strip() for ln in str(exc).splitlines() if ln.strip())
+    return f"{type(exc).__name__}: {_URI.sub('<dsn-redacted>', text)}"[:limit]
 
 
 def libpq(dsn: str) -> str:
@@ -106,7 +111,7 @@ else:
                 except OSError:
                     fams.append(f"{label}=0")
             record("A1", "PostgreSQL 16 + UTF8", False,
-                   f"connect failed: {safe(e, 90)} [dns {' '.join(fams)}]")
+                   f"connect failed: [dns {' '.join(fams)}] {safe(e)}")
 
         if conn is not None:
             # A1 — server version + server_encoding
