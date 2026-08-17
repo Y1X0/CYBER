@@ -25,6 +25,7 @@ cannot simply be bundled.
 | git | 2.39+ | GPL-2.0 | `APPROVED_SEPARATE_PROCESS` | Invoked as a subprocess to clone assets; never linked. |
 | curl | 8.x | curl (MIT-like) | `APPROVED` | Build stage only. |
 | ca-certificates | — | MPL-2.0 | `APPROVED` | Trust anchors. |
+| tar | 1.35+ | GPL-3.0 | `APPROVED_SEPARATE_PROCESS` | Build stage only; extracts release archives. |
 | pip | 24.x | MIT | `APPROVED` | Build stage only. |
 | setuptools | 78+ | MIT | `APPROVED` | Build stage only. |
 | **Discovery** | | | | |
