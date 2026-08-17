@@ -10,6 +10,8 @@ against a real system and the output was inspected — not that a test double re
 
 Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 0% operable.
 
+**Current: 757 tests passing** (+205), 5 work packages delivered, CI green.
+
 ---
 
 ## Track A — Execution platform
@@ -48,7 +50,7 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 | D2 | ZAP full DAST | `NOT_STARTED` | — | — | |
 | D3 | SCA v2 | `TESTED` | `def7df6` | 30 (`test_sca_lockfiles`) | 9 lockfile formats incl. transitive deps; `OsvVulnMatcher` connects the client that had zero call sites; `CompositeVulnMatcher` merges sources by advisory id; CVSS v3.x base scoring. Live OSV query needs egress (see BLOCKER-4). |
 | D4 | SAST v2 | `NOT_STARTED` | — | — | |
-| D5 | Secrets v2 (git history) | `TESTED` | `TBD` | 8 (`test_secrets_history`) | Scans lines added by past commits against the existing patterns and entropy heuristic; clone fetches history (bounded, blobless at depth 0). Verified on a real repository where the secret was deleted in a later commit: working tree clean, finding still raised, raw value never persisted, one report per credential rather than per commit. |
+| D5 | Secrets v2 (git history) | `TESTED` | `1ed0e35` | 8 (`test_secrets_history`) | Scans lines added by past commits against the existing patterns and entropy heuristic; clone fetches history (bounded, blobless at depth 0). Verified on a real repository where the secret was deleted in a later commit: working tree clean, finding still raised, raw value never persisted, one report per credential rather than per commit. |
 | D6 | Container / image | `NOT_STARTED` | — | — | |
 | D7 | Kubernetes posture | `NOT_STARTED` | — | — | |
 | D8 | Cloud CSPM | `NOT_STARTED` | — | — | |
