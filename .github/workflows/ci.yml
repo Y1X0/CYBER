@@ -68,6 +68,13 @@ jobs:
           GUARDIAN_RUN_DB_TESTS: "1"
         run: pytest -ra --cov=guardian_core --cov=guardian_scanner --cov=guardian_api
 
+      # A scanner platform runs on tools other people wrote, so licence compliance is a shipping
+      # gate rather than paperwork: nmap's NPSL restricts commercial redistribution, and AGPL §13
+      # covers exactly the network interaction a SaaS product is. A tool nobody reviewed is treated
+      # as unapproved, because the failure mode of the opposite default is found at due diligence.
+      - name: Tool licence gate
+        run: python tools/check_tool_licenses.py
+
       # ── Supply-chain self-scan (Phase 5A): know, then check, our own dependencies. ──
       - name: Generate self-SBOM
         run: python tools/generate_sbom.py sbom.json
