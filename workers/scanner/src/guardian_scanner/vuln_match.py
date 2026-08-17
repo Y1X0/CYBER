@@ -8,6 +8,7 @@ A live-feed matcher (OSV) can be swapped in without touching the engine, since b
 from __future__ import annotations
 
 from guardian_core.enums import Severity
+from guardian_core.versioning import version_affected
 from guardian_db.models import Vulnerability
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -28,12 +29,14 @@ def _severity_from_cvss(cvss: float | None) -> Severity:
 
 
 def _version_affected(entry: dict, version: str) -> bool:
-    versions = entry.get("versions")
-    if versions:
-        return version in versions
-    if "version" in entry:
-        return entry["version"] == version
-    return True  # package-level advisory with no version pinning → assume affected
+    """Delegate to the ecosystem-aware evaluator.
+
+    This used to be `version in versions` — exact string membership. Advisories publish ranges
+    ("fixed in 1.4.2"), so a customer running the vulnerable 1.4.1 matched nothing and was told
+    they were unaffected. Range semantics, ordering and per-ecosystem rules now live in
+    `guardian_core.versioning`, where they are testable against each specification's own examples.
+    """
+    return version_affected(entry, version)
 
 
 class KbVulnMatcher:
