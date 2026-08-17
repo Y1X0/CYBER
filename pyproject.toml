@@ -32,6 +32,9 @@ dependencies = [
     "structlog>=24.1",
     "httpx>=0.27",
     "pyyaml>=6.0",  # Kubernetes manifest parsing
+    # Live DNS discovery: A/AAAA plus the CNAME chain a subdomain-takeover claim depends on, which
+    # socket.getaddrinfo cannot see. ISC-licensed — permissive, safe to ship commercially.
+    "dnspython>=2.6",
     # Reporting (pure-python PDF, no system libs)
     "reportlab>=4.1",
 ]

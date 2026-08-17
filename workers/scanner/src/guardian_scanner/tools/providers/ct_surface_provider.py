@@ -2,138 +2,53 @@
 
 Locked by ADR-0026. It discovers the attack surface of an *authorized* domain from Certificate
 Transparency logs — the subdomains/hosts a certificate was ever issued for — WITHOUT touching the
-customer's target (`active=False`). It opens the network only to a fixed, code-owned CT endpoint and
-returns `discovered_asset` evidence; the assets feed the World Model / netblock graph, which then
-feeds Nmap and Web/TLS. It is NOT a finding source — an asset is inventory, not a vulnerability.
+customer's target (`active=False`). It returns `discovered_asset` evidence; the assets feed the
+World Model / netblock graph, which then feeds Nmap and Web/TLS. It is NOT a finding source — an
+asset is inventory, not a vulnerability.
 
 Governance: derived level is **L1 PASSIVE_NETWORK** (network=True, active=False) — no campaign, no
 approval. In-process (no external binary → in-proc sandbox, never uid_nft).
 
-The one new risk is data egress to a third party, so v1 is scoped hard (CT logs only, no API key, no
-new dependency) and the HTTP path is treated as UNTRUSTED network: *L1 passive ≠ trusted network
-access*. Every egress is confined so the provider can never be turned into an SSRF pivot:
-  * requests may go ONLY to the fixed CT host over https (the endpoint is a constant, never wired);
-  * the target domain rides ONLY in the query string — it can never change the host;
-  * a redirect is refused (never followed to a response-chosen location);
-  * the CT host must resolve to a PUBLIC address (private/loopback/link-local/metadata → refused);
-  * the *discovered* names are DATA, never fetched.
-
-Offline-first & hermetic: without `allow_live` it reads a snapshot from `settings["ct"]`
-({domain: [hosts]}) so CI is deterministic and opens no socket. Live work runs only behind
-`allow_live` and only through the hardened fetch below.
+The hardened CT fetch itself now lives in `guardian_scanner.sources.ct`, shared with the discovery
+pipeline. The SSRF confinement it carries — fixed host, query-string-only target, no redirects,
+public-address enforcement, bounded response — is reviewed in one place rather than two. The names
+below are re-exported because they are this module's tested surface.
 """
 
 from __future__ import annotations
 
-import ipaddress
-import re
-import socket
-from urllib.parse import quote, urlsplit
-
 from guardian_core.findings import RawFinding
 from guardian_core.tool import RawEvidence, ToolCapabilities, ToolJob
 
-# Fixed, code-owned CT endpoint allowlist — NEVER supplied by the wire (ADR-0026 §4).
-_CT_HOST = "crt.sh"
-_CT_HOSTS = frozenset({_CT_HOST})
-_SCHEME = "https"
-_TIMEOUT = 8
-_MAX_BYTES = 5_000_000
-_MAX_ASSETS = 5000
+from guardian_scanner.sources.ct import (
+    DOMAIN_RE as _DOMAIN_RE,
+)
+from guardian_scanner.sources.ct import (
+    MAX_ASSETS as _MAX_ASSETS,
+)
+from guardian_scanner.sources.ct import (
+    EgressBlocked,
+    assert_ct_host_public,
+    assert_endpoint_allowed,
+    ct_url,
+    ensure_not_redirect,
+    fetch_ct_live,
+    is_blocked_ip,
+    parse_ct_names,
+    under_domain,
+)
 
-# A target must look like a hostname before we ever build a URL from it (defense in depth).
-_DOMAIN_RE = re.compile(r"^(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$")
+# Backwards-compatible private aliases: the unit tests monkeypatch these module attributes.
+_is_blocked_ip = is_blocked_ip
+_ct_url = ct_url
+_assert_endpoint_allowed = assert_endpoint_allowed
+_ensure_not_redirect = ensure_not_redirect
+_assert_ct_host_public = assert_ct_host_public
+_under_domain = under_domain
+_parse_ct_names = parse_ct_names
+_fetch_ct_live = fetch_ct_live
 
-
-class EgressBlocked(RuntimeError):
-    """A network egress was refused by the passive provider's SSRF guard (fail-closed)."""
-
-
-def _is_blocked_ip(ip: str) -> bool:
-    """True for any address we must never egress to: private/loopback/link-local (incl. cloud
-    metadata 169.254.169.254 / fd00:ec2::)/multicast/reserved/unspecified, or a non-literal."""
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return True  # not a literal address → cannot vouch for it → block
-    return bool(addr.is_private or addr.is_loopback or addr.is_link_local
-                or addr.is_multicast or addr.is_reserved or addr.is_unspecified)
-
-
-def _ct_url(domain: str) -> str:
-    """Build the CT query URL. The domain rides ONLY in the query string (URL-encoded), so it can
-    never change the host; the host is the fixed constant."""
-    return f"{_SCHEME}://{_CT_HOST}/?q={quote(domain, safe='')}&output=json"
-
-
-def _assert_endpoint_allowed(url: str) -> None:
-    """Refuse any URL that is not https to the fixed CT host — enforced, not by convention."""
-    parts = urlsplit(url)
-    if parts.scheme != _SCHEME:
-        raise EgressBlocked(f"scheme not allowed: {parts.scheme!r}")
-    host = (parts.hostname or "").lower()
-    if host not in _CT_HOSTS:
-        raise EgressBlocked(f"host not in CT allowlist: {host!r}")
-
-
-def _ensure_not_redirect(status_code: int) -> None:
-    """Refuse a redirect — we never follow to a response-chosen location (SSRF guard)."""
-    if 300 <= status_code < 400:
-        raise EgressBlocked(f"redirect refused: {status_code}")
-
-
-def _assert_ct_host_public() -> None:
-    """Resolve the fixed CT host and refuse if ANY address is non-public (DNS-rebinding/SSRF)."""
-    infos = socket.getaddrinfo(_CT_HOST, 443, proto=socket.IPPROTO_TCP)
-    ips = sorted({info[4][0] for info in infos})
-    if not ips:
-        raise EgressBlocked(f"no address for {_CT_HOST!r}")
-    for ip in ips:
-        if _is_blocked_ip(ip):
-            raise EgressBlocked(f"{_CT_HOST!r} resolves to non-public {ip}")
-
-
-def _under_domain(host: str, domain: str) -> bool:
-    """Scope hygiene: only assets AT/under the authorized domain (a cert may list foreign SANs)."""
-    return host == domain or host.endswith("." + domain)
-
-
-def _parse_ct_names(raw: bytes) -> list[str]:
-    """Extract hostnames from a CT JSON response; wildcards flattened, deduped, sorted. Never dumps
-    the raw payload — only sanitized names leave this function."""
-    import json
-
-    try:
-        rows = json.loads(raw)
-    except (ValueError, TypeError):
-        return []
-    names: set[str] = set()
-    if isinstance(rows, list):
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            value = row.get("name_value") or row.get("common_name") or ""
-            for line in str(value).splitlines():
-                host = line.strip().lower().lstrip("*.").rstrip(".")
-                if host:
-                    names.add(host)
-    return sorted(names)
-
-
-def _fetch_ct_live(domain: str) -> list[str]:  # pragma: no cover - network
-    """Hardened live CT fetch: fixed host, no redirects, public-only resolution, bounded size."""
-    import httpx
-
-    url = _ct_url(domain)
-    _assert_endpoint_allowed(url)
-    _assert_ct_host_public()
-    with httpx.Client(follow_redirects=False, timeout=_TIMEOUT) as client:
-        resp = client.get(url, headers={"user-agent": "guardian-surface-discovery"})
-        _ensure_not_redirect(resp.status_code)
-        if resp.status_code != 200:
-            return []
-        raw = resp.content[:_MAX_BYTES]
-    return _parse_ct_names(raw)
+__all__ = ["CtSurfaceProvider", "EgressBlocked"]
 
 
 class CtSurfaceProvider:
