@@ -25,7 +25,7 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
-| B1 | Live passive discovery | `LIVE_VERIFIED` (DNS) / `IMPLEMENTED` (CT) | `TBD` | 39 new (`test_dns_source_unit`, `test_ct_source_unit`) | DNS resolved `example.com` → `104.20.23.154`, `2606:4700:10::ac42:93f3`; wildcard probe returned `present=False`; nonexistent name → `unresolved=True, takeover=False`. CT egress denied by this environment's gateway (403 on CONNECT) — code path exercised, live fetch `BLOCKED_EXTERNAL`. |
+| B1 | Live passive discovery | `LIVE_VERIFIED` (DNS) / `IMPLEMENTED` (CT) | `eb40a5c` | 39 new (`test_dns_source_unit`, `test_ct_source_unit`) | DNS resolved `example.com` → `104.20.23.154`, `2606:4700:10::ac42:93f3`; wildcard probe returned `present=False`; nonexistent name → `unresolved=True, takeover=False`. CT egress denied by this environment's gateway (403 on CONNECT) — code path exercised, live fetch `BLOCKED_EXTERNAL`. |
 | B2 | Active port/service discovery | `NOT_STARTED` | — | — | Depends on A1/A2. |
 | B3 | HTTP probing / tech fingerprinting | `NOT_STARTED` | — | — | |
 | B4 | Cloud asset discovery | `NOT_STARTED` | — | — | |
@@ -36,7 +36,7 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
 | C1 | Feed ingestion pipeline | `NOT_STARTED` | — | — | |
-| C2 | Version range matching | `NOT_STARTED` | — | — | Fixes the exact-string match bug at `vuln_match.py:30`. |
+| C2 | Version range matching | `TESTED` | `cb47daa` | 56 (`test_versioning`) | Replaces exact-string matching. Verified against SemVer §11, PEP 440, Debian policy and rpmvercmp published orderings, and end-to-end on a Debian backport where only the release field separates patched from vulnerable. |
 | C3 | Service version → CVE | `NOT_STARTED` | — | — | |
 | C4 | Exploit intelligence | `NOT_STARTED` | — | — | |
 
@@ -46,7 +46,7 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 |----|-------|--------|--------|-------|----------|
 | D1 | Nuclei | `NOT_STARTED` | — | — | |
 | D2 | ZAP full DAST | `NOT_STARTED` | — | — | |
-| D3 | SCA v2 | `NOT_STARTED` | — | — | |
+| D3 | SCA v2 | `TESTED` | `def7df6` | 30 (`test_sca_lockfiles`) | 9 lockfile formats incl. transitive deps; `OsvVulnMatcher` connects the client that had zero call sites; `CompositeVulnMatcher` merges sources by advisory id; CVSS v3.x base scoring. Live OSV query needs egress (see BLOCKER-4). |
 | D4 | SAST v2 | `NOT_STARTED` | — | — | |
 | D5 | Secrets v2 (git history) | `NOT_STARTED` | — | — | |
 | D6 | Container / image | `NOT_STARTED` | — | — | |
@@ -88,7 +88,7 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
 | H1 | Authorization enforcement | `NOT_STARTED` | — | — | |
-| H2 | Licence registry | `NOT_STARTED` | — | — | Must clear before any binary ships (A2). |
+| H2 | Licence registry | `LIVE_VERIFIED` | `c5ed0b6` | CI gate | 40 tools registered; gate exits 1 on masscan (AGPL §13), 0 on an approved set. nmap `LEGAL_REVIEW`, masscan/TruffleHog/CodeQL `PROHIBITED`, substitutes named. Wired into CI. |
 | H3 | Safe-scanning controls | `NOT_STARTED` | — | — | |
 
 ---
@@ -110,6 +110,12 @@ CSPM) can run on any host; only the tool plane needs the capability.
 This session's network gateway answers `403` to `CONNECT crt.sh:443`. The CT code path is
 implemented, unit-tested, and fails closed with a logged reason; live confirmation requires an
 environment whose egress policy permits crt.sh. Does not block any dependent package.
+
+### BLOCKER-4 — Outbound egress for feed queries (limits D3/C1 live verification)
+
+The same gateway policy that denies crt.sh also governs OSV, NVD and GHSA. Matchers and parsers are
+unit-tested against recorded response shapes; querying the live services needs an environment whose
+egress policy permits them. Does not block implementation of any dependent package.
 
 ### BLOCKER-3 — AI provider key (blocks E3)
 
