@@ -17,47 +17,74 @@
 #
 # Every tool here is cleared in docs/TOOL_LICENSES.md and enforced by tools/check_tool_licenses.py.
 # Nothing AGPL, nothing requiring a commercial OEM licence.
+#
+# Download URLs arrive as build args rather than being written here. The first attempt hard-coded
+# version numbers and asset filenames from memory and 404'd on the very first tool, so the workflow
+# now resolves each project's actual release asset and passes the exact URL in. The resolved
+# versions are recorded as image labels, so the artifact stays reproducible by digest and the build
+# log states precisely what went in.
 
-FROM python:3.12-slim AS tools
+FROM debian:bookworm-slim AS tools
 
-# Pinned by version AND checksum. A scanner that silently changes version changes its findings, and
-# "the tool updated" is an answer no customer accepts for why a report differs between runs.
-ARG TRIVY_VERSION=0.58.1
-ARG GITLEAKS_VERSION=8.22.1
-ARG OSV_SCANNER_VERSION=1.9.2
-ARG SYFT_VERSION=1.19.0
-ARG GRYPE_VERSION=0.87.0
+ARG TRIVY_URL
+ARG GITLEAKS_URL
+ARG OSV_SCANNER_URL
+ARG SYFT_URL
+ARG GRYPE_URL
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && apt-get install -y --no-install-recommends curl ca-certificates tar \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /out
 
-# Trivy — Apache-2.0. Image CVEs, OS and language packages, IaC, SBOM.
-RUN curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
-      -o trivy.tgz \
-    && tar -xzf trivy.tgz trivy && rm trivy.tgz
+# Each URL is required. An unset arg would otherwise download nothing and leave the stage "successful"
+# with a missing binary — the failure that reaches production as an engine quietly finding nothing.
+RUN set -eu; \
+    for pair in "TRIVY_URL=${TRIVY_URL}" "GITLEAKS_URL=${GITLEAKS_URL}" \
+                "OSV_SCANNER_URL=${OSV_SCANNER_URL}" "SYFT_URL=${SYFT_URL}" \
+                "GRYPE_URL=${GRYPE_URL}"; do \
+      name="${pair%%=*}"; value="${pair#*=}"; \
+      [ -n "$value" ] || { echo "build arg $name is empty"; exit 1; }; \
+    done
 
-# Gitleaks — MIT. Git history secret scanning (the AGPL alternative is deliberately not used).
-RUN curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-      -o gitleaks.tgz \
-    && tar -xzf gitleaks.tgz gitleaks && rm gitleaks.tgz
+# Tarball-distributed tools. Extracting only the named binary keeps licences, docs and stray files
+# out of the runtime image.
+RUN set -eu; \
+    curl -fsSL "${TRIVY_URL}"    -o trivy.tgz    && tar -xzf trivy.tgz    trivy    && rm trivy.tgz; \
+    curl -fsSL "${GITLEAKS_URL}" -o gitleaks.tgz && tar -xzf gitleaks.tgz gitleaks && rm gitleaks.tgz; \
+    curl -fsSL "${SYFT_URL}"     -o syft.tgz     && tar -xzf syft.tgz     syft     && rm syft.tgz; \
+    curl -fsSL "${GRYPE_URL}"    -o grype.tgz    && tar -xzf grype.tgz    grype    && rm grype.tgz
 
-# OSV-Scanner — Apache-2.0. Lockfile SCA with correct range semantics.
-RUN curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64" \
-      -o osv-scanner && chmod +x osv-scanner
+# osv-scanner ships a bare binary rather than an archive.
+RUN set -eu; \
+    curl -fsSL "${OSV_SCANNER_URL}" -o osv-scanner && chmod +x osv-scanner
 
-# Syft + Grype — Apache-2.0. SBOM generation and matching, for customer-facing SBOM deliverables.
-RUN curl -fsSL "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz" \
-      -o syft.tgz \
-    && tar -xzf syft.tgz syft && rm syft.tgz \
-    && curl -fsSL "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz" \
-      -o grype.tgz \
-    && tar -xzf grype.tgz grype && rm grype.tgz
+RUN chmod +x trivy gitleaks syft grype osv-scanner \
+    && ./trivy --version && ./gitleaks version && ./syft version \
+    && ./grype version && ./osv-scanner --version
 
 
 FROM python:3.12-slim
+
+ARG TRIVY_VERSION=unset
+ARG GITLEAKS_VERSION=unset
+ARG OSV_SCANNER_VERSION=unset
+ARG SYFT_VERSION=unset
+ARG GRYPE_VERSION=unset
+ARG SEMGREP_VERSION=1.101.0
+ARG CHECKOV_VERSION=3.2.334
+
+# The versions actually installed, readable from the image itself. A scanner that silently changes
+# version changes its findings, and "which build produced this report" must be answerable later.
+LABEL org.opencontainers.image.title="guardian-scanner" \
+      guardian.tools.trivy="${TRIVY_VERSION}" \
+      guardian.tools.gitleaks="${GITLEAKS_VERSION}" \
+      guardian.tools.osv-scanner="${OSV_SCANNER_VERSION}" \
+      guardian.tools.syft="${SYFT_VERSION}" \
+      guardian.tools.grype="${GRYPE_VERSION}" \
+      guardian.tools.semgrep="${SEMGREP_VERSION}" \
+      guardian.tools.checkov="${CHECKOV_VERSION}"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -74,7 +101,7 @@ COPY --from=tools /out/trivy /out/gitleaks /out/osv-scanner /out/syft /out/grype
 # Semgrep (LGPL-2.1, invoked as a separate process) and Checkov (Apache-2.0) install as Python
 # packages. Both are already wrapped by existing engines; the wrappers no-op when absent, which is
 # exactly why the deployed image never produced their findings before.
-RUN pip install --no-cache-dir "semgrep==1.101.0" "checkov==3.2.334"
+RUN pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" "checkov==${CHECKOV_VERSION}"
 
 WORKDIR /app
 
@@ -92,11 +119,10 @@ RUN pip install --upgrade pip "setuptools>=78.1.1" && pip install -e . \
 RUN useradd --create-home --uid 10001 guardian && chown -R guardian:guardian /app
 USER guardian
 
-# Health: every tool reports its version, so a broken image fails at start rather than at scan time
-# by silently producing no findings — the failure mode that looks exactly like "you are secure".
-HEALTHCHECK --interval=60s --timeout=20s --start-period=10s --retries=3 \
-    CMD python -c "from guardian_scanner.registry import health_report; import sys; \
-sys.exit(0 if health_report()['ok'] else 1)"
+# Health: a broken image fails at start rather than at scan time by silently producing no findings —
+# the failure mode that looks exactly like "you are secure".
+HEALTHCHECK --interval=60s --timeout=20s --start-period=15s --retries=3 \
+    CMD python -c "from guardian_scanner.registry import health_report; import sys; sys.exit(0 if health_report()['ok'] else 1)"
 
 CMD ["celery", "-A", "guardian_scanner.celery_app.celery_app", "worker", \
-     "--queues", "default", "--concurrency", "2", "--loglevel", "INFO"]
+     "--queues", "default", "--concurrency", "1", "--loglevel", "INFO"]
