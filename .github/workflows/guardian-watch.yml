@@ -9,8 +9,10 @@
 # broken the issue body is rewritten in place, which does not notify again; recovery posts one
 # comment and closes it. So a day-long outage produces two notifications, not seventy.
 #
-# Deliberately secret-free: every probe is unauthenticated, so this job needs no environment and
-# no credentials. Depth is the smoke workflow's job.
+# The external probes cannot see everything. A deploy that failed and rolled back leaves the old
+# version answering happily, and a suspended service looks like any other outage. Render knows
+# both, and its own notification endpoints return 404 on this account, so this asks the API
+# directly instead. Depth beyond liveness is the smoke workflow's job.
 name: Guardian Watch
 
 on:
@@ -30,14 +32,18 @@ concurrency:
 env:
   API: https://guardian-api-pjp3.onrender.com
   WEB: https://guardian-web-412r.onrender.com
+  API_SERVICE: srv-da18rq0u01pc739npf20
+  WEB_SERVICE: srv-da196i8jo6nc7384s360
 
 jobs:
   probe:
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Probe and alert
         env:
           GH_TOKEN: ${{ github.token }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
           REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -88,6 +94,36 @@ jobs:
               rows.append(f"| {name} | {'up' if ok else 'DOWN'} | {code} (want {want}) | {ms} ms |")
               if not ok:
                   failures.append(f"{name}: got {code}, expected {want}{detail}")
+
+          # --- what the outside cannot see -------------------------------------------------
+          def render(path):
+              req = urllib.request.Request(
+                  f"https://api.render.com/v1{path}",
+                  headers={"Authorization": f"Bearer {os.environ['RENDER_API_KEY'].strip()}",
+                           "Accept": "application/json"})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  raw = r.read()
+                  return json.loads(raw) if raw else {}
+
+          for name, sid in (("api", os.environ["API_SERVICE"]),
+                            ("web", os.environ["WEB_SERVICE"])):
+              try:
+                  svc = render(f"/services/{sid}")
+                  deploys = render(f"/services/{sid}/deploys?limit=1")
+                  state = svc.get("suspended")
+                  status = ((deploys[0].get("deploy") or deploys[0]).get("status")
+                            if deploys else "none")
+                  ok = state == "not_suspended" and status == "live"
+                  rows.append(f"| {name} service (Render) | {'ok' if ok else 'DEGRADED'} "
+                              f"| {state}, last deploy {status} | — |")
+                  if not ok:
+                      failures.append(f"{name} service: suspended={state}, "
+                                      f"last deploy={status}")
+              except Exception as e:
+                  # A Render API outage is not a Guardian outage. Say so and keep the probe
+                  # verdict driven by the checks that actually tested the service.
+                  rows.append(f"| {name} service (Render) | unknown "
+                              f"| {type(e).__name__} querying Render | — |")
 
           print("\n".join(rows))
 

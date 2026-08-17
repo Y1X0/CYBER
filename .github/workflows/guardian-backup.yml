@@ -32,6 +32,11 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
+      # Pull separately so image-download progress cannot mix into a command's stderr and crowd
+      # out the actual error message.
+      - name: Fetch the PostgreSQL client image
+        run: docker pull -q postgres:16
+
       - name: Dump, restore, compare
         env:
           GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
@@ -73,10 +78,17 @@ jobs:
               with os.fdopen(fd, "w") as f:
                   f.write(f"PGURI={src}\nTGTURI={tgt}\n")
 
+          def why(stderr):
+              """Keep the END of stderr. Tools announce progress first and fail last, so the head
+              of the stream is the part that never explains anything."""
+              lines = [ln for ln in scrub(stderr).splitlines()
+                       if ln.strip() and not re.match(r"^[0-9a-f]{12}: |^Pulling |^Digest: ", ln)]
+              return " | ".join(lines[-6:])[-600:]
+
           def run(cmd, check=True):
               p = subprocess.run(cmd, capture_output=True, text=True)
               if check and p.returncode != 0:
-                  raise RuntimeError(f"{cmd[0]} exited {p.returncode}: {scrub(p.stderr)[:400]}")
+                  raise RuntimeError(f"{cmd[0]} exited {p.returncode}: {why(p.stderr)}")
               return p
 
           _SECRET = re.compile("|".join(re.escape(s) for s in (src, tgt, local_pw)))
@@ -150,7 +162,7 @@ jobs:
               restore = pg("pg_restore --no-owner --no-privileges --exit-on-error "
                            '-d "$TGTURI" /bk/dump.pgc', check=False)
               record("B3", "pg_restore succeeds", restore.returncode == 0,
-                     f"exit={restore.returncode} {scrub(restore.stderr).strip()[:120]}")
+                     f"exit={restore.returncode} {why(restore.stderr)[:200]}")
 
               # --- B4/B5: the restored copy is the same database ---------------------------
               tgt_counts = counts("TGTURI")
@@ -181,7 +193,7 @@ jobs:
               # Report the failure as a BLOCK and still print the table. Letting the traceback
               # escape would lose the checks that already passed, and a raw traceback is exactly
               # where an unscrubbed connection string would surface.
-              record("B!", "run aborted", False, scrub(f"{type(exc).__name__}: {exc}")[:160])
+              record("B!", "run aborted", False, scrub(f"{type(exc).__name__}: {exc}")[:600])
           finally:
               # The dump is a full copy of production. It must not outlive this step, and this
               # repository is public, so it is never uploaded anywhere.
