@@ -5,12 +5,20 @@ engine and in CI. It walks a workspace for text files and flags likely secrets v
 plus a Shannon-entropy heuristic for assignments to secret-looking identifiers.
 
 Evidence is ALWAYS redacted — the raw secret is never persisted (doc 06 §6).
+
+It also scans git history, which is where secrets usually are. Removing a key in a later commit
+does not remove it from the repository: anyone who can clone can still read it, and the working
+tree — the only thing a scanner sees by default — shows nothing. History scanning is what turns
+this engine from a linter into a credential-exposure check. It uses git itself rather than an
+external tool, so it adds no binary and no licence question.
 """
 
 from __future__ import annotations
 
 import math
 import re
+import shutil
+import subprocess  # noqa: S404 - fixed argv, no shell, bounded
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -64,6 +72,11 @@ _SKIP_DIRS = {
     ".mypy_cache",
 }
 _MAX_FILE_BYTES = 1_000_000
+# History scanning is bounded on three axes so a large repository degrades rather than hangs:
+# how many commits are walked, how long git may run, and how much diff output is examined.
+_HISTORY_COMMITS = 1000
+_HISTORY_TIMEOUT = 120
+_HISTORY_MAX_LINES = 400_000
 _TEXT_SUFFIXES = {
     ".py",
     ".js",
@@ -136,6 +149,66 @@ class SecretsEngine:
                 continue
             rel = str(path.relative_to(root))
             yield from self._scan_text(rel, text)
+        yield from self._scan_history(root, ctx)
+
+    def _scan_history(self, root: Path, ctx: ScanContext) -> Iterable[RawFinding]:
+        """Scan lines ADDED by past commits.
+
+        Only additions matter: a deletion is the secret being removed, which is not a new exposure,
+        and scanning both sides would report every leak twice. A finding here means the value is
+        still retrievable by anyone who can clone, regardless of the current file contents.
+        """
+        if not (root / ".git").exists() or not shutil.which("git"):
+            return
+        settings = ctx.settings or {}
+        if settings.get("scan_history") is False:
+            return
+        depth = int(settings.get("history_commits") or _HISTORY_COMMITS)
+
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell, bounded
+                ["git", "-C", str(root), "log", f"-n{depth}", "-p", "--no-color",  # noqa: S607
+                 "--no-merges", "--unified=0", "--pretty=format:%x00commit %H"],
+                capture_output=True, text=True, timeout=_HISTORY_TIMEOUT, check=False,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return                      # history is a bonus surface; never fail the scan for it
+        if proc.returncode != 0:
+            return
+
+        commit = "unknown"
+        path = "unknown"
+        emitted: set[tuple[str, str]] = set()
+        budget = _HISTORY_MAX_LINES
+        for line in proc.stdout.splitlines():
+            budget -= 1
+            if budget <= 0:
+                break
+            if line.startswith("\x00commit "):
+                commit = line.split(" ", 1)[1].strip()[:12]
+                continue
+            if line.startswith("+++ b/"):
+                path = line[6:].strip()
+                continue
+            if not line.startswith("+") or line.startswith("+++"):
+                continue
+            content = line[1:]
+            for finding in self._scan_text(f"{path}@{commit}", content):
+                # One report per (rule, path) across history: the same key re-committed on ten
+                # branches is one exposed credential, not ten.
+                key = (finding.location.get("rule", ""), path)
+                if key in emitted:
+                    continue
+                emitted.add(key)
+                finding.location["commit"] = commit
+                finding.location["path"] = path
+                finding.location["source"] = "git-history"
+                finding.description = (
+                    f"{finding.description} This was found in commit {commit}; it remains "
+                    "retrievable from the repository history even if later removed, so rotation "
+                    "is required — deleting the file is not sufficient."
+                )
+                yield finding
 
     def _iter_files(self, root: Path) -> Iterable[Path]:
         for path in root.rglob("*"):

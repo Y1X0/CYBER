@@ -40,6 +40,10 @@ from guardian_scanner.vuln_match import KbVulnMatcher
 log = get_logger("guardian.scanner")
 
 _CLONE_TIMEOUT = 120
+# Commits walked when cloning a repository for scanning. Secrets live in history far more
+# often than in the working tree, so the default fetches it; 0 means full history via a
+# blobless clone. Bounded so a pathological repository degrades instead of hanging.
+_DEFAULT_HISTORY_DEPTH = 1000
 
 
 def _run_engine(engine, ctx: ScanContext) -> list:  # noqa: ANN001 - engine is a ScanEngine
@@ -117,10 +121,17 @@ def _prepare_workspace(asset: Asset) -> tuple[str | None, str | None, str | None
         except PermissionError as exc:
             raise RuntimeError(f"workspace preparation refused: {exc}") from exc
         tmp = tempfile.mkdtemp(prefix="guardian_ws_")
+        # Depth is the difference between scanning a snapshot and scanning a repository. A secret
+        # committed and later deleted is invisible at depth 1 while remaining readable by anyone
+        # who can clone, so history is fetched by default and bounded rather than skipped.
+        # `--filter=blob:none` keeps the commit graph cheap: blobs arrive only when a scan reads
+        # them, so a deep history costs walk time instead of a full-content download.
+        depth = int(cfg.get("history_depth", _DEFAULT_HISTORY_DEPTH))
+        depth_args = ["--filter=blob:none"] if depth <= 0 else ["--depth", str(min(depth, 5000))]
         try:
             subprocess.run(  # noqa: S603 - fixed argv, no shell, timeout-bounded, scrubbed env
                 ["git", "-c", "http.followRedirects=false", "-c", "credential.helper=",  # noqa: S607
-                 "clone", "--depth", "1", asset.identifier, tmp],
+                 "clone", *depth_args, asset.identifier, tmp],
                 check=True,
                 capture_output=True,
                 timeout=_CLONE_TIMEOUT,
