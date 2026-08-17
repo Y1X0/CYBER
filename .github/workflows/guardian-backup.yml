@@ -96,10 +96,18 @@ jobs:
               """Never let a DSN reach the log, including through an error message."""
               return _SECRET.sub("<redacted>", text or "")
 
+          # The production DSN pins sslrootcert to the CA bundle's path inside the application
+          # image. This image has no ca-certificates package, so the same path is mounted from
+          # the runner. Rewriting the DSN to sslrootcert=system would also work and is what the
+          # libpq error suggests — but a backup tool that quietly rewrites the connection's TLS
+          # settings is a backup tool that can silently stop verifying the server.
+          CA = "/etc/ssl/certs/ca-certificates.crt"
+
           def pg(args, check=True):
               """Run a client tool in a container that can reach both Neon and the loopback."""
               return run(["docker", "run", "--rm", "--network", "host", "--env-file", ENVF,
-                          "-v", f"{WORK}:/bk", IMAGE, "bash", "-c", args], check=check)
+                          "-v", f"{WORK}:/bk", "-v", f"{CA}:{CA}:ro",
+                          IMAGE, "bash", "-c", args], check=check)
 
           # Exact counts for every table in one round trip. count(*) cannot be parameterised over
           # a table name, so each count is run through query_to_xml and read back out.
