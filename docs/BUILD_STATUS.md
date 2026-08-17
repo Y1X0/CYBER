@@ -18,9 +18,9 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
-| A1 | Worker fleet — artifact plane | `IMPLEMENTED` | `TBD` | — | Needs only a container host; no kernel privileges. Deployment is a billing action, not an engineering one. |
+| A1 | Worker fleet — artifact plane | `IMPLEMENTED` | `1c2ed8e` | — | Needs only a container host; no kernel privileges. Deployment is a billing action, not an engineering one. |
 | A1b | Worker fleet — network plane | `BLOCKED_EXTERNAL` | — | — | Only `nmap_provider` and `nmap_service_provider` set `external_binary=True` and are forced onto `uid_nft`. That plane alone needs `CAP_NET_ADMIN`. |
-| A2 | Scanner runtime image | `IMPLEMENTED` | `TBD` | 28 (`test_tool_licenses`) + 8 (`test_engine_health`) | `Dockerfile.scanner` — trivy, gitleaks, osv-scanner, syft, grype, semgrep, checkov, all version-pinned and licence-cleared. Gate passes against the real image. Not built here (no usable docker daemon), so `IMPLEMENTED` not `DEPLOYED`. |
+| A2 | Scanner runtime image | `IMPLEMENTED` | `1c2ed8e` | 28 (`test_tool_licenses`) + 8 (`test_engine_health`) | `Dockerfile.scanner` — trivy, gitleaks, osv-scanner, syft, grype, semgrep, checkov, all version-pinned and licence-cleared. Gate passes against the real image. Not built here (no usable docker daemon), so `IMPLEMENTED` not `DEPLOYED`. |
 | A3 | Scheduler + notifications | `NOT_STARTED` | — | — | |
 | A4 | Tool execution API | `NOT_STARTED` | — | — | |
 
