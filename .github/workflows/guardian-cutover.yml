@@ -75,11 +75,18 @@ jobs:
           GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
           GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
           GUARDIAN_APP_DB_PASSWORD: ${{ secrets.GUARDIAN_APP_DB_PASSWORD }}
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_JWT_SECRET: ${{ secrets.GUARDIAN_JWT_SECRET }}
+          GUARDIAN_ENCRYPTION_KEY: ${{ secrets.GUARDIAN_ENCRYPTION_KEY }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+          GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
         run: |
           printf 'precedence ::ffff:0:0/96  100\n' > "$RUNNER_TEMP/gai.conf"
           docker run --rm -v "$RUNNER_TEMP/gai.conf:/etc/gai.conf:ro" -w /app \
             -e GUARDIAN_ENV -e GUARDIAN_DATABASE_URL -e GUARDIAN_APP_DATABASE_URL \
             -e GUARDIAN_APP_DB_PASSWORD \
+            -e GUARDIAN_REDIS_URL -e GUARDIAN_JWT_SECRET -e GUARDIAN_ENCRYPTION_KEY \
+            -e GUARDIAN_BROKER_SEAL_KEY -e GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD \
             "$IMAGE" alembic upgrade head
 
       - name: Seed
@@ -88,8 +95,15 @@ jobs:
           GUARDIAN_ENV: production
           GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
           GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_JWT_SECRET: ${{ secrets.GUARDIAN_JWT_SECRET }}
+          GUARDIAN_ENCRYPTION_KEY: ${{ secrets.GUARDIAN_ENCRYPTION_KEY }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+          GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
         run: |
           printf 'precedence ::ffff:0:0/96  100\n' > "$RUNNER_TEMP/gai.conf"
           docker run --rm -v "$RUNNER_TEMP/gai.conf:/etc/gai.conf:ro" -w /app \
             -e GUARDIAN_ENV -e GUARDIAN_DATABASE_URL -e GUARDIAN_APP_DATABASE_URL \
+            -e GUARDIAN_REDIS_URL -e GUARDIAN_JWT_SECRET -e GUARDIAN_ENCRYPTION_KEY \
+            -e GUARDIAN_BROKER_SEAL_KEY -e GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD \
             "$IMAGE" python -m guardian_api.seed
