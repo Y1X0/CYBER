@@ -57,16 +57,21 @@ jobs:
                   headers={"Accept": "application/json",
                            **({"Content-Type": "application/json"} if body is not None else {}),
                            **({"Authorization": f"Bearer {token}"} if token else {})})
+              def parse(raw):
+                  # Not every endpoint answers JSON — the site serves HTML. Losing the status
+                  # because the body would not parse turns a healthy 200 into a fake failure.
+                  if not raw:
+                      return {}
+                  try:
+                      return json.loads(raw)
+                  except ValueError:
+                      return {"_text": raw[:120].decode(errors="replace")}
+
               try:
                   with urllib.request.urlopen(req, timeout=timeout) as r:
-                      raw = r.read()
-                      return r.status, (json.loads(raw) if raw else {})
+                      return r.status, parse(r.read())
               except urllib.error.HTTPError as e:
-                  raw = e.read()
-                  try:
-                      return e.code, json.loads(raw)
-                  except Exception:
-                      return e.code, {"_raw": raw.decode()[:200]}
+                  return e.code, parse(e.read())
               except Exception as e:
                   return 0, {"_err": f"{type(e).__name__}: {e}"[:200]}
 
@@ -131,8 +136,10 @@ jobs:
           # Report the transport error too: a bare 0 hides whether this is DNS, TLS, a redirect
           # loop or a reset, and those need different fixes.
           code, b9 = http("GET", f"{WEB}/")
-          why = (b9 or {}).get("_err") or (b9 or {}).get("_raw") or ""
-          record("G9", "web app served", code == 200, f"GET / -> {code} {why}"[:150])
+          html = (b9 or {}).get("_text", "")
+          is_spa = "<div id=\"root\"" in html or "<!doctype html" in html.lower()
+          record("G9", "web app served", code == 200 and is_spa,
+                 f"GET / -> {code}, html={is_spa}"[:150])
           if code != 200:
               c2, b2 = http("GET", f"{WEB}/index.html")
               w2 = (b2 or {}).get("_err") or ""
