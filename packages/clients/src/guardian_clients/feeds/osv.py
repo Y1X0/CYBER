@@ -50,14 +50,31 @@ class OsvClient:
     def _normalize(v: dict, name: str, version: str, ecosystem: str) -> NormalizedVuln:
         aliases = v.get("aliases", [])
         cve = next((a for a in aliases if a.startswith("CVE-")), v.get("id", ""))
-        severity = v.get("severity", [])
-        cvss_vector = severity[0]["score"] if severity else None
+        # Prefer a v3 vector: severity entries can carry v2, v3 and v4 side by side, and the
+        # scoring arithmetic differs per version, so picking the first one blindly mis-scores.
+        cvss_vector = None
+        for entry in v.get("severity", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            score = entry.get("score")
+            if isinstance(score, str) and score.startswith("CVSS:3"):
+                cvss_vector = score
+                break
+            cvss_vector = cvss_vector or (score if isinstance(score, str) else None)
+
+        # GHSA records carry CWE ids here; they are what the analyst grounds an explanation on.
+        specific = v.get("database_specific") or {}
+        cwe_ids = [str(c) for c in (specific.get("cwe_ids") or []) if str(c).startswith("CWE-")]
+
         return NormalizedVuln(
             external_id=cve,
             source="osv",
             summary=v.get("summary", ""),
             details=v.get("details", "")[:8000],
+            cwe_ids=cwe_ids,
             cvss_vector=cvss_vector,
+            # OSV's query endpoint returns only advisories affecting the version we asked about,
+            # so the match is already established; the entry records what was asked, not a range.
             affected=[{"ecosystem": ecosystem, "package": name, "version": version}],
             references=[r.get("url") for r in v.get("references", []) if r.get("url")],
         )
