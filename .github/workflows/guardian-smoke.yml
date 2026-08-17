@@ -128,8 +128,15 @@ jobs:
           record("G8", "created row reads back", code == 200 and seen, f"-> {code}, found={seen}")
 
           # G9 — the front end is served and carries the API rewrite.
-          code, _ = http("GET", f"{WEB}/")
-          record("G9", "web app served", code == 200, f"GET {WEB}/ -> {code}")
+          # Report the transport error too: a bare 0 hides whether this is DNS, TLS, a redirect
+          # loop or a reset, and those need different fixes.
+          code, b9 = http("GET", f"{WEB}/")
+          why = (b9 or {}).get("_err") or (b9 or {}).get("_raw") or ""
+          record("G9", "web app served", code == 200, f"GET / -> {code} {why}"[:150])
+          if code != 200:
+              c2, b2 = http("GET", f"{WEB}/index.html")
+              w2 = (b2 or {}).get("_err") or ""
+              record("G9b", "index.html directly", c2 == 200, f"-> {c2} {w2}"[:150])
           code, _ = http("GET", f"{WEB}/api/v1/auth/me")
           record("G10", "web -> API rewrite live", code in (401, 403),
                  f"same-origin /api proxied, unauth -> {code}")
