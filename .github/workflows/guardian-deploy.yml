@@ -1,0 +1,154 @@
+# Deploy the pinned image to Render. The image is never rebuilt: the digest below is the only
+# artifact this workflow references, and it is passed verbatim to Render.
+#
+# The Render MCP tool cannot create registry-backed services ("only supports web services which
+# don't use Docker, or a container registry"), so this uses Render's public REST API instead —
+# the narrowest supported path that keeps the frozen digest.
+#
+# Needs RENDER_API_KEY and, because the package is private, GHCR_PULL_TOKEN: a GitHub token with
+# read:packages, used once to register a Render registry credential. Neither is ever printed.
+name: Guardian Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "plan = report what would be created; apply = create/update the service"
+        type: choice
+        required: true
+        default: plan
+        options: [plan, apply]
+      plan_tier:
+        description: "Render service plan (free sleeps when idle)"
+        type: choice
+        required: true
+        default: free
+        options: [free, starter]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guardian-deploy
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/y1x0/cyber@sha256:69ba91a23d63c220034a64229d192597c931fb52ea3b7a5470106b9ce54ddc46
+  SERVICE_NAME: guardian-api
+  REGION: ohio
+  HEALTH_PATH: /health/ready
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Create the registry credential and the image-backed service
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          GHCR_USERNAME: ${{ github.repository_owner }}
+          MODE: ${{ inputs.mode }}
+          PLAN_TIER: ${{ inputs.plan_tier }}
+          GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
+          GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_JWT_SECRET: ${{ secrets.GUARDIAN_JWT_SECRET }}
+          GUARDIAN_ENCRYPTION_KEY: ${{ secrets.GUARDIAN_ENCRYPTION_KEY }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+          GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, urllib.error, urllib.request
+
+          API = "https://api.render.com/v1"
+          key = (os.environ.get("RENDER_API_KEY") or "").strip()
+          pull = (os.environ.get("GHCR_PULL_TOKEN") or "").strip()
+          mode = os.environ.get("MODE", "plan")
+          tier = os.environ.get("PLAN_TIER", "free")
+          image = os.environ["IMAGE"]
+          name = os.environ["SERVICE_NAME"]
+          if not key:
+              sys.exit("RENDER_API_KEY is empty")
+          if not pull:
+              sys.exit("GHCR_PULL_TOKEN is empty — the package is private and Render cannot pull "
+                       "it without a registry credential")
+
+          def call(method, path, body=None):
+              req = urllib.request.Request(
+                  f"{API}{path}", method=method,
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={"Authorization": f"Bearer {key}", "Accept": "application/json",
+                           **({"Content-Type": "application/json"} if body is not None else {})})
+              try:
+                  with urllib.request.urlopen(req, timeout=45) as r:
+                      raw = r.read()
+                      return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as e:
+                  detail = e.read().decode()[:300]
+                  raise SystemExit(f"Render API {e.code} on {method} {path}: {detail}")
+
+          owner = call("GET", "/owners")[0]["owner"]["id"]
+          print(f"  workspace     : {owner}")
+          print(f"  image         : {image.split('@')[0]}@<digest pinned>")
+          print(f"  region/plan   : {os.environ['REGION']} / {tier}")
+          print(f"  health check  : {os.environ['HEALTH_PATH']}")
+
+          # Settings the runtime needs. The image fixes the listening port at 8000, so PORT tells
+          # Render where to route rather than asking the application to change.
+          keys = ["GUARDIAN_DATABASE_URL", "GUARDIAN_APP_DATABASE_URL", "GUARDIAN_REDIS_URL",
+                  "GUARDIAN_JWT_SECRET", "GUARDIAN_ENCRYPTION_KEY", "GUARDIAN_BROKER_SEAL_KEY",
+                  "GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD"]
+          missing = [k for k in keys if not (os.environ.get(k) or "").strip()]
+          if missing:
+              sys.exit(f"missing required settings: {', '.join(missing)}")
+          env_vars = [{"key": k, "value": os.environ[k]} for k in keys]
+          env_vars += [{"key": "GUARDIAN_ENV", "value": "production"},
+                       {"key": "PORT", "value": "8000"}]
+          print(f"  env vars      : {len(env_vars)} (values not shown)")
+
+          if mode != "apply":
+              print("PLAN ONLY — nothing was created.")
+              raise SystemExit(0)
+
+          # 1) registry credential for the private package
+          creds = call("GET", "/registrycredentials?limit=100")
+          existing = next((c for c in creds
+                           if (c.get("registryCredential") or c).get("name") == "ghcr-guardian"), None)
+          if existing:
+              cred_id = (existing.get("registryCredential") or existing)["id"]
+              print("  registry cred : reusing ghcr-guardian")
+          else:
+              cred = call("POST", "/registrycredentials", {
+                  "name": "ghcr-guardian", "registry": "GITHUB",
+                  "username": os.environ["GHCR_USERNAME"], "authToken": pull, "ownerId": owner})
+              cred_id = cred["id"]
+              print("  registry cred : created ghcr-guardian")
+
+          # 2) the service itself, pinned by digest
+          svcs = call("GET", f"/services?name={name}&limit=20")
+          found = next((s["service"] for s in svcs if s["service"]["name"] == name), None)
+          if found:
+              print(f"  service       : exists ({found['id']}) — updating image and settings")
+              call("PATCH", f"/services/{found['id']}", {
+                  "image": {"ownerId": owner, "imagePath": image, "registryCredentialId": cred_id},
+                  "serviceDetails": {"envSpecificDetails": {"__typename": "ImageDetails"}}})
+              sid = found["id"]
+          else:
+              svc = call("POST", "/services", {
+                  "type": "web_service", "name": name, "ownerId": owner,
+                  "image": {"ownerId": owner, "imagePath": image, "registryCredentialId": cred_id},
+                  "envVars": env_vars,
+                  "serviceDetails": {
+                      "env": "image", "region": os.environ["REGION"], "plan": tier,
+                      "healthCheckPath": os.environ["HEALTH_PATH"],
+                      "numInstances": 1,
+                  }})
+              sid = (svc.get("service") or svc)["id"]
+              print(f"  service       : created {sid}")
+
+          detail = call("GET", f"/services/{sid}")
+          url = (detail.get("serviceDetails") or {}).get("url") or "(pending)"
+          print(f"  public url    : {url}")
+          print("\nNo secret value was printed. The image digest was passed through unchanged.")
+          PY
