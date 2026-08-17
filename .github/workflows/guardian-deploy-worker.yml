@@ -1,0 +1,206 @@
+# Build the scanner image and provision the Render background worker (WP-A1, WP-A2).
+#
+# This is the artifact plane: it analyses repositories, images, manifests and lockfiles, and never
+# sends a packet to a customer system. Only `external_binary` providers (nmap today) are forced onto
+# the uid+nftables backend, so this worker needs no kernel privileges and runs on an ordinary
+# container host. The network plane is a separate, still-blocked deployment.
+#
+# Without a worker consuming the queue, `enqueue_scan` publishes into Redis and nothing ever runs —
+# which is why every scan created through the API has stayed `queued` forever.
+name: Guardian Deploy Worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "plan = report only; apply = build, push and provision"
+        type: choice
+        required: true
+        default: plan
+        options: [plan, apply]
+      plan_tier:
+        description: "Render plan. starter is the cheapest background worker."
+        type: choice
+        required: true
+        default: starter
+        options: [starter, standard]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: guardian-deploy-worker
+  cancel-in-progress: false
+
+env:
+  SERVICE_NAME: guardian-worker
+  REGION: ohio
+  QUEUES: default
+
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The licence gate runs before the build, not after: an image that should not exist is
+      # cheaper to refuse than to build, push and then have to unpublish.
+      - name: Tool licence gate
+        run: python tools/check_tool_licenses.py --image infra/docker/Dockerfile.scanner
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: Build and push the scanner image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.scanner
+          push: ${{ inputs.mode == 'apply' }}
+          load: ${{ inputs.mode != 'apply' }}
+          tags: ghcr.io/y1x0/cyber-scanner:sha-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Prove the tools are present in the artifact before it is deployed. An engine whose binary is
+      # missing degrades to producing no findings, and an empty report reads exactly like a clean
+      # one — so this asserts the image can do the job rather than assuming it.
+      - name: Verify the toolchain inside the image
+        if: inputs.mode != 'apply'
+        run: |
+          IMG=ghcr.io/y1x0/cyber-scanner:sha-${{ github.sha }}
+          for tool in trivy gitleaks osv-scanner syft grype semgrep checkov git; do
+            printf '  %-14s ' "$tool"
+            docker run --rm --entrypoint sh "$IMG" -c "command -v $tool >/dev/null && $tool --version 2>&1 | head -1" \
+              || { echo "MISSING"; exit 1; }
+          done
+          echo "  engine health:"
+          docker run --rm --entrypoint python "$IMG" -c \
+            "from guardian_scanner.registry import health_report; r=health_report(); \
+print(f\"    ok={r['ok']} failed={r['failed']} degraded={r['degraded']} missing={r['missing_tools']}\")"
+
+      - name: Provision the Render background worker
+        if: inputs.mode == 'apply'
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_PULL_TOKEN }}
+          GHCR_USERNAME: ${{ github.repository_owner }}
+          PLAN_TIER: ${{ inputs.plan_tier }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
+          GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_JWT_SECRET: ${{ secrets.GUARDIAN_JWT_SECRET }}
+          GUARDIAN_ENCRYPTION_KEY: ${{ secrets.GUARDIAN_ENCRYPTION_KEY }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+          GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, time, urllib.error, urllib.request
+
+          API = "https://api.render.com/v1"
+          key = (os.environ.get("RENDER_API_KEY") or "").strip()
+          pull = (os.environ.get("GHCR_PULL_TOKEN") or "").strip()
+          digest = (os.environ.get("IMAGE_DIGEST") or "").strip()
+          name = os.environ["SERVICE_NAME"]
+          if not key:
+              sys.exit("RENDER_API_KEY is empty")
+          if not digest:
+              sys.exit("no image digest from the build step")
+          image = f"ghcr.io/y1x0/cyber-scanner@{digest}"
+
+          def call(method, path, body=None, tolerate=()):
+              req = urllib.request.Request(
+                  f"{API}{path}", method=method,
+                  data=json.dumps(body).encode() if body is not None else None,
+                  headers={"Authorization": f"Bearer {key}", "Accept": "application/json",
+                           **({"Content-Type": "application/json"} if body is not None else {})})
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as r:
+                      raw = r.read()
+                      return json.loads(raw) if raw else {}
+              except urllib.error.HTTPError as e:
+                  if e.code in tolerate:
+                      return {"_status": e.code}
+                  raise SystemExit(f"Render API {e.code} on {method} {path}: {e.read().decode()[:400]}")
+
+          owner = call("GET", "/owners")[0]["owner"]["id"]
+          print(f"  workspace : {owner}")
+          print(f"  image     : ghcr.io/y1x0/cyber-scanner@<digest pinned>")
+          print(f"  plan      : {os.environ['PLAN_TIER']} / {os.environ['REGION']}")
+
+          keys = ["GUARDIAN_DATABASE_URL", "GUARDIAN_APP_DATABASE_URL", "GUARDIAN_REDIS_URL",
+                  "GUARDIAN_JWT_SECRET", "GUARDIAN_ENCRYPTION_KEY", "GUARDIAN_BROKER_SEAL_KEY",
+                  "GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD"]
+          missing = [k for k in keys if not (os.environ.get(k) or "").strip()]
+          if missing:
+              sys.exit(f"missing required settings: {', '.join(missing)}")
+          env_vars = [{"key": k, "value": os.environ[k]} for k in keys]
+          env_vars.append({"key": "GUARDIAN_ENV", "value": "production"})
+          # Concurrency 1 is not a performance choice. The uid+nft backend refuses to run until it
+          # can prove a single allocator, and a worker that might later host the network plane must
+          # not be the reason isolation fails closed.
+          env_vars.append({"key": "CELERY_CONCURRENCY", "value": "1"})
+          print(f"  env vars  : {len(env_vars)} (values not shown)")
+
+          creds = call("GET", "/registrycredentials?limit=100")
+          existing = next((c for c in creds
+                           if (c.get("registryCredential") or c).get("name") == "ghcr-guardian"), None)
+          if existing:
+              cred_id = (existing.get("registryCredential") or existing)["id"]
+              print("  registry  : reusing ghcr-guardian")
+          else:
+              if not pull:
+                  sys.exit("GHCR_PULL_TOKEN is empty and no registry credential exists")
+              cred = call("POST", "/registrycredentials", {
+                  "name": "ghcr-guardian", "registry": "GITHUB",
+                  "username": os.environ["GHCR_USERNAME"], "authToken": pull, "ownerId": owner})
+              cred_id = cred["id"]
+              print("  registry  : created ghcr-guardian")
+
+          svcs = call("GET", f"/services?name={name}&limit=20")
+          found = next((s["service"] for s in svcs if s["service"]["name"] == name), None)
+          if found:
+              sid = found["id"]
+              print(f"  service   : exists ({sid}) — updating image")
+              call("PATCH", f"/services/{sid}", {
+                  "image": {"ownerId": owner, "imagePath": image,
+                            "registryCredentialId": cred_id}})
+          else:
+              svc = call("POST", "/services", {
+                  "type": "background_worker", "name": name, "ownerId": owner,
+                  "image": {"ownerId": owner, "imagePath": image,
+                            "registryCredentialId": cred_id},
+                  "envVars": env_vars,
+                  "serviceDetails": {
+                      "env": "image", "region": os.environ["REGION"],
+                      "plan": os.environ["PLAN_TIER"], "numInstances": 1,
+                  }})
+              sid = (svc.get("service") or svc)["id"]
+              print(f"  service   : created {sid}")
+
+          deploys = call("GET", f"/services/{sid}/deploys?limit=1")
+          did = ((deploys[0].get("deploy") or deploys[0])["id"]) if deploys else None
+          status = "unknown"
+          for _ in range(60):
+              time.sleep(15)
+              if did is None:
+                  break
+              d = call("GET", f"/services/{sid}/deploys/{did}")
+              status = (d.get("deploy") or d).get("status", "unknown")
+              if status in ("live", "build_failed", "update_failed", "canceled", "deactivated"):
+                  break
+              print(f"    ...{status}")
+          print(f"  deploy    : {status}")
+          print(f"  service id: {sid}")
+          if status not in ("live", "unknown"):
+              sys.exit(f"worker deploy ended as {status}")
+          print("\nNo secret value was printed.")
+          PY
