@@ -10,7 +10,7 @@ against a real system and the output was inspected — not that a test double re
 
 Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 0% operable.
 
-**Current: 757 tests passing** (+205), 5 work packages delivered, CI green.
+**Current: 793 tests passing** (+241), 6 work packages delivered, CI green.
 
 ---
 
@@ -18,8 +18,9 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
-| A1 | Worker fleet | `BLOCKED_EXTERNAL` | — | — | Needs a host granting `nftables` (CAP_NET_ADMIN) for the `uid_nft` execution backend, plus a paid worker plan. Render background workers have no free tier and cannot grant kernel egress control. See *Blockers*. |
-| A2 | Scanner runtime image | `NOT_STARTED` | — | — | Gated on A1's host decision (image target differs for Fly/K8s vs Render). |
+| A1 | Worker fleet — artifact plane | `IMPLEMENTED` | `TBD` | — | Needs only a container host; no kernel privileges. Deployment is a billing action, not an engineering one. |
+| A1b | Worker fleet — network plane | `BLOCKED_EXTERNAL` | — | — | Only `nmap_provider` and `nmap_service_provider` set `external_binary=True` and are forced onto `uid_nft`. That plane alone needs `CAP_NET_ADMIN`. |
+| A2 | Scanner runtime image | `IMPLEMENTED` | `TBD` | 28 (`test_tool_licenses`) + 8 (`test_engine_health`) | `Dockerfile.scanner` — trivy, gitleaks, osv-scanner, syft, grype, semgrep, checkov, all version-pinned and licence-cleared. Gate passes against the real image. Not built here (no usable docker daemon), so `IMPLEMENTED` not `DEPLOYED`. |
 | A3 | Scheduler + notifications | `NOT_STARTED` | — | — | |
 | A4 | Tool execution API | `NOT_STARTED` | — | — | |
 
@@ -97,15 +98,25 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 
 ## Blockers
 
-### BLOCKER-1 — Worker host (blocks A1, and transitively A2, B2, B3, B5, D1–D10)
+### BLOCKER-1 — Worker host — *scope corrected, previously overstated*
 
-The `uid_nft` execution backend confines an external binary's egress with kernel `nftables` rules
-and fails closed when `nft` is unavailable — by design, it never runs a binary unconfined. Render's
-platform does not grant `CAP_NET_ADMIN`, and its background workers have no free tier.
+An earlier version of this record claimed the worker host blocked A2, B2, B3, B5 and all of D1–D10.
+**That was wrong**, and the correction materially changes what is shippable.
 
-**Operator action:** choose a worker host. Fly.io Machines, Hetzner with Docker, or managed
-Kubernetes all satisfy the requirement. Engines that need no external binary (SAST, secrets, SCA,
-CSPM) can run on any host; only the tool plane needs the capability.
+`execute_tool` (`tools/execution.py:29`) forces the `uid_nft` backend only when a provider sets
+`external_binary = True`. Exactly two do: `nmap_provider` and `nmap_service_provider`. Every
+`ScanEngine` runs through the in-process sandbox instead (`tasks.py:62`), never touching `nft`.
+
+So the planes split, and only one is blocked:
+
+| Plane | Needs | Covers | Status |
+|-------|-------|--------|--------|
+| **Artifact** | any container host | SAST, SCA, secrets, container images, IaC, K8s manifests, CSPM — the whole code-security product | ready to deploy |
+| **Network** | `CAP_NET_ADMIN` + `nft` | nmap today; nuclei, ZAP, naabu when added | blocked |
+
+**Operator action:** a paid worker instance for the artifact plane (Render background worker,
+Fly.io Machine, or any container host — no privileges needed), and separately a privileged host
+when the network plane is built. The first is a billing decision alone.
 
 ### BLOCKER-2 — CT egress in this build environment (limits B1 live verification only)
 

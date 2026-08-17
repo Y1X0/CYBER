@@ -182,8 +182,16 @@ class SastEngine:
         return asset_kind in {"repo", "k8s_manifest", "container_image"}
 
     def health(self) -> EngineHealth:
-        semgrep = "present" if shutil.which("semgrep") else "absent"
-        return EngineHealth(ok=True, detail=f"builtin rules active; semgrep {semgrep}")
+        """The builtin rules always work, so the engine runs. Without semgrep it runs on 13 regex
+        rules instead of thousands, which is a real capability difference and must not be silent."""
+        has_semgrep = bool(shutil.which("semgrep"))
+        return EngineHealth(
+            ok=True,
+            detail=("builtin rules + semgrep" if has_semgrep
+                    else "builtin rules only — semgrep absent, coverage is a fraction of full"),
+            degraded=not has_semgrep,
+            missing=() if has_semgrep else ("semgrep",),
+        )
 
     def run(self, ctx: ScanContext) -> Iterable[RawFinding]:
         if ctx.inline_content is not None:

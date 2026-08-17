@@ -58,8 +58,18 @@ class ScanContext:
 
 @dataclass
 class EngineHealth:
+    """Readiness, with degradation reported separately from failure.
+
+    `ok` answers "can this engine run at all". `degraded` answers "is it running below its full
+    capability" — which is the state that actually hurts, because a scanner missing a tool returns
+    fewer findings and still reports success. An empty result and a clean result look identical to
+    a customer, so the difference has to be visible at the runtime level rather than inferred.
+    """
+
     ok: bool
     detail: str = ""
+    degraded: bool = False
+    missing: tuple[str, ...] = ()
 
 
 @runtime_checkable

@@ -1,0 +1,102 @@
+# Scanner runtime — the artifact plane (WP-A2).
+#
+# Guardian's execution model splits scanning in two, and only one half needs kernel privileges:
+#
+#   * ARTIFACT PLANE (this image) — analyses things the customer gives us: repositories, images,
+#     manifests, lockfiles, cloud config. It never sends a packet to a customer system, so it runs
+#     under the in-process sandbox and needs no CAP_NET_ADMIN. This is the entire code-security
+#     product, and it deploys anywhere a container runs.
+#
+#   * NETWORK PLANE (separate image) — nmap and friends touch customer infrastructure, are marked
+#     `external_binary`, and are FORCED onto the uid+nftables backend, which fails closed without
+#     `nft`. That plane needs a privileged host; this one does not.
+#
+# Keeping them apart is what lets the sellable half ship without waiting on a hosting decision, and
+# it also means the image that handles untrusted customer artifacts carries no network scanner at
+# all — a smaller blast radius on the plane most likely to meet hostile input.
+#
+# Every tool here is cleared in docs/TOOL_LICENSES.md and enforced by tools/check_tool_licenses.py.
+# Nothing AGPL, nothing requiring a commercial OEM licence.
+
+FROM python:3.12-slim AS tools
+
+# Pinned by version AND checksum. A scanner that silently changes version changes its findings, and
+# "the tool updated" is an answer no customer accepts for why a report differs between runs.
+ARG TRIVY_VERSION=0.58.1
+ARG GITLEAKS_VERSION=8.22.1
+ARG OSV_SCANNER_VERSION=1.9.2
+ARG SYFT_VERSION=1.19.0
+ARG GRYPE_VERSION=0.87.0
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /out
+
+# Trivy — Apache-2.0. Image CVEs, OS and language packages, IaC, SBOM.
+RUN curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+      -o trivy.tgz \
+    && tar -xzf trivy.tgz trivy && rm trivy.tgz
+
+# Gitleaks — MIT. Git history secret scanning (the AGPL alternative is deliberately not used).
+RUN curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+      -o gitleaks.tgz \
+    && tar -xzf gitleaks.tgz gitleaks && rm gitleaks.tgz
+
+# OSV-Scanner — Apache-2.0. Lockfile SCA with correct range semantics.
+RUN curl -fsSL "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64" \
+      -o osv-scanner && chmod +x osv-scanner
+
+# Syft + Grype — Apache-2.0. SBOM generation and matching, for customer-facing SBOM deliverables.
+RUN curl -fsSL "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz" \
+      -o syft.tgz \
+    && tar -xzf syft.tgz syft && rm syft.tgz \
+    && curl -fsSL "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz" \
+      -o grype.tgz \
+    && tar -xzf grype.tgz grype && rm grype.tgz
+
+
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+# git: repository assets are cloned WITH history, because a secret deleted in a later commit is
+# still readable and the working tree alone shows nothing (WP-D5).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=tools /out/trivy /out/gitleaks /out/osv-scanner /out/syft /out/grype /usr/local/bin/
+
+# Semgrep (LGPL-2.1, invoked as a separate process) and Checkov (Apache-2.0) install as Python
+# packages. Both are already wrapped by existing engines; the wrappers no-op when absent, which is
+# exactly why the deployed image never produced their findings before.
+RUN pip install --no-cache-dir "semgrep==1.101.0" "checkov==3.2.334"
+
+WORKDIR /app
+
+COPY pyproject.toml README.md alembic.ini ./
+COPY packages ./packages
+COPY services ./services
+COPY workers ./workers
+
+RUN pip install --upgrade pip "setuptools>=78.1.1" && pip install -e . \
+    && vendor="$(python -c 'import os, pip._vendor as v; print(os.path.dirname(v.__file__))')" \
+    && rm -f "$vendor/bom.cdx.json" "$vendor/vendor.txt"
+
+# Unprivileged. This plane is deliberately incapable of the kernel egress control the network plane
+# needs — it has no business having it, and not having it is a property worth preserving.
+RUN useradd --create-home --uid 10001 guardian && chown -R guardian:guardian /app
+USER guardian
+
+# Health: every tool reports its version, so a broken image fails at start rather than at scan time
+# by silently producing no findings — the failure mode that looks exactly like "you are secure".
+HEALTHCHECK --interval=60s --timeout=20s --start-period=10s --retries=3 \
+    CMD python -c "from guardian_scanner.registry import health_report; import sys; \
+sys.exit(0 if health_report()['ok'] else 1)"
+
+CMD ["celery", "-A", "guardian_scanner.celery_app.celery_app", "worker", \
+     "--queues", "default", "--concurrency", "2", "--loglevel", "INFO"]

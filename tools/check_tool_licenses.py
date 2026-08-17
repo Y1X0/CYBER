@@ -33,7 +33,25 @@ _ROW = re.compile(r"^\|\s*\*{0,2}([^|*]+?)\*{0,2}\s*\|\s*([^|]*?)\s*\|\s*([^|]*?
 _INSTALL = re.compile(
     r"(?:apt-get\s+install|apk\s+add|go\s+install|pip\s+install|npm\s+i(?:nstall)?)\s+([^\n&|]+)"
 )
-_BINARY_HINT = re.compile(r"(?:^|/)([a-z0-9][a-z0-9_-]{2,})(?:@|$)")
+# A package token can arrive as `name`, `"name==1.2.3"`, `name@v1.2.3`, `owner/repo@v1`, or
+# `name=1.2-3` (apk/apt pins). Anchoring on "ends with @ or end-of-string" missed every quoted
+# pip pin — semgrep and checkov walked straight past the gate, which is the false negative this
+# tool exists to prevent. Strip decoration first, then take the package name.
+_BINARY_HINT = re.compile(r"^([a-z0-9][a-z0-9_.+-]{1,})$")
+
+
+def _package_name(token: str) -> str | None:
+    """The package a token installs, or None when the token is not a package."""
+    token = token.strip().strip("\"'").lower()
+    if not token or token.startswith("-"):
+        return None
+    for sep in ("==", ">=", "<=", "~=", "@", "="):
+        if sep in token:
+            token = token.split(sep, 1)[0]
+            break
+    token = token.rsplit("/", 1)[-1]          # owner/repo → repo
+    m = _BINARY_HINT.match(token)
+    return m.group(1) if m else None
 
 
 class Entry:
@@ -72,12 +90,9 @@ def tools_in_image(path: Path) -> set[str]:
     found: set[str] = set()
     for match in _INSTALL.finditer(path.read_text(encoding="utf-8")):
         for token in match.group(1).split():
-            token = token.strip().strip("\\").lower()
-            if not token or token.startswith("-"):
-                continue
-            hint = _BINARY_HINT.search(token)
-            if hint:
-                found.add(hint.group(1))
+            name = _package_name(token.strip("\\"))
+            if name:
+                found.add(name)
     return found
 
 

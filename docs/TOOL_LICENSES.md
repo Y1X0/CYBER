@@ -21,6 +21,12 @@ cannot simply be bundled.
 
 | Tool | Version | Licence | State | Notes |
 |------|---------|---------|-------|-------|
+| **Base runtime** | | | | |
+| git | 2.39+ | GPL-2.0 | `APPROVED_SEPARATE_PROCESS` | Invoked as a subprocess to clone assets; never linked. |
+| curl | 8.x | curl (MIT-like) | `APPROVED` | Build stage only. |
+| ca-certificates | — | MPL-2.0 | `APPROVED` | Trust anchors. |
+| pip | 24.x | MIT | `APPROVED` | Build stage only. |
+| setuptools | 78+ | MIT | `APPROVED` | Build stage only. |
 | **Discovery** | | | | |
 | subfinder | 2.6.x | MIT | `APPROVED` | Passive subdomain enumeration. |
 | dnsx | 1.2.x | MIT | `APPROVED` | Bulk DNS resolution. |
@@ -45,22 +51,24 @@ cannot simply be bundled.
 | sqlmap | 1.8.x | GPL-2.0 | `APPROVED_SEPARATE_PROCESS` | Invoked as a subprocess, never linked. |
 | Nikto | 2.5.x | GPL-2.0 | `APPROVED_SEPARATE_PROCESS` | Largely superseded by nuclei. |
 | **Code / dependencies** | | | | |
-| Semgrep OSS | 1.x | LGPL-2.1 | `APPROVED_SEPARATE_PROCESS` | Engine is LGPL; the registry rules have their own terms. Review ruleset licensing separately from the binary. |
-| Opengrep | 1.x | LGPL-2.1 | `APPROVED_SEPARATE_PROCESS` | Community fork created after Semgrep's licence change. Evaluate as the primary. |
+| semgrep | 1.101.0 | LGPL-2.1 | `APPROVED_SEPARATE_PROCESS` | Engine is LGPL; the registry rules have their own terms. Review ruleset licensing separately from the binary. |
+| opengrep | 1.x | LGPL-2.1 | `APPROVED_SEPARATE_PROCESS` | Community fork created after Semgrep's licence change. Evaluate as the primary. |
 | CodeQL | 2.x | Proprietary | `PROHIBITED` | Free only for open-source projects. Commercial use requires a GitHub licence. |
-| OSV-Scanner | 1.9.x | Apache-2.0 | `APPROVED` | |
-| Trivy | 0.5x | Apache-2.0 | `APPROVED` | Images, OS packages, IaC, secrets, SBOM in one binary. |
-| Syft / Grype | 1.x | Apache-2.0 | `APPROVED` | SBOM and matching. |
-| Gitleaks | 8.x | MIT | `APPROVED` | Git history secret scanning. |
+| osv-scanner | 1.9.2 | Apache-2.0 | `APPROVED` | |
+| trivy | 0.58.1 | Apache-2.0 | `APPROVED` | Images, OS packages, IaC, secrets, SBOM in one binary. |
+| syft | 1.19.0 | Apache-2.0 | `APPROVED` | SBOM generation. |
+| grype | 0.87.0 | Apache-2.0 | `APPROVED` | SBOM vulnerability matching. |
+| gitleaks | 8.22.1 | MIT | `APPROVED` | Git history secret scanning. |
 | TruffleHog | 3.x | AGPL-3.0 | `PROHIBITED` | Credential verification is valuable, but AGPL §13 applies to SaaS. Use Gitleaks plus a purpose-built verifier. |
 | detect-secrets | 1.5.x | Apache-2.0 | `APPROVED` | Permissive alternative with a baseline model. |
-| Bandit / gosec | — | Apache-2.0 / Apache-2.0 | `APPROVED` | Language-native SAST. |
+| bandit | 1.8.x | Apache-2.0 | `APPROVED` | Python-native SAST. |
+| gosec | 2.x | Apache-2.0 | `APPROVED` | Go-native SAST. |
 | **Cloud / containers** | | | | |
 | Prowler | 4.x | Apache-2.0 | `APPROVED` | 500+ checks with CIS/NIST/PCI mappings. |
 | ScoutSuite | 5.x | GPL-2.0 | `APPROVED_SEPARATE_PROCESS` | Second opinion; not required. |
 | Kubescape | 3.x | Apache-2.0 | `APPROVED` | Includes RBAC analysis. |
 | kube-bench | 0.7.x | Apache-2.0 | `APPROVED` | |
-| Checkov | 3.x | Apache-2.0 | `APPROVED` | IaC. |
+| checkov | 3.2.334 | Apache-2.0 | `APPROVED` | IaC. |
 | KICS | 2.x | Apache-2.0 | `APPROVED` | IaC. |
 | PMapper | 1.1.x | Apache-2.0 | `APPROVED` | IAM privilege-escalation paths. |
 | cartography | 0.9x | Apache-2.0 | `APPROVED` | Cloud asset graph. |
@@ -80,6 +88,13 @@ Feed content carries its own terms, separate from any tool licence.
 | EPSS (FIRST) | Free for commercial use | `APPROVED` | Attribution requested. |
 | MITRE CVE / CWE / CAPEC | MITRE terms | `APPROVED` | Attribution required. |
 | ExploitDB | GPL-2.0 | `LEGAL_REVIEW` | Content licence differs from tool licences; review before redistributing exploit text to customers. |
+
+## Version pinning
+
+Versions here are the ones the runtime image installs. A scanner that silently changes version
+changes its findings, and "the tool updated" is not an answer a customer accepts for why this
+month's report differs from last month's. Bumping a tool is a deliberate commit that updates this
+table and the image together.
 
 ## Attribution
 
