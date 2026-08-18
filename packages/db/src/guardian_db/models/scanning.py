@@ -93,6 +93,10 @@ class Finding(Base, TimestampMixin):
     cvss_base: Mapped[float | None] = mapped_column(Numeric(3, 1), nullable=True)
     epss_score: Mapped[float | None] = mapped_column(Numeric, nullable=True)
     kev: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Exploit intelligence carried onto the finding (WP-C4), so a report ranks without re-reading
+    # the KB and a finding keeps the maturity it was actually scored with.
+    exploit_maturity: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    ransomware: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     severity: Mapped[str] = mapped_column(String(10), nullable=False)
     # Risk Engine output: 0–100 business-risk score + the transparent rationale behind it.

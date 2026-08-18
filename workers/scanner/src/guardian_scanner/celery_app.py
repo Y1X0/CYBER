@@ -95,6 +95,7 @@ celery_app.conf.update(
         "guardian.sync_osv": {"queue": "default"},
         "guardian.sync_kev": {"queue": "default"},
         "guardian.sync_epss": {"queue": "default"},
+        "guardian.sync_exploits": {"queue": "default"},
         "guardian.match_service_versions": {"queue": "default"},
     },
     # Recurring work. Beat fires these; per-tenant cadence lives in the `schedules` table, because

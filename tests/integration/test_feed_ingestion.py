@@ -384,3 +384,145 @@ def test_the_original_spelling_is_kept_for_display(marker):
     assert entry["ecosystem"] == "pypi"
     assert entry["ecosystem_display"] == "PyPI"
     assert entry["package_display"] == "Django"
+
+
+# ── exploit intelligence (WP-C4) ──────────────────────────────────────────────────────────────────
+def _exploit(cve, source, external_id, maturity, verified=True):
+    from guardian_clients.feeds import ExploitRecord
+
+    return ExploitRecord(cve_id=cve, source=source, external_id=external_id,
+                         title="x", reference_url="https://example/x",
+                         maturity=maturity, verified=verified)
+
+
+def test_exploit_records_are_stored_and_promote_the_advisory(marker):
+    """The strongest exploit per CVE lands on the advisory, so the risk engine reads one field
+    instead of joining per finding."""
+    from guardian_db.session import session_scope
+    from guardian_scanner import intel
+
+    cve = _cve(f"{marker}60")
+    intel.run_source(f"nvd-{marker}", lambda _s, _u: [_record(cve, cvss_base=7.5)])
+
+    with session_scope() as db:
+        created, updated = intel.upsert_exploits(db, [
+            _exploit(cve, "exploitdb", "EDB-1", "poc", verified=False),
+            _exploit(cve, "metasploit", "exploit/x/y", "high"),
+        ])
+        assert (created, updated) == (2, 0)
+        db.flush()
+        assert intel.propagate_exploit_maturity(db, [cve]) == 1
+
+    assert _vuln(cve).exploit_maturity == "high"
+
+
+def test_a_proof_of_concept_alone_leaves_the_advisory_at_poc(marker):
+    from guardian_db.session import session_scope
+    from guardian_scanner import intel
+
+    cve = _cve(f"{marker}61")
+    intel.run_source(f"nvd-{marker}", lambda _s, _u: [_record(cve)])
+    with session_scope() as db:
+        intel.upsert_exploits(db, [_exploit(cve, "exploitdb", "EDB-2", "poc", verified=False)])
+        db.flush()
+        intel.propagate_exploit_maturity(db, [cve])
+    assert _vuln(cve).exploit_maturity == "poc"
+
+
+def test_re_ingesting_the_same_exploit_updates_rather_than_duplicating(marker):
+    from guardian_db.models import Exploit
+    from guardian_db.session import session_scope
+    from guardian_scanner import intel
+
+    cve = _cve(f"{marker}62")
+    intel.run_source(f"nvd-{marker}", lambda _s, _u: [_record(cve)])
+    with session_scope() as db:
+        intel.upsert_exploits(db, [_exploit(cve, "exploitdb", "EDB-3", "poc", verified=False)])
+    with session_scope() as db:
+        created, updated = intel.upsert_exploits(
+            db, [_exploit(cve, "exploitdb", "EDB-3", "functional", verified=True)]
+        )
+        assert (created, updated) == (0, 1)
+    with session_scope() as db:
+        rows = db.query(Exploit).filter(Exploit.cve_id == cve).all()
+    assert len(rows) == 1
+    assert rows[0].maturity == "functional"
+    assert rows[0].verified is True
+
+
+def test_ransomware_use_marks_the_advisory_and_forces_weaponized(marker):
+    """Something used in a live ransomware campaign is weaponized whatever an index happens to
+    list, and CISA tracks that separately from KEV membership."""
+    from guardian_clients.feeds import KevRecord
+    from guardian_db.session import session_scope
+    from guardian_scanner import intel
+
+    cve = _cve(f"{marker}63")
+    intel.run_source(f"nvd-{marker}", lambda _s, _u: [_record(cve)])
+    with session_scope() as db:
+        assert intel.apply_kev_records(db, [KevRecord(cve_id=cve, ransomware=True)]) == 1
+
+    row = _vuln(cve)
+    assert row.kev is True
+    assert row.ransomware is True
+    assert row.exploit_maturity == "high"
+
+
+def test_kev_without_ransomware_does_not_claim_weaponization(marker):
+    from guardian_clients.feeds import KevRecord
+    from guardian_db.session import session_scope
+    from guardian_scanner import intel
+
+    cve = _cve(f"{marker}64")
+    intel.run_source(f"nvd-{marker}", lambda _s, _u: [_record(cve)])
+    with session_scope() as db:
+        intel.apply_kev_records(db, [KevRecord(cve_id=cve, ransomware=False)])
+    row = _vuln(cve)
+    assert row.kev is True
+    assert row.ransomware is False
+    assert row.exploit_maturity is None
+
+
+def test_an_index_cannot_walk_back_a_ransomware_promotion(marker):
+    from guardian_clients.feeds import KevRecord
+    from guardian_db.session import session_scope
+    from guardian_scanner import intel
+
+    cve = _cve(f"{marker}65")
+    intel.run_source(f"nvd-{marker}", lambda _s, _u: [_record(cve)])
+    with session_scope() as db:
+        intel.apply_kev_records(db, [KevRecord(cve_id=cve, ransomware=True)])
+        intel.upsert_exploits(db, [_exploit(cve, "exploitdb", "EDB-4", "poc", verified=False)])
+        db.flush()
+        intel.propagate_exploit_maturity(db, [cve])
+    assert _vuln(cve).exploit_maturity == "high"
+
+
+def test_exploit_maturity_reaches_a_service_finding(marker):
+    """End to end: an exploit index changes how a discovered service's finding is ranked."""
+    from guardian_db.session import session_scope
+    from guardian_scanner import intel
+    from guardian_scanner.cpe_match import CpeVulnMatcher, ServiceIdentity
+
+    cve = _cve(f"{marker}66")
+    product = f"widget-{marker}"
+    record = _record(cve, cvss_base=7.5, severity="high")
+    record.cpe_configurations = [{"vendor": "acme", "product": product, "version": "*",
+                                  "version_end_excluding": "2.0"}]
+    intel.run_source(f"nvd-{marker}", lambda _s, _u: [record])
+
+    with session_scope() as db:
+        before = CpeVulnMatcher(db).match_identity(
+            ServiceIdentity(vendor="acme", product=product, version="1.0")
+        )
+        assert [m.exploit_maturity for m in before] == [None]
+
+        intel.upsert_exploits(db, [_exploit(cve, "metasploit", "exploit/a/b", "high")])
+        db.flush()
+        intel.propagate_exploit_maturity(db, [cve])
+
+    with session_scope() as db:
+        after = CpeVulnMatcher(db).match_identity(
+            ServiceIdentity(vendor="acme", product=product, version="1.0")
+        )
+    assert [m.exploit_maturity for m in after] == ["high"]

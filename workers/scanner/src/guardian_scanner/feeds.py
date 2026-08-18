@@ -23,7 +23,15 @@ from __future__ import annotations
 import datetime as dt
 import os
 
-from guardian_clients.feeds import EpssClient, FeedError, KevClient, NvdClient, OsvClient
+from guardian_clients.feeds import (
+    EpssClient,
+    ExploitDbClient,
+    FeedError,
+    KevClient,
+    MetasploitClient,
+    NvdClient,
+    OsvClient,
+)
 from guardian_common.logging import get_logger
 from guardian_db.models import FeedSync
 from guardian_db.session import session_scope
@@ -88,8 +96,38 @@ def sync_osv(ecosystems: tuple[str, ...] = OSV_ECOSYSTEMS) -> dict:
 
 @celery_app.task(name="guardian.sync_kev")
 def sync_kev() -> dict:
-    """Flag advisories CISA reports as actively exploited."""
-    return _enrich("kev", lambda session: intel.apply_kev(session, KevClient().fetch()))
+    """Flag advisories CISA reports as actively exploited, and those used by ransomware."""
+    return _enrich("kev", lambda session: intel.apply_kev_records(session, KevClient().fetch()))
+
+
+@celery_app.task(name="guardian.sync_exploits")
+def sync_exploits() -> dict:
+    """Record where working exploit code exists, and how mature it is (WP-C4).
+
+    Two indexes, each its own source so one being unreachable does not hide the other. Only the
+    *existence* of an exploit is stored; nothing here downloads an exploit body.
+    """
+    results = []
+    for source, client in (("exploitdb", ExploitDbClient()), ("metasploit", MetasploitClient())):
+        results.append(_enrich(
+            source,
+            lambda session, _c=client: _ingest_exploits(session, _c.fetch()),
+        ))
+    failed = [r for r in results if r["status"] != "completed"]
+    return {"sources": results, "failed": len(failed),
+            "status": "completed" if not failed else "partial"}
+
+
+def _ingest_exploits(session, records) -> int:  # noqa: ANN001
+    created, updated = intel.upsert_exploits(session, records)
+    session.flush()
+    # Fold the strongest exploit per CVE onto the advisory, so the risk engine reads one field
+    # rather than joining per finding.
+    promoted = intel.propagate_exploit_maturity(
+        session, {record.cve_id for record in records}
+    )
+    log.info("exploit_ingest", created=created, updated=updated, advisories_promoted=promoted)
+    return created + updated
 
 
 @celery_app.task(name="guardian.sync_epss")
@@ -135,7 +173,10 @@ def sync_feeds() -> dict:
     nothing and reports success — which is exactly how the previous implementation could report a
     healthy sync over an empty knowledge base.
     """
-    results = [sync_nvd(), sync_osv(), sync_kev(), sync_epss()]
+    # Ingestion first, then the enrichment that marks what was ingested. Exploits before KEV so
+    # that KEV's ransomware flag has the last word on maturity — a vulnerability in a live
+    # ransomware campaign is weaponized whatever an index happens to list.
+    results = [sync_nvd(), sync_osv(), sync_exploits(), sync_kev(), sync_epss()]
     failed = [r for r in results if r.get("status") not in {"completed", None}]
     status = "completed" if not failed else ("failed" if len(failed) == len(results) else "partial")
     log.info("feed_sync_all", status=status, failed=len(failed))

@@ -169,6 +169,8 @@ class CpeVulnMatcher:
                 float(vulnerability.epss_score) if vulnerability.epss_score is not None else None
             ),
             kev=bool(vulnerability.kev),
+            exploit_maturity=vulnerability.exploit_maturity,
+            ransomware=bool(vulnerability.ransomware),
             cwe_ids=list(vulnerability.cwe_ids or []),
             references=list(vulnerability.references or []),
         )

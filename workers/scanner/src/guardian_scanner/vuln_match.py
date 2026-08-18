@@ -76,6 +76,8 @@ class KbVulnMatcher:
                     cvss_base=float(vuln.cvss_base) if vuln.cvss_base is not None else None,
                     epss_score=float(vuln.epss_score) if vuln.epss_score is not None else None,
                     kev=vuln.kev,
+                    exploit_maturity=vuln.exploit_maturity,
+                    ransomware=bool(vuln.ransomware),
                     cwe_ids=list(vuln.cwe_ids or []),
                     references=list(vuln.references or []),
                 )
@@ -157,6 +159,16 @@ class CompositeVulnMatcher:
         return list(merged.values())
 
 
+def _stronger_maturity(a: str | None, b: str | None) -> str | None:
+    from guardian_clients.feeds.exploits import rank  # noqa: PLC0415 - avoids an import cycle
+
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a if rank(a) >= rank(b) else b
+
+
 def _merge(a: VulnMatch, b: VulnMatch) -> VulnMatch:
     """Prefer present values over absent ones, and the more severe assessment over the milder."""
     cvss = a.cvss_base if a.cvss_base is not None else b.cvss_base
@@ -169,6 +181,9 @@ def _merge(a: VulnMatch, b: VulnMatch) -> VulnMatch:
         cvss_base=cvss,
         epss_score=a.epss_score if a.epss_score is not None else b.epss_score,
         kev=a.kev or b.kev,
+        # The strongest exploit either source knows about, not whichever source was asked first.
+        exploit_maturity=_stronger_maturity(a.exploit_maturity, b.exploit_maturity),
+        ransomware=a.ransomware or b.ransomware,
         cwe_ids=sorted(set(a.cwe_ids) | set(b.cwe_ids)),
         references=list(dict.fromkeys([*a.references, *b.references])),
     )

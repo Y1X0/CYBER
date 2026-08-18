@@ -34,6 +34,15 @@ _SEVERITY_BASE_SCORE = {
     Severity.INFO: 5,
 }
 
+# Exploit code maturity, on the CVSS temporal scale (WP-C4). This is the signal a remediation
+# queue is actually ordered by: a 9.8 nobody has written an exploit for and a 7.5 with a working
+# Metasploit module are not the same morning's work.
+_MATURITY_WEIGHT = {"high": 10, "functional": 6, "poc": 2, "unproven": 0}
+# The most any finding can earn from signals: KEV + ransomware + weaponized exploit + high EPSS +
+# public exposure + critical asset + critical business impact.
+_MAX_SIGNAL_POINTS = 8 + 8 + 10 + 6 + 6 + 12 + 12
+_MATURITY_BUMP = {"high": 1, "functional": 1}
+
 _CRITICALITY_WEIGHT = {"critical": 12, "high": 8, "medium": 4, "low": 0}
 _BUSINESS_IMPACT_WEIGHT = {"critical": 12, "high": 8, "medium": 4, "low": 0, "none": 0}
 
@@ -46,6 +55,11 @@ class ScoreInputs:
     cvss_base: float | None = None  # 0.0–10.0
     epss_score: float | None = None  # 0.0–1.0 exploit probability
     kev: bool = False  # CISA Known-Exploited flag
+    # "high" | "functional" | "poc" | "unproven" — how available working exploit code is (WP-C4).
+    exploit_maturity: str | None = None
+    # CISA records this separately from KEV membership: a vulnerability used in ransomware
+    # campaigns has a different response deadline from one merely seen being exploited.
+    ransomware: bool = False
     exposure: str = "internal"  # "public" | "internal" | "unknown"
     asset_criticality: str = "medium"  # low | medium | high | critical
     # Business context: how damaging exploitation would be to the business (data, revenue, trust).
@@ -80,7 +94,8 @@ def score_severity(inp: ScoreInputs) -> Severity:
       1. Start from CVSS band if present, else the engine's base severity.
       2. KEV (actively exploited) → floor at HIGH, and bump one step.
       3. High EPSS (>=0.5) → bump one step.
-      4. Public exposure + high/critical asset criticality → bump one step.
+      4. Working exploit code (functional or better) → bump one step.
+      5. Public exposure + high/critical asset criticality → bump one step.
     Bumps are capped at CRITICAL.
     """
     sev = _from_cvss(inp.cvss_base) if inp.cvss_base is not None else inp.base_severity
@@ -92,6 +107,10 @@ def score_severity(inp: ScoreInputs) -> Severity:
 
     if inp.epss_score is not None and inp.epss_score >= 0.5:
         sev = _bump(sev, 1)
+
+    # A proof of concept does not bump: it says someone demonstrated the bug, not that it is
+    # usable. Treating a PoC like a working exploit is how every advisory becomes critical.
+    sev = _bump(sev, _MATURITY_BUMP.get(inp.exploit_maturity or "", 0))
 
     if inp.exposure == "public":
         sev = _bump(sev, _CRIT_BUMP.get(inp.asset_criticality, 0))
@@ -107,39 +126,60 @@ def assess(inp: ScoreInputs) -> RiskAssessment:
     core of turning a CVSS figure into a *business* risk (doc 07 §1, user's Risk Engine idea).
     """
     severity = score_severity(inp)
-    rationale: list[str] = []
-
-    score = _SEVERITY_BASE_SCORE[severity]
-    rationale.append(f"Base {score} from {severity.value} severity band")
+    signals: list[tuple[int, str]] = []
 
     if inp.kev:
-        score += 8
-        rationale.append("+8 CISA KEV — actively exploited in the wild")
+        signals.append((8, "CISA KEV — actively exploited in the wild"))
+
+    if inp.ransomware:
+        signals.append((8, "used in known ransomware campaigns"))
+
+    maturity_w = _MATURITY_WEIGHT.get(inp.exploit_maturity or "", 0)
+    if maturity_w:
+        signals.append((maturity_w, {
+            "high": "weaponized, reliable exploit code is public",
+            "functional": "working exploit code is public",
+            "poc": "a proof of concept is public",
+        }[inp.exploit_maturity]))
 
     if inp.epss_score is not None:
         if inp.epss_score >= 0.5:
-            score += 6
-            rationale.append(f"+6 high EPSS ({inp.epss_score:.2f} exploit probability)")
+            signals.append((6, f"high EPSS ({inp.epss_score:.2f} exploit probability)"))
         elif inp.epss_score >= 0.1:
-            score += 3
-            rationale.append(f"+3 moderate EPSS ({inp.epss_score:.2f})")
+            signals.append((3, f"moderate EPSS ({inp.epss_score:.2f})"))
 
     if inp.exposure == "public":
-        score += 6
-        rationale.append("+6 publicly exposed asset")
+        signals.append((6, "publicly exposed asset"))
     elif inp.exposure == "unknown":
-        score += 2
-        rationale.append("+2 exposure unknown (conservative)")
+        signals.append((2, "exposure unknown (conservative)"))
 
     crit_w = _CRITICALITY_WEIGHT.get(inp.asset_criticality, 0)
     if crit_w:
-        score += crit_w
-        rationale.append(f"+{crit_w} asset criticality: {inp.asset_criticality}")
+        signals.append((crit_w, f"asset criticality: {inp.asset_criticality}"))
 
     bi_w = _BUSINESS_IMPACT_WEIGHT.get(inp.business_impact, 0)
     if bi_w:
-        score += bi_w
-        rationale.append(f"+{bi_w} business impact: {inp.business_impact}")
+        signals.append((bi_w, f"business impact: {inp.business_impact}"))
 
+    # Signals are scaled into the headroom above the band's floor rather than added raw.
+    #
+    # Added raw, an ordinary public finding on a high-criticality asset already exceeded 100 — the
+    # weights sum to 62 above a critical floor of 90 — so it saturated before any exploit signal
+    # applied, and a weaponized critical scored exactly the same as a theoretical one. A scale whose
+    # top is reached by the common case cannot rank anything, which is the opposite of what a
+    # remediation queue needs.
+    floor = _SEVERITY_BASE_SCORE[severity]
+    earned = sum(weight for weight, _ in signals)
+    headroom = 100 - floor
+    bonus = round(headroom * min(earned, _MAX_SIGNAL_POINTS) / _MAX_SIGNAL_POINTS)
+
+    rationale = [f"Base {floor} from {severity.value} severity band"]
+    rationale += [f"signal +{weight}: {text}" for weight, text in signals]
+    rationale.append(
+        f"Signals {earned}/{_MAX_SIGNAL_POINTS} of maximum → +{bonus} of {headroom} available "
+        f"above the {severity.value} floor"
+    )
+
+    score = max(0, min(100, floor + bonus))
     score = max(0, min(100, score))
     return RiskAssessment(severity=severity, score=score, rationale=rationale)

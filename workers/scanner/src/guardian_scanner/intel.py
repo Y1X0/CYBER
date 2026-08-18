@@ -26,7 +26,7 @@ from collections.abc import Callable, Iterable
 
 from guardian_clients.feeds import FeedError, NormalizedVuln
 from guardian_common.logging import get_logger
-from guardian_db.models import FeedState, FeedSync, Vulnerability
+from guardian_db.models import Exploit, FeedState, FeedSync, Vulnerability
 from guardian_db.session import session_scope
 from sqlalchemy import select
 
@@ -279,5 +279,123 @@ def apply_epss(session, scores: dict[str, float]) -> int:  # noqa: ANN001
             continue
         if row.epss_score is None or abs(float(row.epss_score) - score) > 1e-9:
             row.epss_score = score
+            changed += 1
+    return changed
+
+
+# ── exploit intelligence (WP-C4) ──────────────────────────────────────────────────────────────────
+def apply_kev_records(session, kev_records) -> int:  # noqa: ANN001
+    """Mark KEV membership *and* ransomware use. Returns how many advisories changed.
+
+    Ransomware use is tracked apart from KEV membership because CISA publishes it apart: a
+    vulnerability used in ransomware campaigns carries a different response deadline from one
+    merely observed being exploited, and collapsing the two loses that.
+    """
+    by_id = {record.cve_id: record for record in kev_records}
+    if not by_id:
+        raise FeedError("refusing to apply an empty KEV catalogue")
+
+    changed = 0
+    rows = session.execute(
+        select(Vulnerability).where(Vulnerability.external_id.in_(list(by_id)))
+    ).scalars().all()
+    for row in rows:
+        record = by_id[row.external_id]
+        touched = False
+        if not row.kev:
+            row.kev = True
+            touched = True
+        if record.ransomware and not row.ransomware:
+            row.ransomware = True
+            touched = True
+        if record.ransomware and rank_maturity(row.exploit_maturity) < rank_maturity("high"):
+            # Something used in a live ransomware campaign is by definition weaponized and
+            # reliable, whatever any exploit index happens to list.
+            row.exploit_maturity = "high"
+            touched = True
+        changed += int(touched)
+    return changed
+
+
+def rank_maturity(maturity: str | None) -> int:
+    from guardian_clients.feeds.exploits import rank  # noqa: PLC0415 - avoids a cycle at import
+
+    return rank(maturity or "unproven")
+
+
+def upsert_exploits(session, records) -> tuple[int, int]:  # noqa: ANN001
+    """Record the existence of exploit code. Returns (created, updated).
+
+    Never the code itself — see `models.knowledge.Exploit`. What is stored is a source, an
+    identifier, a title and a URL, which is enough to rank a finding and to let an operator go and
+    read the thing.
+    """
+    created = updated = 0
+    for record in records:
+        if not record.cve_id or not record.external_id:
+            continue
+        existing = session.execute(
+            select(Exploit).where(
+                Exploit.source == record.source,
+                Exploit.external_id == record.external_id,
+                Exploit.cve_id == record.cve_id,
+            )
+        ).scalar_one_or_none()
+
+        if existing is None:
+            session.add(Exploit(
+                cve_id=record.cve_id, source=record.source, external_id=record.external_id,
+                title=record.title or "", reference_url=record.reference_url or None,
+                maturity=record.maturity, verified=record.verified,
+                published_at=_as_datetime(record.published_at),
+            ))
+            created += 1
+            continue
+
+        if (existing.maturity != record.maturity or existing.verified != record.verified
+                or existing.title != (record.title or "")):
+            existing.maturity = record.maturity
+            existing.verified = record.verified
+            existing.title = record.title or ""
+            existing.reference_url = record.reference_url or existing.reference_url
+            updated += 1
+    return created, updated
+
+
+def _as_datetime(value):  # noqa: ANN001, ANN202
+    if value is None or isinstance(value, dt.datetime):
+        return value
+    return dt.datetime.combine(value, dt.time.min, tzinfo=dt.UTC)
+
+
+def propagate_exploit_maturity(session, cve_ids=None) -> int:  # noqa: ANN001
+    """Fold the strongest known exploit for each CVE onto its advisory. Returns how many changed.
+
+    Denormalized deliberately: the risk engine reads this for every scored finding, and a join per
+    finding would put an exploit lookup in the hot path of every report. `strongest` wins because a
+    single working exploit outranks ten proofs of concept — the queue is ordered by the easiest way
+    in, not by how many ways there are.
+    """
+    from guardian_clients.feeds.exploits import strongest  # noqa: PLC0415 - avoids a cycle
+
+    query = select(Exploit)
+    if cve_ids:
+        query = query.where(Exploit.cve_id.in_(list(cve_ids)))
+
+    by_cve: dict[str, list[str]] = {}
+    for exploit in session.execute(query).scalars():
+        by_cve.setdefault(exploit.cve_id, []).append(exploit.maturity)
+    if not by_cve:
+        return 0
+
+    changed = 0
+    rows = session.execute(
+        select(Vulnerability).where(Vulnerability.external_id.in_(list(by_cve)))
+    ).scalars().all()
+    for row in rows:
+        best = strongest(by_cve.get(row.external_id, []))
+        # Ransomware use already established `high`; an index must not walk it back down.
+        if rank_maturity(best) > rank_maturity(row.exploit_maturity):
+            row.exploit_maturity = best
             changed += 1
     return changed

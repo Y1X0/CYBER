@@ -202,6 +202,8 @@ class ContainerEngine:
                     cvss_base=match.cvss_base,
                     epss_score=match.epss_score,
                     kev=match.kev,
+                    exploit_maturity=match.exploit_maturity,
+                    ransomware=match.ransomware,
                     location={"path": archive_path, "package": name, "version": version,
                               "ecosystem": ecosystem, "source": source,
                               "rule": "image-vulnerable-package"},

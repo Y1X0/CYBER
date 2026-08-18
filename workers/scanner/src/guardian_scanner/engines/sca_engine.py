@@ -113,6 +113,8 @@ class ScaEngine:
             cvss_base=vm.cvss_base,
             epss_score=vm.epss_score,
             kev=vm.kev,
+            exploit_maturity=vm.exploit_maturity,
+            ransomware=vm.ransomware,
             location={"path": source, "package": name, "version": version, "ecosystem": ecosystem},
             evidence=dependency_evidence(
                 package=name, version=version, ecosystem=ecosystem, advisory=vm.external_id

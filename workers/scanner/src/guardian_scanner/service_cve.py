@@ -101,6 +101,8 @@ def _raw_finding(
         cvss_base=match.cvss_base,
         epss_score=match.epss_score,
         kev=match.kev,
+        exploit_maturity=match.exploit_maturity,
+        ransomware=match.ransomware,
         location={"service": node_key, "port": port, "product": identity.product,
                   "version": identity.version, "rule": f"service-cve-{match.external_id}"},
         evidence=evidence,
@@ -243,6 +245,8 @@ def _persist(  # noqa: PLR0913
         existing.cvss_base = raw.cvss_base
         existing.epss_score = raw.epss_score
         existing.kev = raw.kev
+        existing.exploit_maturity = raw.exploit_maturity
+        existing.ransomware = raw.ransomware
         existing.evidence = raw.evidence
         existing.scan_id = scan.id
         existing.engine_run_id = engine_run.id

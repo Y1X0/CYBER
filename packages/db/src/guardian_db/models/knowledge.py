@@ -46,6 +46,10 @@ class Vulnerability(Base, TimestampMixin):
     # `affected` cannot express (WP-C1/C3).
     cpe_configurations: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
     severity: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # Exploit intelligence (WP-C4), denormalized so the risk engine does not join per finding.
+    # "how hard would this be" is the question a remediation queue is actually ordered by.
+    exploit_maturity: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    ransomware: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     references: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
 
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -131,3 +135,28 @@ class FeedState(Base, TimestampMixin):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     records_ingested: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class Exploit(Base, TimestampMixin):
+    """The *existence* of exploit code for a CVE — never the code (WP-C4).
+
+    Guardian is a defensive product. Storing weaponized exploits would make the knowledge base
+    itself a liability and would change what the licence registry has to permit. A source, an
+    identifier and a reference are enough to rank a finding and to let an operator go and read it.
+    """
+
+    __tablename__ = "exploits"
+    __table_args__ = (
+        UniqueConstraint("source", "external_id", "cve_id", name="uq_exploit_source_id_cve"),
+        Index("idx_exploits_cve", "cve_id"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    cve_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    title: Mapped[str] = mapped_column(String(400), default="", nullable=False)
+    reference_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    maturity: Mapped[str] = mapped_column(String(20), default="poc", nullable=False)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -35,6 +35,8 @@ class RawFinding:
     cvss_base: float | None = None
     epss_score: float | None = None
     kev: bool = False
+    exploit_maturity: str | None = None   # "high" | "functional" | "poc" | "unproven" (WP-C4)
+    ransomware: bool = False
 
     # Where & proof (sanitized — never raw secrets)
     location: dict[str, Any] = field(default_factory=dict)

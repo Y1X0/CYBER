@@ -14,21 +14,35 @@ without a network, and a contract change in the feed fails a test instead of a c
 
 from guardian_clients.feeds.base import FeedError, NormalizedVuln
 from guardian_clients.feeds.epss import EpssClient, parse_epss_csv
+from guardian_clients.feeds.exploits import (
+    ExploitDbClient,
+    ExploitRecord,
+    MetasploitClient,
+    parse_exploitdb_csv,
+    parse_metasploit_metadata,
+    strongest,
+)
 from guardian_clients.feeds.kev import KevClient, KevRecord, parse_kev
 from guardian_clients.feeds.nvd import NvdClient, parse_cve, parse_page
 from guardian_clients.feeds.osv import OsvClient, parse_osv_record
 
 __all__ = [
     "EpssClient",
+    "ExploitDbClient",
+    "ExploitRecord",
     "FeedError",
     "KevClient",
     "KevRecord",
     "NormalizedVuln",
+    "MetasploitClient",
     "NvdClient",
     "OsvClient",
     "parse_cve",
     "parse_epss_csv",
+    "parse_exploitdb_csv",
+    "parse_metasploit_metadata",
     "parse_kev",
     "parse_osv_record",
     "parse_page",
+    "strongest",
 ]
