@@ -12,9 +12,9 @@ Pure matcher + DB loader are separated so the matching logic is unit-testable wi
 from __future__ import annotations
 
 import datetime as dt
-import ipaddress
 import uuid
 
+from guardian_core import authorization as authz
 from guardian_db.audit import record_audit
 from guardian_db.models import Authorization, DomainEvent
 from sqlalchemy import select
@@ -44,33 +44,11 @@ def _host_of(target: str) -> str:
 def target_matches(authorized_targets: list[dict], target: str) -> bool:
     """Pure scope test: does `target` (host or ip, optional :port) fall inside any authorized entry?
 
-    Rules: domain → exact or subdomain; netblock → CIDR containment; ip/host → exact.
+    Delegates to `guardian_core.authorization` (WP-H1) so the discovery gate and the scan gate share
+    one implementation. They used to have two, which is how a domain the customer had proved they
+    own could clear a discovery probe and not a scan of the same host.
     """
-    host = _host_of(target).lower().rstrip(".")
-    ip_obj = None
-    try:
-        ip_obj = ipaddress.ip_address(host)
-    except ValueError:
-        pass
-
-    for entry in authorized_targets or []:
-        etype = str(entry.get("type", "")).lower()
-        value = str(entry.get("value", "")).lower().rstrip(".")
-        if not value:
-            continue
-        if etype == "domain":
-            if host == value or host.endswith("." + value):
-                return True
-        elif etype == "netblock" and ip_obj is not None:
-            try:
-                if ip_obj in ipaddress.ip_network(value, strict=False):
-                    return True
-            except ValueError:
-                continue
-        elif etype in ("ip", "host"):
-            if host == value:
-                return True
-    return False
+    return authz.target_matches(authorized_targets or [], _host_of(target))
 
 
 def load_recon_authorizations(

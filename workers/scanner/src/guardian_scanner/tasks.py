@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from guardian_common.config import get_settings
 from guardian_common.crypto import decrypt_json
 from guardian_common.logging import get_logger
+from guardian_core import authorization as authz
 from guardian_core.enums import ACTIVE_ENGINES, EngineKey, ScanStatus
 from guardian_db.audit import record_audit
 from guardian_db.models import (
@@ -144,16 +145,30 @@ def _prepare_workspace(asset: Asset) -> tuple[str | None, str | None, str | None
     return None, None, None
 
 
-def _authorized(session, asset: Asset) -> bool:
+def _authorized(session, asset: Asset, *, engine_key: str) -> authz.Decision:
+    """The safe-scanning gate, delegated to the one evaluator both gates share (WP-H1).
+
+    This used to match on `asset_id` alone, which meant a domain the customer had *proved they own*
+    could not authorize scanning it: WP-F1 issues an authorization scoped by `authorized_targets`
+    with no asset, so the gate looked straight past it and skipped every active engine.
+    """
     now = _now()
-    q = (
-        session.query(Authorization)
-        .filter(Authorization.asset_id == asset.id)
-        .filter(Authorization.revoked_at.is_(None))
-        .filter(Authorization.valid_from <= now)
-        .filter(Authorization.valid_until >= now)
+    rows = session.query(Authorization).filter(
+        Authorization.tenant_id == asset.tenant_id,
+        Authorization.customer_id == asset.customer_id,
+    ).limit(200).all()
+    views = [
+        authz.AuthorizationView(
+            id=str(row.id), method=row.method, asset_id=str(row.asset_id) if row.asset_id else None,
+            customer_id=str(row.customer_id), targets=tuple(row.authorized_targets or ()),
+            valid_from=row.valid_from, valid_until=row.valid_until, revoked_at=row.revoked_at,
+        )
+        for row in rows
+    ]
+    return authz.decide(
+        views, asset_id=str(asset.id), asset_identifier=asset.identifier or "",
+        asset_kind=asset.kind, engine=engine_key, now=now,
     )
-    return session.query(q.exists()).scalar()
 
 
 @celery_app.task(name="guardian.run_scan", bind=True)
@@ -195,9 +210,12 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                 # Use the engine's own key (already an EngineKey) — never coerce the raw request
                 # string, which would raise on an unknown/third-party key and fail the whole scan.
                 needs_auth = engine.requires_authorization or engine.key in ACTIVE_ENGINES
-                if needs_auth and not _authorized(session, asset):
+                decision = (_authorized(session, asset, engine_key=engine_key)
+                            if needs_auth else None)
+                if decision is not None and not decision.allowed:
                     run.status = "skipped"
-                    run.error = "no valid authorization for active scan"
+                    # The reason, not just the refusal: "blocked" with no cause is a support ticket.
+                    run.error = decision.reason
                     engine_statuses.append("skipped")
                     record_audit(
                         session,
@@ -206,7 +224,7 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                         customer_id=scan.customer_id,
                         entity_type="scan_engine_run",
                         entity_id=str(run.id),
-                        metadata={"engine": engine_key},
+                        metadata={"engine": engine_key, "reason": decision.reason},
                     )
                     continue
 
