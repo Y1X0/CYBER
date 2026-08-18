@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     # forced against offline.
     api_key_pepper: str = ""
 
+    # Shared token for Prometheus to scrape /metrics without a human session (WP-G4). Empty means
+    # the endpoint is closed: an unset secret must never mean "no authentication required".
+    metrics_token: str = ""
+
     @property
     def apikey_pepper(self) -> str:
         return self.api_key_pepper or self.jwt_secret

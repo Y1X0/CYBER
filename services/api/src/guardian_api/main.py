@@ -10,6 +10,7 @@ from guardian_common.config import Settings, get_settings
 from guardian_common.logging import configure_logging, get_logger
 from sqlalchemy import text
 
+from guardian_api.observability import MetricsMiddleware
 from guardian_api.routes import api_router
 
 log = get_logger("guardian.api")
@@ -68,6 +69,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Added after CORS so it wraps every request including the preflight ones, and records the
+    # failures: a request that raises is exactly the one worth graphing.
+    app.add_middleware(MetricsMiddleware)
 
     app.include_router(api_router)
 

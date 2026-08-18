@@ -1,12 +1,16 @@
-"""Liveness and readiness probes."""
+"""Liveness, readiness, metrics, and the security SLOs (WP-G4)."""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi.responses import PlainTextResponse
+from guardian_common.config import get_settings
+from guardian_common.metrics import REGISTRY
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from guardian_api.deps import get_db
+from guardian_api.deps import Identity, get_current_identity, get_db
+from guardian_api.observability import evaluate_slos, overall
 
 router = APIRouter()
 
@@ -20,3 +24,48 @@ def health() -> dict:
 def ready(db: Session = Depends(get_db)) -> dict:
     db.execute(text("SELECT 1"))
     return {"status": "ready", "database": "ok"}
+
+
+def _operator(x_metrics_token: str | None = Header(default=None),
+              identity: Identity | None = None) -> None:
+    """Metrics are operator-only.
+
+    Not because a request count is a secret, but because route labels enumerate the API surface and
+    the SLO detail strings describe how the platform is failing — which is a useful thing for an
+    attacker to read. A scrape token is accepted so Prometheus does not need a human's session.
+    """
+    settings = get_settings()
+    expected = getattr(settings, "metrics_token", "") or ""
+    if expected and x_metrics_token and x_metrics_token == expected:
+        return
+    del identity
+    raise HTTPException(status.HTTP_401_UNAUTHORIZED,
+                        "metrics require the scrape token or an authenticated operator")
+
+
+@router.get("/metrics", response_class=PlainTextResponse)
+def metrics(x_metrics_token: str | None = Header(default=None)) -> str:
+    """Prometheus text exposition."""
+    _operator(x_metrics_token)
+    return REGISTRY.render()
+
+
+@router.get("/health/slo")
+def slo(
+    identity: Identity = Depends(get_current_identity),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Whether the security function is working, not just whether the process is up.
+
+    Authenticated because the detail strings say precisely how the platform is failing.
+    """
+    del identity
+    results = evaluate_slos(db)
+    return {
+        "status": overall(results),
+        "slos": [item.as_dict() for item in results],
+        # Spelled out because it is the whole point: an SLO nobody could evaluate is a question
+        # nobody answered, and it must not read as a pass.
+        "note": ("`unknown` means there was no data to judge from — it is not `healthy`, and the "
+                 "overall status never collapses one into the other."),
+    }

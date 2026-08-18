@@ -10,8 +10,8 @@ against a real system and the output was inspected — not that a test double re
 
 Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 0% operable.
 
-**Current: 1807 Python tests + 15 web tests passing** (+1270, 14 skipped — RLS assertions that need
-an RLS-enforced app session), 30 work packages delivered, CI green.
+**Current: 1838 Python tests + 15 web tests passing** (+1301, 14 skipped — RLS assertions that need
+an RLS-enforced app session), 31 work packages delivered, CI green.
 
 ---
 
@@ -85,7 +85,7 @@ an RLS-enforced app session), 30 work packages delivered, CI green.
 | G1 | API keys + SSO | `TESTED` (keys) / `TESTED` (SSO verification), live IdP `BLOCKED_EXTERNAL` | `a5974f8` | 64 (`test_apikeys`, `test_sso`, `integration/test_apikey_auth`) | `api_keys` had been a table with **no issuance and no authentication path** — the only credential that ever worked was a person's password, so a CI pipeline had no way in. Keys now work end to end: `gdn_<id>_<secret>` (a distinctive prefix a secret scanner can be taught, and an embedded id so authentication is one indexed lookup rather than a table scan), stored as an **HMAC digest under a server-side pepper** so a stolen database is not enough to check a guess offline, compared in constant time, returned exactly once. Scopes are least-privilege with no implicit hierarchy: a key with none can do nothing, `findings:write` does not confer `findings:read`, and **`assets:write` is deliberately absent from the CI preset** so a leaked build key cannot point the scanner at a target nobody authorized. A key cannot mint another key and cannot use any endpoint requiring a human staff role — opting an endpoint in is an explicit act, so everything written before keys existed stays closed to them. Revocation and expiry take effect on the next request; `last_used_at` is recorded. SSO: OIDC id-token verification tested against **real tokens signed with real keys**, refusing the attacks that actually break OIDC — a token signed with the attacker's key, `alg: none`, an HS256 token whose "secret" is the provider's published public key (hand-assembled, since PyJWT refuses to sign that), a valid token for another audience, one from another issuer, and an unverified email. Provisioning only from a domain the tenant declared, and an IdP group can never mint an owner or admin. A live IdP round trip is `BLOCKED_EXTERNAL` — none is available here. |
 | G2 | Scale hardening | `NOT_STARTED` | — | — | |
 | G3 | Outbound webhooks | `NOT_STARTED` | — | — | |
-| G4 | Observability + SLOs | `NOT_STARTED` | — | — | |
+| G4 | Observability + SLOs | `TESTED` | `PENDING` | 31 (`test_metrics`, `integration/test_observability`) | The API emitted no metrics at all. Now: a dependency-free Prometheus registry (written rather than pulled in — a platform that ships a licence gate and a self-SBOM should not add a dependency for four counters, and the exposition format's escaping and cumulative buckets are exactly what a test can pin down), request/latency/status middleware labelled by the **route template rather than the path** so cardinality cannot grow with the number of findings, and `/metrics` closed unless the scrape token is set and presented — an unset secret never means "no authentication required". The valuable half is `GET /health/slo`: four SLOs about the ways this platform **fails quietly** — feeds that stopped syncing while every scan still reports `completed`, engine runs that failed (a failed engine reports no findings, which looks exactly like a clean scan), scans stuck `running` with nothing errored, and a remediation backlog past its own deadline. Each carries its reasoning, and each reports an explicit **`unknown`** when there is no data to judge from — `unknown` never collapses into `healthy`, because a dashboard that renders "nothing has run" green is how a platform lies quietly for a month. |
 
 ## Track H — Trust, safety, legal
 
