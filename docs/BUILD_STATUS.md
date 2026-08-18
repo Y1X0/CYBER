@@ -10,7 +10,9 @@ against a real system and the output was inspected — not that a test double re
 
 Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 0% operable.
 
-**Current: 2051 Python tests + 15 web tests passing** (+1514), 36 work packages delivered.
+**Current: 2131 Python tests + 15 web tests passing** (+1594), 36 work packages delivered, 0 skipped on a database built from zero under the RLS-enforced role.
+
+The WIRE → VERIFY gate (`7909782`) connected the capabilities the readiness audit found built and unreachable — outbound webhooks, service→CVE matching, correlation and per-finding retest — and closed the false-clean paths in five engines. See `docs/PRODUCTION_AUDIT.md`.
 
 Run two ways, because the difference between them was hiding a production defect:
 `GUARDIAN_APP_DATABASE_URL` pointed at the owner role by default, and the full suite passes with
