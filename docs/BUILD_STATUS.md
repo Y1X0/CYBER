@@ -10,7 +10,7 @@ against a real system and the output was inspected — not that a test double re
 
 Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 0% operable.
 
-**Current: 922 tests passing** (+370), 9 work packages delivered, CI green.
+**Current: 953 tests passing** (+401), 10 work packages delivered, CI green.
 
 ---
 
@@ -52,7 +52,7 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 | D3 | SCA v2 | `TESTED` | `def7df6` | 30 (`test_sca_lockfiles`) | 9 lockfile formats incl. transitive deps; `OsvVulnMatcher` connects the client that had zero call sites; `CompositeVulnMatcher` merges sources by advisory id; CVSS v3.x base scoring. Live OSV query needs egress (see BLOCKER-4). |
 | D4 | SAST v2 | `LIVE_VERIFIED` | `2aadc76` | 54 (`test_sast_taint`, `test_sast_engine`) | AST taint analysis: 11 sink classes, class-specific sanitizers, import-alias resolution, inter-procedural summaries, comment/string masking. Against an 11-route vulnerable fixture: **8/8 planted flaws found, 0 false positives on the 3 safe variants**. Against Guardian's own 26k lines: 40 findings → 4 after fixing the noise the first run exposed, all true positives. |
 | D5 | Secrets v2 (git history) | `TESTED` | `1ed0e35` | 8 (`test_secrets_history`) | Scans lines added by past commits against the existing patterns and entropy heuristic; clone fetches history (bounded, blobless at depth 0). Verified on a real repository where the secret was deleted in a later commit: working tree clean, finding still raised, raw value never persisted, one report per credential rather than per commit. |
-| D6 | Container / image | `NOT_STARTED` | — | — | |
+| D6 | Container / image | `TESTED` | `pending` | 31 (`test_container_image`) | Reads a `docker save`/OCI archive in-process — no binary, no daemon, no registry. Detects **a secret deleted in a later layer but still in the image**, the finding a flattened-filesystem scan cannot see; sensitive files and key material by path and by content; config issues (root, ENV secrets, mutable tag, SSH, no healthcheck, `curl \| sh` in history). Packages from dpkg/apk/dist-info/node_modules go through the existing `VulnMatcher` seam rather than a second matcher. An unreadable archive and an unparsed RPM database are reported as findings, not silence. A well-built image produces zero findings. |
 | D7 | Kubernetes posture | `NOT_STARTED` | — | — | |
 | D8 | Cloud CSPM | `NOT_STARTED` | — | — | |
 | D9 | IaC | `NOT_STARTED` | — | — | |
