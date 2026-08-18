@@ -88,6 +88,10 @@ celery_app.conf.update(
         "guardian.run_tool": {"queue": "tools"},
         "guardian.sweep_schedules": {"queue": "default"},
         "guardian.sync_feeds": {"queue": "default"},
+        "guardian.sync_nvd": {"queue": "default"},
+        "guardian.sync_osv": {"queue": "default"},
+        "guardian.sync_kev": {"queue": "default"},
+        "guardian.sync_epss": {"queue": "default"},
     },
     # Recurring work. Beat fires these; per-tenant cadence lives in the `schedules` table, because
     # a static config file cannot be edited through the API and cannot hold one customer's timing
@@ -101,8 +105,9 @@ celery_app.conf.update(
         },
         "sync-vulnerability-feeds": {
             "task": "guardian.sync_feeds",
-            # Daily. KEV and EPSS change on that cadence, and a fresher pull would cost rate limit
-            # without changing an answer.
+            # Daily. Ingestion is incremental (`feed_state` holds a watermark per source), so this
+            # fetches the day's changes rather than the corpus; KEV and EPSS publish daily, and a
+            # fresher pull would spend rate limit without changing an answer.
             "schedule": 86400.0,
         },
     },

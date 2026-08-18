@@ -18,6 +18,7 @@ from guardian_db.models.graph import GraphEdge
 from guardian_db.models.graph_nodes import GraphNode
 from guardian_db.models.knowledge import (
     Advisory,
+    FeedState,
     FeedSync,
     KbEntry,
     Vulnerability,
@@ -60,6 +61,7 @@ __all__ = [
     "DomainEvent",
     "Engagement",
     "EvidenceItem",
+    "FeedState",
     "FeedSync",
     "Finding",
     "FindingEvent",

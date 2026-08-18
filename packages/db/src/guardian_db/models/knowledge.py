@@ -39,7 +39,13 @@ class Vulnerability(Base, TimestampMixin):
     kev: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # OSV-style affected ranges: [{"ecosystem","package","ranges":[...],"versions":[...]}]
+    # Answers "is this dependency vulnerable".
     affected: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    # CPE applicability from NVD: [{"vendor","product","version_start_including", ...}]. Answers
+    # "is this OpenSSH build vulnerable", which is the question a service fingerprint raises and
+    # `affected` cannot express (WP-C1/C3).
+    cpe_configurations: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    severity: Mapped[str | None] = mapped_column(String(20), nullable=True)
     references: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
 
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -94,7 +100,34 @@ class FeedSync(Base, TimestampMixin):
     source: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
     items_ingested: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Created and failed are tracked apart from the total: "0 new advisories" is a healthy daily
+    # result and "0 records seen" is an outage, and one number cannot say both.
+    items_created: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    items_failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cursor: Mapped[str | None] = mapped_column(String(120), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class FeedState(Base, TimestampMixin):
+    """Where each feed got to, so a sync fetches the delta rather than the world (WP-C1).
+
+    The watermark advances only on a successful run. A failed run that advanced it would skip the
+    window it failed on forever, and nothing downstream could tell that the gap existed.
+    """
+
+    __tablename__ = "feed_state"
+
+    source: Mapped[str] = mapped_column(String(32), primary_key=True)
+    watermark: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    etag: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    last_success_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_attempt_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    records_ingested: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
