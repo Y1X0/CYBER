@@ -35,6 +35,10 @@ FEED_STALE_HOURS = 48
 ENGINE_FAILURE_BUDGET = 0.05      # 5% of engine runs in the window
 SCAN_STUCK_HOURS = 6
 OVERDUE_BUDGET = 0.10             # 10% of active remediation items
+# How long the scanner may go without finishing anything *while work is waiting* before that is
+# treated as "it has stopped" rather than "it is busy". Chosen well above the longest engine
+# timeout (task_time_limit is 1800s) so a single slow scan never trips it.
+SCANNER_STALL_MINUTES = 45
 WINDOW_HOURS = 24
 
 HEALTHY = "healthy"
@@ -202,10 +206,134 @@ def evaluate_slos(session, *, now: dt.datetime | None = None) -> list[Slo]:  # n
             value=round(ratio, 4), threshold=OVERDUE_BUDGET,
         ))
 
+    # ── is the scanner executing at all? ─────────────────────────────────────────────────────────
+    results.append(_scanner_liveness(session, now))
+
+    # Publishing the execution gauges here means one authenticated SLO read refreshes what the
+    # scrape will serve, so `/metrics` and `/health/slo` cannot disagree about the same database.
+    collect_execution_metrics(session, now=now)
+
     for slo in results:
         REGISTRY.set("guardian_slo_healthy", 1.0 if slo.status == HEALTHY else 0.0,
                      {"slo": slo.name})
     return results
+
+
+def collect_execution_metrics(session, *, now: dt.datetime | None = None) -> dict:  # noqa: ANN001
+    """Publish scan-execution telemetry, read from the database at scrape time (RED-5).
+
+    The worker and the API are different processes; an in-process counter incremented in the worker
+    can never appear on the API's `/metrics`. Rather than add a second metrics system (a push
+    gateway, a sidecar, a Redis counter set), this reads the state both processes already share and
+    agree on. It is durable across restarts for the same reason — the numbers are the rows.
+
+    Everything here is a gauge, deliberately. A count over a rolling window is not monotonic, and
+    exporting one as a counter would make every `rate()` built on it wrong.
+    """
+    from guardian_db.models import Scan, ScanEngineRun
+    from sqlalchemy import func, select
+
+    now = now or _now()
+    window_start = now - dt.timedelta(hours=WINDOW_HOURS)
+    stats: dict = {"queue": {}, "scans": {}, "engine_runs": {}}
+
+    # ── queue depth: instantaneous, not windowed ─────────────────────────────────────────────────
+    for state in ("queued", "running"):
+        depth = session.execute(
+            select(func.count()).select_from(Scan).where(Scan.status == state)
+        ).scalar_one()
+        REGISTRY.set("guardian_scan_queue_depth", float(depth), {"state": state})
+        stats["queue"][state] = int(depth)
+
+    # ── scans started/completed/failed in the window ─────────────────────────────────────────────
+    seen = {row[0]: int(row[1]) for row in session.execute(
+        select(Scan.status, func.count()).where(Scan.created_at >= window_start)
+        .group_by(Scan.status)
+    ).all()}
+    # Every status is published, including the ones with no rows: a series that disappears when the
+    # count reaches zero is a series an alert cannot distinguish from a broken scrape.
+    for state in ("queued", "running", "completed", "partial", "failed"):
+        REGISTRY.set("guardian_scans_window", float(seen.get(state, 0)),
+                     {"status": state, "window": f"{WINDOW_HOURS}h"})
+        stats["scans"][state] = seen.get(state, 0)
+
+    # ── engine execution and failure, per engine ─────────────────────────────────────────────────
+    for engine, run_status, count in session.execute(
+        select(ScanEngineRun.engine, ScanEngineRun.status, func.count())
+        .join(Scan, Scan.id == ScanEngineRun.scan_id)
+        .where(Scan.created_at >= window_start)
+        .group_by(ScanEngineRun.engine, ScanEngineRun.status)
+    ).all():
+        REGISTRY.set("guardian_scan_engine_runs_window", float(count),
+                     {"engine": str(engine), "status": str(run_status),
+                      "window": f"{WINDOW_HOURS}h"})
+        stats["engine_runs"][f"{engine}:{run_status}"] = int(count)
+
+    # ── duration ─────────────────────────────────────────────────────────────────────────────────
+    duration = func.extract("epoch", Scan.finished_at - Scan.started_at)
+    row = session.execute(
+        select(func.percentile_cont(0.5).within_group(duration.asc()),
+               func.percentile_cont(0.95).within_group(duration.asc()),
+               func.max(duration))
+        .where(Scan.finished_at.isnot(None), Scan.started_at.isnot(None),
+               Scan.created_at >= window_start)
+    ).first()
+    for label, value in zip(("p50", "p95", "max"), row or (None, None, None), strict=False):
+        if value is not None:
+            REGISTRY.set("guardian_scan_duration_seconds", float(value),
+                         {"quantile": label, "window": f"{WINDOW_HOURS}h"})
+            stats.setdefault("duration_seconds", {})[label] = round(float(value), 3)
+
+    # ── liveness: the age of the newest finished scan ────────────────────────────────────────────
+    newest = session.execute(
+        select(func.max(Scan.finished_at)).where(Scan.finished_at.isnot(None))
+    ).scalar()
+    if newest is not None:
+        age = (now - _aware(newest)).total_seconds()
+        REGISTRY.set("guardian_scanner_last_completion_seconds", age, {})
+        stats["last_completion_seconds"] = round(age, 1)
+    return stats
+
+
+def _scanner_liveness(session, now: dt.datetime) -> Slo:  # noqa: ANN001
+    """Has the scanner stopped executing? (RED-5)
+
+    The distinction that matters is between *idle* and *stalled*. A platform with nothing queued and
+    nothing running is idle, and idle is not evidence of health — it reports `unknown`. A platform
+    with work waiting and nothing finishing is stalled, and that is the alert: it is precisely the
+    shape of "the worker died" and, until this existed, the shape a customer noticed first.
+    """
+    from guardian_db.models import Scan
+    from sqlalchemy import func, select
+
+    waiting = session.execute(
+        select(func.count()).select_from(Scan).where(Scan.status.in_(("queued", "running")))
+    ).scalar_one()
+    newest = session.execute(
+        select(func.max(Scan.finished_at)).where(Scan.finished_at.isnot(None))
+    ).scalar()
+    stall_seconds = SCANNER_STALL_MINUTES * 60
+    idle_for = (now - _aware(newest)).total_seconds() if newest is not None else None
+
+    if not waiting:
+        return Slo("scanner_liveness", UNKNOWN,
+                   "nothing is queued or running, so there is no evidence either way — an idle "
+                   "scanner and a dead one look identical from here",
+                   value=0.0, threshold=float(stall_seconds))
+    if newest is None:
+        return Slo("scanner_liveness", DEGRADED,
+                   f"{waiting} scan(s) are waiting and no scan has ever finished — the worker has "
+                   "either never run or cannot reach the database",
+                   value=float(stall_seconds), threshold=float(stall_seconds))
+    if idle_for is not None and idle_for > stall_seconds:
+        return Slo("scanner_liveness", DEGRADED,
+                   f"{waiting} scan(s) are waiting and nothing has finished for "
+                   f"{int(idle_for // 60)} minutes — the scanner has stopped executing",
+                   value=round(idle_for, 1), threshold=float(stall_seconds))
+    return Slo("scanner_liveness", HEALTHY,
+               f"{waiting} scan(s) in flight and the last one finished "
+               f"{int((idle_for or 0) // 60)} minute(s) ago",
+               value=round(idle_for or 0.0, 1), threshold=float(stall_seconds))
 
 
 def _aware(value: dt.datetime) -> dt.datetime:
@@ -227,6 +355,7 @@ def overall(slos: list[Slo]) -> str:
 
 __all__ = [
     "DEGRADED",
+    "collect_execution_metrics",
     "HEALTHY",
     "UNKNOWN",
     "MetricsMiddleware",

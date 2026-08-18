@@ -132,6 +132,14 @@ def test_an_unreadable_snapshot_raises_rather_than_reporting_a_clean_account():
         list(CspmEngine().run(_ctx(inline="{ truncated")))
 
 
-def test_no_snapshot_at_all_is_not_an_error():
-    """An asset with no collector export yet has not failed; it has nothing to assess."""
-    assert list(CspmEngine().run(_ctx())) == []
+def test_no_snapshot_at_all_refuses_rather_than_reporting_a_clean_account():
+    """This test used to assert the opposite, and the reasoning was wrong.
+
+    "An asset with no collector export has not failed; it has nothing to assess" is true about the
+    *engine* and false about the *platform*. An empty result from a completed run is what WP-E2
+    reads as permission to resolve the account's existing findings — so a collector export that
+    stopped arriving would quietly close every cloud finding the customer had. The absence has to
+    be visible, and the way this platform makes an absence visible is `not_checked`.
+    """
+    with pytest.raises(CloudSnapshotError, match="not a clean account"):
+        list(CspmEngine().run(_ctx()))

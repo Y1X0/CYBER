@@ -94,18 +94,35 @@ def _secret_identity(finding: Finding) -> str | None:
     The redacted form is used deliberately — it is what the engines persist, and it is stable for
     one credential across the source file, the git history and an image layer. Comparing raw values
     would mean storing them, which is the thing every secrets engine here is careful not to do.
+
+    This looked only under `evidence["detail"]`, and the secrets engine writes the redacted value at
+    `evidence["match"]` — top level. So the redacted branch never fired on a real finding and every
+    identity fell through to `path:line`, which made the rule wrong in *both* directions: three
+    different credentials on one line of a `.env` were declared one credential, while the same
+    credential found by two engines in two places was never grouped at all. Both are visible only
+    once correlation actually runs, which it did not until the readiness audit.
     """
-    evidence = finding.evidence or {}
-    detail = evidence.get("detail") if isinstance(evidence, dict) else None
-    detail = detail if isinstance(detail, dict) else {}
-    for key in ("redacted", "redacted_excerpt", "excerpt", "match"):
-        value = detail.get(key)
-        if isinstance(value, str) and value.strip() and value != "<redacted>":
-            return value.strip()[:120]
+    evidence = finding.evidence if isinstance(finding.evidence, dict) else {}
+    detail = evidence.get("detail")
+    sources = [evidence, detail if isinstance(detail, dict) else {}]
+    for source in sources:
+        for key in ("redacted", "redacted_excerpt", "excerpt", "match"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip() and value != "<redacted>":
+                return value.strip()[:120]
+
+    # No redacted value to compare, so fall back to position. Position alone is not identity when
+    # the engine told us *which* detector fired: three patterns matching one line of a `.env` are
+    # three credentials, and merging them announces "one credential in three places". So the rule
+    # name discriminates when it is present.
+    #
+    # When it is absent the fallback stays position-only, deliberately: that is the case of two
+    # different engines pointing at the same line with no detail to compare, which is the one this
+    # fallback was written for.
     location = finding.location or {}
-    path, line = location.get("path"), location.get("line")
+    path, line, rule = location.get("path"), location.get("line"), location.get("rule")
     if path and line:
-        return f"{path}:{line}"
+        return f"{path}:{line}:{rule}" if rule else f"{path}:{line}"
     return None
 
 

@@ -177,7 +177,20 @@ REGISTRY.histogram("guardian_http_request_seconds", "API request duration in sec
 REGISTRY.counter("guardian_auth_failures_total", "Rejected credentials, by reason.")
 REGISTRY.counter("guardian_authorization_denied_total",
                  "Requests refused by an authorization check, by reason.")
-REGISTRY.counter("guardian_scan_engine_runs_total", "Engine runs by engine and status.")
+# Scan execution (WP-G4, repaired by the readiness audit RED-5). These are **gauges derived from
+# the database at scrape time**, not counters incremented by the worker. The worker is a separate
+# process from the API that serves `/metrics`, so an in-process counter it incremented would never
+# be visible here — which is exactly how `guardian_scan_engine_runs_total` came to be declared and
+# permanently empty. The database is the one place both processes already agree on, so it is the
+# source. Windowed values carry a `window` label so nobody reads them as lifetime totals.
+REGISTRY.gauge("guardian_scan_queue_depth", "Scans not yet finished, by state, right now.")
+REGISTRY.gauge("guardian_scans_window", "Scans by terminal status within the observation window.")
+REGISTRY.gauge("guardian_scan_engine_runs_window",
+               "Engine runs by engine and status within the observation window.")
+REGISTRY.gauge("guardian_scan_duration_seconds",
+               "Wall-clock duration of finished scans in the window, by quantile.")
+REGISTRY.gauge("guardian_scanner_last_completion_seconds",
+               "Age of the most recently finished scan. The signal that the scanner has stopped.")
 REGISTRY.gauge("guardian_feed_age_seconds", "Age of the newest record from each intelligence feed.")
 REGISTRY.gauge("guardian_slo_healthy", "1 when a named SLO is met, 0 when it is not.")
 # WP-G2. A quota nobody can see is a quota nobody knows they are hitting: the first sign

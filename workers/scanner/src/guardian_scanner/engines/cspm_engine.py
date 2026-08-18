@@ -78,7 +78,16 @@ class CspmEngine:
     def run(self, ctx: ScanContext) -> Iterable[RawFinding]:
         snapshot = self._load(ctx)
         if snapshot is None:
-            return []
+            # Nothing to assess is not the same as nothing wrong. Returning `[]` here made the run
+            # complete cleanly, and WP-E2 reads a clean completion as permission to *resolve* the
+            # account's existing findings — so an asset whose collector export went missing would
+            # have its cloud findings quietly closed. Raising records the run as failed with this
+            # reason, which reconciliation reads as `not_checked` (readiness audit, Phase 4).
+            raise CloudSnapshotError(
+                "no cloud snapshot is configured for this asset, so nothing was assessed. This is "
+                "an absence of input, not a clean account: configure the collector export in the "
+                "asset's `cloud_snapshot` config."
+            )
         findings: list[RawFinding] = []
 
         resources = snapshot.get("resources")

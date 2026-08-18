@@ -64,6 +64,14 @@ _CHECK_META = {
 }
 
 
+class ApiSpecError(RuntimeError):
+    """There was no API contract to review.
+
+    An error rather than an empty result, so the run is recorded as unfinished and the absence
+    cannot be mistaken for an assessment (readiness audit, Phase 4).
+    """
+
+
 class ApiEngine:
     key = EngineKey.API
     name = "Guardian API (contract review + authorization testing)"
@@ -84,7 +92,14 @@ class ApiEngine:
     def run(self, ctx: ScanContext) -> Iterable[RawFinding]:
         document = self._load(ctx)
         if not document:
-            return []
+            # See CspmEngine: an empty result from an engine that had nothing to read is
+            # indistinguishable from an API with no problems, and WP-E2 would resolve the API's
+            # existing findings on the strength of it (readiness audit, Phase 4).
+            raise ApiSpecError(
+                "no OpenAPI document is available for this asset, so no API review was performed. "
+                "Supply one in the asset's `openapi_spec` config; an unreviewed API is not a "
+                "reviewed one."
+            )
         spec = parse(document)
         findings = list(self._static(document, spec))
         findings.extend(self._active(ctx, spec))

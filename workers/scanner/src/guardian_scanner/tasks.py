@@ -369,7 +369,14 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                 entity_id=str(scan.id),
                 metadata={"status": scan.status, "error": scan.error},
             )
-            return {"scan_id": scan_id, "status": scan.status}
+            failure = {"scan_id": scan_id, "status": scan.status}
+            # A failed scan is exactly the event an integration needs; silence on failure is how a
+            # subscriber concludes there was nothing to report. Enqueued on its own session, so it
+            # neither joins nor blocks the transaction recording the failure.
+            _emit_scan_event(scan_id, str(scan.tenant_id),
+                             str(scan.customer_id) if scan.customer_id else None,
+                             scan.status, failure)
+            return failure
         finally:
             if cleanup:
                 shutil.rmtree(cleanup, ignore_errors=True)
@@ -438,4 +445,104 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
         except Exception as exc:  # noqa: BLE001 - must not fail a completed scan
             log.error("remediation_verify_failed", scan_id=scan_id, error=str(exc)[:300])
             result["remediation"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
+        # Join what this scan found to what the other engines already know (WP-E1). Runs after
+        # reconciliation so a finding this scan resolved is no longer a candidate for a group, and
+        # before the remediation opener below, because "one item per underlying issue" is a promise
+        # that depends on the group existing first.
+        from guardian_scanner.correlation import correlate_tenant
+
+        try:
+            result["correlation"] = correlate_tenant(_tenant, _customer)
+        except Exception as exc:  # noqa: BLE001 - correlation is enrichment, not the scan
+            log.error("correlation_failed", scan_id=scan_id, error=str(exc)[:300])
+            result["correlation"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
+        # Turn what the graph now knows about running services into vulnerability findings (WP-C3).
+        # This is the only path by which a host with no repository gets one: B2/B3 collect the
+        # product and version, C1 supplies the CPE applicability, and nothing else joins them.
+        # After `enrich_graph`, so it sees the services this scan just projected.
+        from guardian_scanner.service_cve import match_service_versions
+
+        try:
+            result["service_cve"] = match_service_versions(_tenant, _customer)
+        except Exception as exc:  # noqa: BLE001 - matching is enrichment, not the scan
+            log.error("service_cve_failed", scan_id=scan_id, error=str(exc)[:300])
+            result["service_cve"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
+    # Tell whoever asked to be told (WP-G3). Emitted for every terminal state, including failure:
+    # a scan that died is exactly the event an integration needs, and silence on failure is how a
+    # webhook consumer concludes there was nothing to report.
+    _emit_scan_event(scan_id, _tenant, _customer, _status, result)
     return result
+
+
+def _emit_scan_event(scan_id: str, tenant_id: str, customer_id: str | None,
+                     status: str, result: dict) -> None:
+    """Guarded wrapper. See `_emit_scan_event_inner` for what it does and why."""
+    try:
+        _emit_scan_event_inner(scan_id, tenant_id, customer_id, status, result)
+    except Exception as exc:  # noqa: BLE001 - a notification defect must never fail a scan
+        # This guard exists because the first version of it did exactly that: a bad keyword in a
+        # log line raised *after* the deliveries were queued and took a completed scan down with
+        # it. The blast radius of the notification path stops here.
+        log.error("webhook_emit_failed", scan_id=scan_id,
+                  error=f"{type(exc).__name__}: {exc}"[:300])
+
+
+def _emit_scan_event_inner(scan_id: str, tenant_id: str, customer_id: str | None,
+                           status: str, result: dict) -> None:
+    """Queue the outbound webhooks for a finished scan, and dispatch them.
+
+    Failures here are logged and dropped rather than raised: the scan is already committed and its
+    findings are already durable, so failing the task would re-run a completed scan to retry a
+    notification. The deliveries themselves are persisted rows with their own retry policy, so a
+    delivery that cannot be sent now is not lost — only an enqueue that raises is, and that is what
+    the log line records.
+    """
+    from guardian_scanner.webhooks import deliver_webhook, enqueue
+
+    terminal = {
+        ScanStatus.COMPLETED.value: "scan.completed",
+        ScanStatus.PARTIAL.value: "scan.completed",
+        ScanStatus.FAILED.value: "scan.failed",
+    }
+    event_type = terminal.get(status)
+    if event_type is None:
+        return
+
+    stats = result.get("stats") or {}
+    data = {
+        "scan_id": scan_id,
+        "status": status,
+        "findings": int(stats.get("total", 0) or 0),
+        "severity_counts": {k: v for k, v in stats.items() if k != "total"},
+    }
+    delivery_ids: list[str] = []
+    try:
+        with session_scope() as session:
+            ids = enqueue(session, tenant_id=uuid.UUID(tenant_id), event_type=event_type,
+                          data=data, customer_id=uuid.UUID(customer_id) if customer_id else None)
+            delivery_ids = [str(i) for i in ids]
+
+            # A critical finding is its own event: a subscriber who only wants to be woken for
+            # those should not have to parse every scan.completed to discover one.
+            if int(stats.get("critical", 0) or 0) > 0:
+                critical = enqueue(
+                    session, tenant_id=uuid.UUID(tenant_id), event_type="finding.critical",
+                    data={"scan_id": scan_id, "critical": int(stats.get("critical", 0))},
+                    customer_id=uuid.UUID(customer_id) if customer_id else None,
+                )
+                delivery_ids.extend(str(i) for i in critical)
+    except Exception as exc:  # noqa: BLE001 - the scan is committed; a notification must not undo it
+        log.error("webhook_enqueue_failed", scan_id=scan_id, error=str(exc)[:300])
+        return
+
+    for delivery_id in delivery_ids:
+        try:
+            deliver_webhook.apply_async(args=[delivery_id])
+        except Exception as exc:  # noqa: BLE001 - the row is durable; the sweep retries it
+            log.error("webhook_dispatch_failed", delivery=delivery_id, error=str(exc)[:200])
+    if delivery_ids:
+        log.info("webhooks_queued", scan_id=scan_id, event_type=event_type,
+                 count=len(delivery_ids))

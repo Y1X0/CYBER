@@ -119,6 +119,10 @@ def _redact(value: str) -> str:
     return f"{value[:2]}{'*' * 8}{value[-2:]} (len={len(value)})"
 
 
+class SecretsInputError(RuntimeError):
+    """There was nothing to read (readiness audit, Phase 4)."""
+
+
 class SecretsEngine:
     """Detects hardcoded secrets in source. Implements the ScanEngine protocol."""
 
@@ -138,10 +142,19 @@ class SecretsEngine:
             yield from self._scan_text("<inline>", ctx.inline_content)
             return
         if not ctx.workspace_path:
-            return
+            # Nothing to read is not nothing to find. A silent return completes the run cleanly,
+            # and WP-E2 reads a clean completion as permission to resolve this asset's existing
+            # secret findings — so a misconfigured asset would quietly close them all (readiness
+            # audit, Phase 4).
+            raise SecretsInputError(
+                "no workspace and no inline content, so no file was read. An absence of input is "
+                "not an absence of secrets."
+            )
         root = Path(ctx.workspace_path)
         if not root.exists():
-            return
+            raise SecretsInputError(
+                f"the workspace path {ctx.workspace_path!r} does not exist, so no file was read"
+            )
         for path in self._iter_files(root):
             try:
                 text = path.read_text(encoding="utf-8", errors="ignore")

@@ -19,7 +19,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from guardian_core import remediation as rem
 from guardian_core.redaction import scrub_text
 from guardian_db.audit import record_audit
@@ -115,17 +115,26 @@ def _findings_for(db: Session, items: list[RemediationItem]) -> dict:
 def open_remediation(
     body: OpenRequest,
     request: Request,
+    response: Response,
     identity: Identity = Depends(require_staff_write),
     db: Session = Depends(get_db),
     ip: str | None = Depends(client_ip),
 ) -> dict:
-    """Open tracked work for findings. One item per underlying issue, not per finding."""
+    """Open tracked work for findings. One item per underlying issue, not per finding.
+
+    Answers `201 Created` only when something was created. When nothing was — every finding is
+    already tracked, or none is in a trackable state — it answers `200 OK` and carries a `reason`
+    saying which (RED-6). A `201` for a request that created nothing is a lie the caller cannot
+    detect, and this is a button a customer presses.
+    """
     from guardian_scanner.remediation import open_items
 
     result = open_items(
         db, tenant_id=identity.tenant_id, customer_id=body.customer_id,
         finding_ids=body.finding_ids or None, assignee_id=body.assignee_id,
     )
+    if not result.get("opened"):
+        response.status_code = status.HTTP_200_OK
     record_audit(
         db, action="remediation.opened", tenant_id=identity.tenant_id,
         customer_id=body.customer_id, actor_id=identity.user.id, entity_type="remediation",

@@ -49,6 +49,10 @@ _SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", ".tox", "d
               ".mypy_cache", ".pytest_cache", ".github"}
 
 
+class K8sInputError(RuntimeError):
+    """There was nothing to read (readiness audit, Phase 4)."""
+
+
 class K8sEngine:
     key = EngineKey.K8S
     name = "Guardian Kubernetes (workloads, RBAC, secrets, network)"
@@ -85,6 +89,15 @@ class K8sEngine:
 
         if errors or truncated:
             yield self._coverage_finding(documents, errors, templated, truncated, files_read)
+
+        if files_read == 0:
+            # No manifest, no export, no workspace. Completing cleanly here would let WP-E2 resolve
+            # this asset's existing Kubernetes findings on the strength of a scan that read nothing
+            # (readiness audit, Phase 4).
+            raise K8sInputError(
+                "no Kubernetes manifest, cluster export or workspace was available, so nothing was "
+                "assessed. An absence of input is not a compliant cluster."
+            )
 
         log.info("k8s_scan_complete", objects=len(documents), files=files_read,
                  unparsed=len(errors), templated=len(set(templated)))

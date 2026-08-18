@@ -10,7 +10,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from guardian_api.deps import Identity, get_current_identity, get_db
-from guardian_api.observability import evaluate_slos, overall
+from guardian_api.observability import collect_execution_metrics, evaluate_slos, overall
 
 router = APIRouter()
 
@@ -44,9 +44,27 @@ def _operator(x_metrics_token: str | None = Header(default=None),
 
 
 @router.get("/metrics", response_class=PlainTextResponse)
-def metrics(x_metrics_token: str | None = Header(default=None)) -> str:
-    """Prometheus text exposition."""
+def metrics(x_metrics_token: str | None = Header(default=None),
+            db: Session = Depends(get_db)) -> str:
+    """Prometheus text exposition.
+
+    Scan-execution telemetry is read from the database on the way out (RED-5). The worker is a
+    different process, so anything it counted in memory would never reach this endpoint — and a
+    metric that is structurally always zero is worse than an absent one, because it reads as "no
+    engines have failed" rather than "nobody is looking".
+
+    A database failure here is surfaced, not swallowed: serving HTTP 200 with stale numbers is how
+    a monitoring system reports health it did not measure.
+    """
     _operator(x_metrics_token)
+    try:
+        collect_execution_metrics(db)
+    except Exception as exc:  # noqa: BLE001 - reported, never rendered as healthy silence
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"scan-execution metrics could not be read from the database: "
+            f"{type(exc).__name__}: {exc}",
+        ) from exc
     return REGISTRY.render()
 
 

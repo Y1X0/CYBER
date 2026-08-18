@@ -59,7 +59,21 @@ def open_items(
         query = query.where(Finding.id.in_(finding_ids))
     findings = list(session.execute(query.limit(5000)).scalars())
     if not findings:
-        return {"opened": 0, "existing": 0, "grouped": 0}
+        # Nothing to open, and the caller is told which of the two reasons applies. "opened: 0"
+        # with no explanation is indistinguishable from a bug, and this is a button a customer
+        # presses (WP-G2 audit, RED-6).
+        return {
+            "opened": 0, "existing": 0, "grouped": 0,
+            "considered": 0,
+            "requested": len(finding_ids) if finding_ids else 0,
+            "reason": (
+                "none of the requested findings is in a trackable state "
+                f"({', '.join(_TRACKABLE_STATUSES)}) — a finding that is resolved or whose risk "
+                "has been accepted does not get work opened against it"
+                if finding_ids else
+                "there are no findings in a trackable state for this tenant"
+            ),
+        }
 
     existing_finding_ids = {
         row.finding_id for row in session.execute(
@@ -114,7 +128,20 @@ def open_items(
 
     log.info("remediation_items_opened", tenant=str(tenant_id), opened=opened,
              existing=len(existing_finding_ids), grouped=grouped)
-    return {"opened": opened, "existing": len(existing_finding_ids), "grouped": grouped}
+    result = {
+        "opened": opened, "existing": len(existing_finding_ids), "grouped": grouped,
+        "considered": len(findings),
+        "requested": len(finding_ids) if finding_ids else 0,
+    }
+    if opened == 0:
+        # Nothing was created, so say which of the two harmless reasons it was. The response is
+        # otherwise indistinguishable from a silent failure (RED-6).
+        result["reason"] = (
+            f"every one of the {len(findings)} trackable finding(s) is already tracked: "
+            f"{len(existing_finding_ids)} has an item of its own and {grouped} belong to a "
+            f"correlation group that already has one"
+        )
+    return result
 
 
 def verify_after_scan(session: Session, *, scan_id: uuid.UUID, now: dt.datetime | None = None

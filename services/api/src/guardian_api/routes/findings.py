@@ -461,3 +461,58 @@ def bulk_triage(
     db.commit()
     del request
     return BulkTriageResult(updated=updated, refused=refused)
+
+
+# ── retest one finding ────────────────────────────────────────────────────────────────────────────
+class RetestResult(BaseModel):
+    status: str
+    scan_id: uuid.UUID | None = None
+    engine: str | None = None
+    note: str = (
+        "A retest is an ordinary scan of this finding's asset, restricted to the engine that "
+        "produced it. The verdict is recorded when that scan completes: the finding stays open if "
+        "it is still present, and is resolved only if the engine ran cleanly and did not report it."
+    )
+
+
+@router.post("/{finding_id}/retest", response_model=RetestResult, status_code=202)
+def retest(
+    finding_id: uuid.UUID,
+    request: Request,
+    identity: Identity = Depends(require_staff_write),
+    db: Session = Depends(get_db),
+    ip: str | None = Depends(client_ip),
+) -> RetestResult:
+    """Ask for one finding to be re-checked (WP-E2).
+
+    The work is queued rather than performed here: a retest runs the real engine through the real
+    orchestrator, which is what stops a retest and a scan disagreeing about what "present" means.
+    Accepted with `202` for that reason — the answer arrives with the scan, not with this response.
+    """
+    finding = db.execute(
+        _visible(select(Finding), identity).where(Finding.id == finding_id)
+    ).scalar_one_or_none()
+    if finding is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "finding not found")
+
+    from guardian_scanner.verification import retest_finding
+
+    outcome = retest_finding(str(finding.id))
+    if outcome.get("status") != "queued":
+        # Never a silent success: if the retest could not be queued, say so with the reason the
+        # worker gave rather than returning an empty 202.
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"the retest could not be queued: {outcome.get('status', 'unknown reason')}",
+        )
+
+    record_audit(
+        db, action="finding.retest_requested", tenant_id=identity.tenant_id,
+        customer_id=finding.customer_id, actor_id=identity.user.id, entity_type="finding",
+        entity_id=str(finding.id), ip=ip,
+        metadata={"scan_id": outcome.get("scan_id"), "engine": outcome.get("engine")},
+    )
+    db.commit()
+    del request
+    return RetestResult(status="queued", scan_id=uuid.UUID(outcome["scan_id"]),
+                        engine=outcome.get("engine"))

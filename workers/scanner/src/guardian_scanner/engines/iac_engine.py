@@ -26,6 +26,10 @@ from guardian_scanner.iac.loaders import load_cloudformation, load_path, load_te
 _MAX_FINDINGS = 1_000
 
 
+class IacInputError(RuntimeError):
+    """There was no infrastructure code to read (readiness audit, Phase 4)."""
+
+
 class IacEngine:
     key = EngineKey.IAC
     name = "Guardian IaC (Terraform, CloudFormation, Terraform plan)"
@@ -59,10 +63,16 @@ class IacEngine:
                 return load_cloudformation(text, "<inline>")
             return load_terraform(text, "<inline>")
         if not ctx.workspace_path:
-            return []
+            raise IacInputError(
+                "no workspace and no inline content, so no infrastructure code was read. An "
+                "absence of input is not an absence of misconfiguration."
+            )
         root = Path(ctx.workspace_path)
         if not root.exists():
-            return []
+            raise IacInputError(
+                f"the workspace path {ctx.workspace_path!r} does not exist, so no infrastructure "
+                "code was read"
+            )
         return load_path(root)
 
 
