@@ -62,7 +62,7 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
-| E1 | Cross-engine correlation | `TESTED` | `pending` | 36 (`test_correlation`, `integration/test_correlation_persistence`) | Five deterministic rules producing three kinds of group: **duplicate** (one credential seen by three engines is one problem), **corroboration** (a SAST taint path plus a DAST observation of the same CWE), **chain** (a vulnerable dependency that is also answering on a port; an exposed `.git` plus a committed secret). Escalations are recorded in the group's rationale. **No member is ever deleted or hidden** — the evidence trail is the product. Migration `0015`, RLS live-verified on both tables. |
+| E1 | Cross-engine correlation | `TESTED` | `fc1adf1` | 36 (`test_correlation`, `integration/test_correlation_persistence`) | Five deterministic rules producing three kinds of group: **duplicate** (one credential seen by three engines is one problem), **corroboration** (a SAST taint path plus a DAST observation of the same CWE), **chain** (a vulnerable dependency that is also answering on a port; an exposed `.git` plus a committed secret). Escalations are recorded in the group's rationale. **No member is ever deleted or hidden** — the evidence trail is the product. Migration `0015`, RLS live-verified on both tables. |
 | E2 | Validation & retest | `NOT_STARTED` | — | — | |
 | E3 | AI analyst v2 | `BLOCKED_EXTERNAL` | — | — | Needs `ANTHROPIC_API_KEY` in the production environment. Provider selection already implemented (`providers/__init__.py:19`); production currently runs the deterministic stub. |
 | E4 | Attack path v2 | `NOT_STARTED` | — | — | |
