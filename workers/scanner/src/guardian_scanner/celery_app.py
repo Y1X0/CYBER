@@ -59,6 +59,9 @@ celery_app = Celery(
         "guardian_scanner.tools.tasks",
         # The sweep that turns tenant schedules into queued work (WP-A3).
         "guardian_scanner.scheduling",
+        # Discovered service version → advisory → finding (WP-C3). Registered here or the task
+        # exists and is unreachable from a real worker, which is how 6B/6C stayed test-only.
+        "guardian_scanner.service_cve",
     ],
 )
 
@@ -92,6 +95,7 @@ celery_app.conf.update(
         "guardian.sync_osv": {"queue": "default"},
         "guardian.sync_kev": {"queue": "default"},
         "guardian.sync_epss": {"queue": "default"},
+        "guardian.match_service_versions": {"queue": "default"},
     },
     # Recurring work. Beat fires these; per-tenant cadence lives in the `schedules` table, because
     # a static config file cannot be edited through the API and cannot hold one customer's timing

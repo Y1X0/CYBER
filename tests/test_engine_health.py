@@ -95,3 +95,16 @@ def test_every_declared_scanner_plugin_resolves():
         engine = getattr(module, class_name)()
         assert engine.key.value == key, f"{key} declares an engine whose key is {engine.key.value}"
         assert engine.health().ok is not None
+
+
+def test_every_task_module_the_worker_declares_imports():
+    """A task registered nowhere is a task a real worker cannot run — which is how discovery
+    stayed test-only through two phases."""
+    from guardian_scanner.celery_app import celery_app
+
+    for module in celery_app.conf.include:
+        importlib.import_module(module)
+
+    registered = set(celery_app.tasks)
+    for name in celery_app.conf.task_routes:
+        assert name in registered, f"{name} is routed but no module registers it"
