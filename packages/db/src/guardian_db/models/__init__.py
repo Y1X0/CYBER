@@ -31,6 +31,8 @@ from guardian_db.models.policy import Policy
 from guardian_db.models.reporting import Report, ReportApproval, ReportSection
 from guardian_db.models.scanning import (
     Finding,
+    FindingCorrelation,
+    FindingCorrelationMember,
     FindingEvent,
     RemediationItem,
     Scan,
@@ -66,6 +68,8 @@ __all__ = [
     "FeedState",
     "FeedSync",
     "Finding",
+    "FindingCorrelation",
+    "FindingCorrelationMember",
     "FindingEvent",
     "GraphEdge",
     "GraphNode",
