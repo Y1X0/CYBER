@@ -10,7 +10,7 @@ against a real system and the output was inspected — not that a test double re
 
 Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 0% operable.
 
-**Current: 793 tests passing** (+241), 6 work packages delivered, CI green.
+**Current: 857 tests passing** (+305), 8 work packages delivered, CI green.
 
 ---
 
@@ -18,10 +18,10 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
-| A1 | Worker fleet — artifact plane | `IMPLEMENTED` | `1c2ed8e` | — | Needs only a container host; no kernel privileges. Deployment is a billing action, not an engineering one. |
+| A1 | Worker fleet — artifact plane | `BLOCKED_EXTERNAL` | `9017610` | — | Image builds and pushes; provisioning is refused by the platform. See BLOCKER-1. |
 | A1b | Worker fleet — network plane | `BLOCKED_EXTERNAL` | — | — | Only `nmap_provider` and `nmap_service_provider` set `external_binary=True` and are forced onto `uid_nft`. That plane alone needs `CAP_NET_ADMIN`. |
-| A2 | Scanner runtime image | `IMPLEMENTED` | `1c2ed8e` | 28 (`test_tool_licenses`) + 8 (`test_engine_health`) | `Dockerfile.scanner` — trivy, gitleaks, osv-scanner, syft, grype, semgrep, checkov, all version-pinned and licence-cleared. Gate passes against the real image. Not built here (no usable docker daemon), so `IMPLEMENTED` not `DEPLOYED`. |
-| A3 | Scheduler + notifications | `NOT_STARTED` | — | — | |
+| A2 | Scanner runtime image | `LIVE_VERIFIED` | `a959396` | 28 (`test_tool_licenses`) + 8 (`test_engine_health`) | Built and pushed: `ghcr.io/y1x0/cyber-scanner@sha256:80037347e22ee4574bc9ebfe5a557cfb0399d178049cf57a0c20be81102e61ac`. Step 8 of run 32039299600 executed each tool inside the image; licence gate passed first. Release asset URLs are resolved from the GitHub API on the runner, not written from memory. |
+| A3 | Scheduler + notifications | `TESTED` | `96b73a6` | 10 (`test_scheduling`) | `schedules` table + migration `0012`, RLS live-verified (`rls_enabled=true`, `policy=tenant_isolation roles=guardian_app`). Sweep claims the slot before dispatch; a six-hour outage produces one run, not six. Beat entries `sweep-schedules` (300s) and `sync-vulnerability-feeds` (86400s). Cannot reach `DEPLOYED` while A1 is blocked — beat needs a worker. |
 | A4 | Tool execution API | `NOT_STARTED` | — | — | |
 
 ## Track B — Discovery
@@ -50,7 +50,7 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 | D1 | Nuclei | `NOT_STARTED` | — | — | |
 | D2 | ZAP full DAST | `NOT_STARTED` | — | — | |
 | D3 | SCA v2 | `TESTED` | `def7df6` | 30 (`test_sca_lockfiles`) | 9 lockfile formats incl. transitive deps; `OsvVulnMatcher` connects the client that had zero call sites; `CompositeVulnMatcher` merges sources by advisory id; CVSS v3.x base scoring. Live OSV query needs egress (see BLOCKER-4). |
-| D4 | SAST v2 | `NOT_STARTED` | — | — | |
+| D4 | SAST v2 | `LIVE_VERIFIED` | `pending` | 54 (`test_sast_taint`, `test_sast_engine`) | AST taint analysis: 11 sink classes, class-specific sanitizers, import-alias resolution, inter-procedural summaries, comment/string masking. Against an 11-route vulnerable fixture: **8/8 planted flaws found, 0 false positives on the 3 safe variants**. Against Guardian's own 26k lines: 40 findings → 4 after fixing the noise the first run exposed, all true positives. |
 | D5 | Secrets v2 (git history) | `TESTED` | `1ed0e35` | 8 (`test_secrets_history`) | Scans lines added by past commits against the existing patterns and entropy heuristic; clone fetches history (bounded, blobless at depth 0). Verified on a real repository where the secret was deleted in a later commit: working tree clean, finding still raised, raw value never persisted, one report per credential rather than per commit. |
 | D6 | Container / image | `NOT_STARTED` | — | — | |
 | D7 | Kubernetes posture | `NOT_STARTED` | — | — | |
@@ -114,9 +114,36 @@ So the planes split, and only one is blocked:
 | **Artifact** | any container host | SAST, SCA, secrets, container images, IaC, K8s manifests, CSPM — the whole code-security product | ready to deploy |
 | **Network** | `CAP_NET_ADMIN` + `nft` | nmap today; nuclei, ZAP, naabu when added | blocked |
 
-**Operator action:** a paid worker instance for the artifact plane (Render background worker,
-Fly.io Machine, or any container host — no privileges needed), and separately a privileged host
-when the network plane is built. The first is a billing decision alone.
+**Attempted and refused by the platform.** The image is built, pushed and verified; the worker
+cannot be created. Run [32039299600](https://github.com/Y1X0/CYBER/actions/runs/32039299600),
+step 9, verbatim:
+
+```
+  existing    : 0 service(s) matched name='guardian-worker'
+##[error]worker provisioning failed: Render API 402 on POST /services:
+{"message":"Payment information is required to complete this request.
+To add a card, visit https://dashboard.render.com/billing"}
+```
+
+Render offers **no free tier for background workers** — `POST /v1/services` with
+`type=background_worker` is rejected with `402` before any resource is allocated. The service list
+in the same run returned `0 service(s) matched`, so nothing was created and nothing was billed on
+any attempt. This is a platform pricing rule, not a defect in our provisioning code, and no amount
+of retrying changes it. Retries have stopped.
+
+The workaround that would "unblock" this — running the consumer inside the existing free web
+service — is refused deliberately. It would put unbounded scan work on the request-serving process,
+so a customer's scan would degrade the API for every other tenant, and Render's free web service
+sleeps on idle, which silently stops the queue. Hiding a capacity limitation inside the API tier is
+worse than an honest blocker.
+
+**Operator action:** any container host that will run a long-lived process — a Render paid worker,
+a Fly.io Machine, a single VPS, or a laptop running `celery -A guardian_scanner worker`. Nothing in
+the artifact plane needs privileges. Separately, a privileged host when the network plane is built.
+
+Everything downstream of the *engines themselves* remains buildable and testable without this host:
+engines run in-process and are exercised directly by the test suite. What is blocked is production
+execution, not development.
 
 ### BLOCKER-2 — CT egress in this build environment (limits B1 live verification only)
 
