@@ -10,7 +10,9 @@ against a real system and the output was inspected — not that a test double re
 
 Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 0% operable.
 
-**Current: 2131 Python tests + 15 web tests passing** (+1594), 36 work packages delivered, 0 skipped on a database built from zero under the RLS-enforced role.
+**Current: 2160 Python tests + 42 web tests passing** (+1650), 37 work packages delivered, 0 skipped on a database built from zero under the RLS-enforced role.
+
+The productization phase (`de4aa1e`) turned the platform into a product a customer can operate: a console covering the whole journey, plus the four API seams it needed — `POST /auth/signup`, `POST /authorizations`, `GET /scans/{id}/engines` and `GET /scans/queue-health`. No new engine, no new vulnerability class, no architectural change. Wiring it exposed two live defects: `queue-health` was shadowed by `GET /scans/{scan_id}` and unreachable, and `POST /auth/signup` could not write under the RLS-enforced role. See `docs/PRODUCTION_AUDIT.md`.
 
 The WIRE → VERIFY gate (`7909782`) connected the capabilities the readiness audit found built and unreachable — outbound webhooks, service→CVE matching, correlation and per-finding retest — and closed the false-clean paths in five engines. See `docs/PRODUCTION_AUDIT.md`.
 

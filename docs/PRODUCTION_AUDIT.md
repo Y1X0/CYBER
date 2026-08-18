@@ -1,40 +1,40 @@
 # Guardian — Production / Commercial Readiness Audit
 
-**Re-audited at `7909782`** after the WIRE → VERIFY gate. The original audit at `59b191f`
-(commit `83edbda`) is summarised in §0; every finding it raised is tracked to a new status in §4.
+**Re-audited at `de4aa1e`** after the productization phase. The WIRE → VERIFY re-audit at `7909782`
+is carried forward in §4 and §6; the original audit at `83edbda` is summarised in §0.
 
-Method, unchanged: the golden path is **executed**, not read. It now runs as a committed test
+Method, unchanged: the golden path is **executed**, not read. It runs as a committed test
 (`tests/integration/test_golden_path.py`) against the real API and the real orchestrator, on a
-database built from zero, under the RLS-enforced `guardian_app` role. "Tests pass" is still not
-accepted as evidence of production operation anywhere in this document.
+database built from zero, under the RLS-enforced `guardian_app` role. It now also runs through the
+product UI (`apps/web/src/Journey.test.tsx`), against the real shell, router and screens. "Tests
+pass" is still not accepted as evidence of production operation anywhere in this document.
 
 ---
 
-## 0. What the first audit found
+## 0. What the earlier audits found
 
-Three capabilities were complete, tested, and **unreachable**: outbound webhooks, service→CVE
-matching, and cross-engine correlation had no caller anywhere outside their own tests. A fourth
-(per-finding retest) had no API. Scan-execution telemetry was a declared metric that was never
-emitted. The conclusion was that the packages had each been finished in isolation and several were
-never connected — "a well-built parts bin rather than a running system".
+The first audit found three capabilities complete, tested, and **unreachable** — outbound webhooks,
+service→CVE matching and cross-engine correlation had no caller anywhere outside their own tests.
+The WIRE phase connected them, and connecting them exposed three real defects (§5.1–5.3).
 
-That is what this pass fixed.
+The second audit found the resulting machine assembled and unusable: the console could not perform
+a single write, there was no way to create a tenant, and no route could record an authorization. A
+customer could not reach any of it without curl. That is what this pass fixed.
 
 ---
 
 ## 1. Executive verdict
 
-| Dimension | Was | Now | Why |
-|---|---|---|---|
-| **Engineering completeness** | 85% | **95%** | Every capability the platform ships is now reachable from the path that should reach it. Remaining 5%: per-run engine health (a degraded tool still completes cleanly), and the tool-execution framework which belongs to the un-started A4. |
-| **Product completeness** | 45% | **60%** | The API now drives the whole journey including retest and notification. Unchanged and still the ceiling: the console cannot perform a single write action, there is no signup or tenant-creation API, and no route records a written-consent authorization. |
-| **Commercial readiness** | 25% | **45%** | A customer would now receive real value from every stage *once work executes*. It still does not execute: no worker (A1), so `POST /scans` queues forever in production. |
-| **Operational readiness** | 40% | **70%** | Scan execution is observable for the first time — queue depth, scans by status, engine runs by engine and status, duration quantiles, and the age of the last completion, all read from the database at scrape time. `scanner_liveness` alerts when work is waiting and nothing is finishing. Still not deployed, and DR is still unrehearsed. |
-| **Security assurance** | 80% | **88%** | Five engines could report clean when they had read nothing; they now refuse with a reason. Logs and data boundaries agree on what a secret looks like. A false-correlation defect that merged unrelated credentials is fixed. |
+| Dimension | Audit 1 | Audit 2 | **Now** | Why |
+|---|---|---|---|---|
+| **Engineering completeness** | 85% | 95% | **96%** | Unchanged in substance: no new engine, no new vulnerability class, no architectural change. The four new routes are seams onto existing domain logic. Remaining 4%: per-run engine health at the *reconciliation* boundary (Y4), and the un-started A4 tool framework. |
+| **Product completeness** | 45% | 60% | **90%** | The whole journey — sign up, organization, domain proof, asset, authorization, scan, findings, dossier, report, remediation, retest, notifications — is operable from the console with no API knowledge. Remaining 10%: no user administration, no per-customer branding, no saved views, and remediation ownership is take/release rather than assignment to a named colleague (no directory endpoint exists). |
+| **Commercial readiness** | 25% | 45% | **60%** | A prospect can be shown the product and can drive it themselves. It still does not execute work: no worker (A1), so `POST /scans` queues forever in a deployment. That single fact is the ceiling on this number. |
+| **Operational readiness** | 40% | 70% | **72%** | Unchanged apart from `GET /scans/queue-health`, which puts the operator's own `scanner_liveness` judgement in front of the customer. Still not deployed; DR still unrehearsed. |
+| **Security assurance** | 80% | 88% | **90%** | The new consent endpoint does not weaken the ownership gate — `active_recon` is refused without a verified domain — and sign-up now writes under RLS with the tenant bound before the first insert, which is a tighter rule than the code it replaced. |
 
-**One-sentence verdict:** the assembly is done and the product now works end to end in a test
-harness; what remains between here and a pilot is an execution environment and a customer-facing
-way to drive it.
+**One-sentence verdict:** the product is now usable by the customer it was built for, and it still
+has nothing to execute their work.
 
 ---
 
@@ -42,91 +42,97 @@ way to drive it.
 
 | | |
 |---|---|
-| Commit | `7909782` (from `59b191f`) |
-| Tests | **2051 → 2131**, 0 skipped, 0 failed |
-| Clean-database run | `alembic upgrade head` from zero, `guardian_app` (`rolsuper=f`, `rolbypassrls=f`), 41 RLS policies, no test-only authorization shortcuts → **2131 passed** |
-| CI | green at `4c602fc` (run 32104995687 lineage); lint, migrate, seed, tests, web typecheck/test/build, licence gate, SBOM, pip-audit |
-| Golden path | 19 stages, all asserted, 4 explicitly UNVERIFIED |
-| New tests | `test_wired_pipeline` (21), `test_golden_path` (19), `test_false_clean_matrix` (14), `test_scan_telemetry` (10), `test_log_scrubbing` (16) |
+| Commit | `de4aa1e` (from `ca5812b`) |
+| Backend tests | **2131 → 2160**, 0 skipped, 0 failed |
+| Web tests | **13 → 42**, 0 failed |
+| Clean-database run | `alembic upgrade head` from an empty database (53 tables, 41 RLS policies), `guardian_app` (`rolsuper=f`, `rolbypassrls=f`), no test-only shortcuts → **2160 passed** |
+| CI | green at `1fe2fe5` (run 32170951294); lint, migrate, seed, tests, web typecheck/test/build, licence gate, SBOM, pip-audit |
+| Golden path | 22 stages, all asserted, **3** explicitly UNVERIFIED (was 4) |
+| UI journey | 4 tests driving the real `App`: empty account → asset → domain → authorization → scan → findings → dossier → retest → report → remediation |
+| New tests | `test_product_seams` (26), `Journey.test.tsx` (4), `Screens.test.tsx` (16), `Scans.test.tsx` (7) |
 
 ---
 
 ## 3. Golden-path matrix
 
-Executed by `tests/integration/test_golden_path.py`. Status is what the run demonstrates, not what
-the code contains.
+Executed by `tests/integration/test_golden_path.py` (API) and `apps/web/src/Journey.test.tsx` (UI).
+Status is what the run demonstrates, not what the code contains.
 
-| # | Stage | Status | Evidence |
-|---|---|---|---|
-| 1 | Tenant + owner | **RED** | Written directly to the database. No signup or tenant-creation API exists. |
-| 2 | Authentication | **GREEN** | `GET /auth/me` → 200 |
-| 3 | Customer | **GREEN** | `POST /customers` → 201 |
-| 4 | Ownership challenge | **GREEN** | 201 with a publishable `_guardian-challenge.<domain>` TXT record and token |
-| 5 | Ownership check (refusal) | **GREEN** | Real DNS lookup, no record published → not verified |
-| 5b | Ownership check (pass) | **UNVERIFIED** | Needs a domain we control |
-| 6 | Asset onboarding | **GREEN** | `POST /assets` → 201 |
-| 7 | Authorization | **YELLOW** | Written directly; no API creates one |
-| 8 | Discovery | **GREEN** | `POST /discovery/runs` → 202 |
-| 9 | Scan accepted | **GREEN** | `POST /scans` → 202 |
-| 9b | Scan executes in production | **BLOCKED_EXTERNAL** | No worker (A1/A1b). Orchestrator invoked in-process. |
-| 10 | Findings | **GREEN** | Returned with severity and category |
-| 11 | Evidence | **GREEN** | Present, and the credential is absent from the API response |
-| 12 | Deterministic risk | **GREEN** | Integer score > 0 from `guardian_core.scoring` |
-| 13 | Service → CVE | **GREEN** | Controlled fixture: advisory + affected version → `vuln-service` finding with provenance; patched version → none |
-| 14 | Correlation | **GREEN** | Runs on the scan path; groups one credential across two engines; refuses to merge three credentials on one line |
-| 15 | Attack paths | **GREEN** | `chains` and `unchainable_findings` both reported |
-| 16 | Workbench | **GREEN** | Summary + triage |
-| 17 | Compliance | **GREEN** | Three-state with coverage |
-| 18 | Report | **GREEN** | Created, exported, credential absent from the export |
-| 19 | Remediation | **GREEN** | Opened; truthful 200 + reason when nothing is created |
-| 20 | Retest | **GREEN** | `POST /findings/{id}/retest` → 202, verdict recorded, resolves after the fix |
-| 21 | Webhook delivery | **GREEN** | Queued, signed, attempted over a real socket, retry scheduled |
-| 21b | Webhook 2xx round trip | **UNVERIFIED** | Needs a reachable receiver |
+| # | Stage | API | UI | Evidence |
+|---|---|---|---|---|
+| 1 | Organization created | **GREEN** | **GREEN** | `POST /auth/signup` → 201; creates tenant, owner, membership, first customer and nothing else |
+| 2 | Authentication | **GREEN** | **GREEN** | `GET /auth/me` → 200 |
+| 3 | Business unit | **GREEN** | **GREEN** | `POST /customers` → 201; Organization screen |
+| 4 | Ownership challenge | **GREEN** | **GREEN** | Publishable `_guardian-challenge.<domain>` TXT record and token, shown to the customer |
+| 5 | Ownership check (refusal) | **GREEN** | **GREEN** | Real DNS lookup, no record published → not verified |
+| 5b | Ownership check (pass) | **UNVERIFIED** | — | Needs a domain we control |
+| 6 | Asset onboarding | **GREEN** | **GREEN** | `POST /assets` → 201 |
+| 7 | Authorization recorded | **GREEN** | **GREEN** | `POST /authorizations` → 201; artifact plane only, responsible identity on the row |
+| 7b | Active testing refused unverified | **GREEN** | **GREEN** | 409 naming the unverified domain |
+| 8 | Discovery | **GREEN** | **GREEN** | `POST /discovery/runs` → 202 |
+| 9 | Scan accepted | **GREEN** | **GREEN** | `POST /scans` → 202 |
+| 9b | Scan executes in production | **BLOCKED_EXTERNAL** | **GREEN (blocked state)** | No worker (A1/A1b). The API test invokes the orchestrator in-process; the UI test asserts the customer is told the scan is waiting, with no fabricated progress and no result. |
+| 10–12 | Findings, evidence, deterministic risk | **GREEN** | **GREEN** | Returned with evidence; credential absent from the response; integer score from `guardian_core.scoring`; rationale shown on the dossier |
+| 13 | Service → CVE | **GREEN** | n/a | Controlled fixture: advisory + affected version → finding with provenance; patched version → none |
+| 14 | Correlation | **GREEN** | **GREEN** | Grouped on the scan path; shown on the dossier as one issue seen several ways |
+| 15 | Attack paths | **GREEN** | **GREEN** | `chains` and `unchainable_findings` both reported |
+| 16 | Workbench | **GREEN** | **GREEN** | Filter, sort, triage with a required justification for false-positive / accepted-risk |
+| 17 | Compliance | **GREEN** | **GREEN** | Three-state with coverage |
+| 18 | Report | **GREEN** | **GREEN** | Created, exported, credential absent; downloaded from the UI with the bearer token |
+| 19 | Remediation | **GREEN** | **GREEN** | Opened; truthful 200 + reason when nothing is created; SLA, owner, due date, ticket body |
+| 20 | Retest | **GREEN** | **GREEN** | 202, verdict recorded, resolves after the fix |
+| 21 | Webhook delivery | **GREEN** | **GREEN** | Queued, signed, attempted over a real socket, retry scheduled |
+| 21b | Webhook 2xx round trip | **UNVERIFIED** | — | Needs a reachable receiver |
 
 ---
 
-## 4. Every previously RED item
+## 4. Previously RED and YELLOW items
 
 | ID | Item | Was | Now | Evidence |
 |---|---|---|---|---|
-| RED-1 | Outbound webhooks never fire | RED | **GREEN** | `tasks.py` emits `scan.completed`/`scan.failed`/`finding.critical`; delivery persisted, signed, attempted, retried. 8 tests. |
-| RED-2 | Service version → CVE never runs | RED | **GREEN** | Wired after `enrich_graph`; controlled advisory fixture produces a finding, patched version does not, unversioned service counted not guessed. |
-| RED-3 | Findings never correlated | RED | **GREEN** | Wired after reconciliation. Fixing the wiring exposed a real defect in the rule — see §5. |
-| RED-4 | Per-finding retest unreachable | RED | **GREEN** | `POST /findings/{id}/retest`; still-present leaves open, fixed resolves, other tenants 404. |
-| RED-5 | No scan telemetry | RED | **GREEN** | DB-derived gauges + `scanner_liveness` SLO. The dead counter is deleted. |
-| RED-6 | Remediation silent no-op | RED | **GREEN** | 201 only when created; otherwise 200 with a machine-readable reason. |
-| YELLOW-1 | Two redaction implementations | YELLOW | **GREEN** | Logs use the 12-pattern boundary scrubber recursively; a test fails if a pattern is added to one and not the other. |
-| Phase 4 | Engines returning `[]` on no input | (new) | **GREEN** | `secrets`, `k8s`, `iac`, `cspm`, `api` now refuse with a reason → `not_checked`. |
+| RED-1…RED-6, YELLOW-1 | Wiring gaps from audit 1 | RED | **GREEN** | Unchanged since `7909782`; see git history for the per-item evidence |
+| Y1 | No signup / tenant-creation API | YELLOW | **GREEN** | `POST /auth/signup`, rate-limited, non-enumerating, grants nothing |
+| Y2 | No API records a written-consent authorization | YELLOW | **GREEN** | `POST /authorizations`; `written_consent` free, `active_recon` gated on a verified domain |
+| Y3 | Console is read-only | YELLOW | **GREEN** | 13 screens covering every customer workflow; every write operation a customer needs is reachable |
 
 ---
 
 ## 5. Defects found *by* this work
 
-Wiring a capability is the first time anyone runs it. Three real defects surfaced:
+Wiring a capability is the first time anyone runs it. Two more surfaced in this phase, both of
+which would have been live defects.
 
-### 5.1 Correlation merged unrelated credentials (fixed)
+### 5.1 `GET /scans/queue-health` was unreachable (fixed)
 
-`correlation.py::_secret_identity` read the redacted value from `evidence["detail"]`, and the
-secrets engine writes it at `evidence["match"]` — top level. The redacted branch therefore never
-fired on a real finding, and every identity fell through to `path:line`. The rule was wrong in both
-directions: three different credentials on one line of a `.env` were reported as *"one credential
-reported by several engines"*, while the same credential found by two engines in two places never
-grouped at all. Invisible because correlation had no caller. Both directions are now tested.
+It was declared after `GET /scans/{scan_id}`. Starlette matches routes in declaration order and
+`{scan_id}` compiles to `[^/]+`, so the literal path matched the parameterised route first and the
+UUID coercion rejected it with a 422 — the handler never ran. The endpoint the console uses to
+explain a waiting scan answered nothing but a validation error. Moved above `/{scan_id}`; a test
+now asserts the literal route resolves.
 
-### 5.2 A notification bug could fail a committed scan (fixed)
+### 5.2 Sign-up could not write under RLS (fixed)
 
-The first version of the webhook emitter used `event=` as a structlog keyword — which is reserved —
-so it raised *after* the deliveries were queued and took the whole completed scan down with it. The
-emitter is now guarded as a unit: the blast radius of the notification path stops at a log line.
+`get_db` hands out an RLS-enforced session. The policies on `tenants`, `tenant_memberships` and
+`customers` check each row against `app.current_tenant`, and sign-up is the one request where the
+row being inserted *is* the tenant — so with nothing bound, PostgreSQL refused the insert and the
+whole front door returned a 500. Invisible on a developer database, where the app role is the owner
+and RLS is inert; CI sets `GUARDIAN_APP_DATABASE_URL` to `guardian_app`, so this would have been red
+on the first push. It now chooses the tenant id and binds it before writing, which is also the
+tighter rule: for the length of that transaction sign-up can write **only** rows belonging to the
+organization it is creating. The slug pre-flight check was deleted with it — under RLS that session
+can never see another tenant's slug, so the check always found it free and then failed on the unique
+index. Uniqueness is left to the database, with one suffixed retry.
 
-### 5.3 Five engines could report clean having read nothing (fixed)
+### 5.3 The console's empty state never fired (fixed)
 
-`engine_outcome` is the platform's single safety property: only a failed, non-completed or degraded
-run avoids `RESOLVED`. So an engine that returns `[]` because its input was missing hands
-reconciliation permission to resolve that asset's existing findings. A missing collector export
-would have quietly closed every cloud finding a customer had. This overturned a documented decision
-in `test_cspm_engine` — *"an asset with no collector export has not failed; it has nothing to
-assess"* — which is true about the engine and false about the platform.
+`Async` decided "empty" with `Array.isArray(data) && data.length === 0`, but every paginated loader
+returns `{rows, hasMore, nextCursor}`. The `empty` branch was therefore unreachable on every
+paginated screen, and each would have rendered a bare table header where the explanation belongs.
+Caught by the scan-screen tests before any of it shipped.
+
+Carried forward from audit 2: §5.1 correlation merged unrelated credentials, §5.2 a structlog
+keyword collision could fail a committed scan, §5.3 five engines could report clean having read
+nothing. All three remain fixed and guarded.
 
 ---
 
@@ -134,13 +140,11 @@ assess"* — which is true about the engine and false about the platform.
 
 | # | Item | Why it is not GREEN |
 |---|---|---|
-| Y1 | No signup / tenant-creation API | A tenant is created by `guardian_api.seed` or by hand. No self-serve onboarding is possible. |
-| Y2 | No API records a written-consent authorization | The only programmatic path to an `Authorization` is a passing ownership check. A signed pentest engagement cannot be represented, which blocks the managed-services motion. |
-| Y3 | Console is read-only | 7 read endpoints against 25 mutating operations. Every customer workflow needs curl. |
-| Y4 | Per-run engine health | A tool that crashes mid-run (semgrep, git history) is now *logged*, but the run still completes non-degraded, so reconciliation treats it as clean. Fixing it properly changes the engine contract — assembly cannot reach it. |
-| Y5 | DR unrehearsed | Backup and restore scripts exist and are documented; nobody has restored from them. The clean-database defect that would have broken a restore is fixed and guarded. |
-| Y6 | Feeds never synced live | Egress to NVD/OSV/KEV/EPSS is blocked here. The KB is seeded, so CVE matching is verified against a controlled advisory, not a live feed. |
-| Y7 | No live IdP / AI provider / AWS | SSO, AI narrative and cloud collection are verified against real tokens/stubs, never a live dependency. |
+| Y4 | Per-run engine health at the reconciliation boundary | The customer is now told: `GET /scans/{id}/engines` downgrades a degraded completed run to `inconclusive`, and the scan screen refuses to call an empty result clean when any engine did not fully answer. **Reconciliation still does not know.** A tool that crashes mid-run still completes non-degraded internally, so resolution treats it as clean. Fixing that changes the engine contract. |
+| Y5 | DR unrehearsed | Backup and restore scripts exist and are documented; nobody has restored from them. |
+| Y6 | Feeds never synced live | Egress to NVD/OSV/KEV/EPSS is blocked here. CVE matching is verified against a controlled advisory, not a live feed. |
+| Y7 | No live IdP / AI provider / AWS | SSO, AI narrative and cloud collection are verified against real tokens and stubs, never a live dependency. |
+| Y8 | No user administration | An organization has exactly one member — the owner created at sign-up. There is no invite flow and no directory endpoint, which is also why remediation ownership is take/release rather than assignment to a named colleague. |
 
 ---
 
@@ -148,9 +152,9 @@ assess"* — which is true about the engine and false about the platform.
 
 | # | Item | Impact |
 |---|---|---|
-| R1 | Nothing executes in production | `POST /scans` enqueues to Celery; no worker consumes it. Every stage downstream of "accepted" is theoretical in a deployment. This is A1/A1b — see §8. |
+| R1 | Nothing executes in production | `POST /scans` enqueues to Celery; no worker consumes it. Every stage downstream of "accepted" is theoretical in a deployment. This is A1/A1b — see §8. The product now states this to the customer rather than spinning: a queued scan with a stalled scanner is shown as waiting, with the reason, and no result is implied. |
 
-That is the only RED left. Every other previously-RED item is GREEN.
+That is the only RED.
 
 ---
 
@@ -171,31 +175,31 @@ That is the only RED left. Every other previously-RED item is GREEN.
 
 ## 9. Can we sell this today?
 
-**NO — but the reason has changed, and that matters.**
+**NO — and exactly one thing stands in the way.**
 
-Before: three capabilities a buyer would be sold on produced nothing, silently.
-Now: everything works, and nothing runs.
+Audit 1: three capabilities a buyer would be sold on produced nothing, silently.
+Audit 2: everything worked and nothing ran, and a customer could not touch any of it.
+Now: a customer can sign up, onboard, authorize, ask for a scan, and be told — accurately — that
+Guardian has accepted it and has nothing to run it with.
 
 Minimum conditions for a controlled design-partner pilot:
 
-1. **A worker executes tasks.** Everything else is downstream of this. *(External.)*
-2. **A way for the customer to act.** Either a console that can write, or an operator running the
-   API on their behalf as a managed service — which is a legitimate pilot shape and needs Y2 (an
-   authorization the operator can record) more than it needs Y3.
+1. **A worker executes tasks.** Everything else is downstream of this. *(External — a purchase.)*
+2. ~~A way for the customer to act.~~ **Done.**
 3. **One live end-to-end run against a controlled vulnerable target**, observed: finding → report →
-   remediation → retest → webhook received with a verifying signature.
-4. **An alert wired to `scanner_liveness`**, so a stalled scanner is noticed by the operator.
-
-Items 2–4 are days of work. Item 1 is a purchase.
+   remediation → retest → webhook received with a verifying signature. *(Needs 1.)*
+4. **An alert wired to `scanner_liveness`**, so a stalled scanner is noticed by the operator before
+   the customer sees the queued-and-nothing-running banner. *(Hours of work.)*
 
 ---
 
 ## 10. Verdict
 
-### `BLOCKED_EXTERNAL` — with the engineering gate cleared
+### `BLOCKED_EXTERNAL` — engineering and product gates both cleared
 
-The WIRE and VERIFY phases are complete. What was a parts bin is now an assembled machine with a
-test harness proving it turns over. It has no power supply.
+The machine is assembled, it has a control panel, and the control panel tells the truth about a
+machine with no power supply. The remaining work between here and a pilot is a purchase and one
+observed live run.
 
-**Pilot readiness: NO**, on one external blocker and one product gap (a customer-facing way to
-drive it). Neither is a defect in what was built.
+**Pilot readiness: NO**, on one external blocker. Nothing left on the critical path is a defect in
+what was built.

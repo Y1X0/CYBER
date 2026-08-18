@@ -305,6 +305,35 @@ describe("a customer, start to finish, without touching the API", () => {
     expect(screen.queryByText(/this asset is clean/i)).not.toBeInTheDocument();
   });
 
+  it("tells the customer on every screen when the backend cannot answer", async () => {
+    // Every route fails. No screen may render as though it had an answer — the one failure mode
+    // that turns this product into a liar is a blank panel where a refusal belongs.
+    const { ApiError } = await import("./api");
+    for (const key of Object.keys(api) as (keyof typeof api)[]) {
+      if (typeof api[key] === "function") {
+        vi.spyOn(api, key).mockRejectedValue(new ApiError(503, "the backend is unreachable"));
+      }
+    }
+    vi.spyOn(api, "me").mockResolvedValue(
+      { id: "u1", email: "owner@acme.example", name: "Owner" } as never);
+
+    render(<App />);
+    await screen.findByRole("navigation");
+
+    const screens = ["Dashboard", "Organization", "Assets", "Domains", "Authorization",
+                     "Discovery", "Scans", "Findings", "Remediation", "Reports", "Compliance",
+                     "Attack paths", "Notifications"];
+    for (const label of screens) {
+      go(label);
+      await waitFor(
+        () => expect(
+          screen.queryAllByText(/could not be loaded|unreachable|could not be reached/i).length,
+        ).toBeGreaterThan(0),
+        { timeout: 2000 },
+      );
+    }
+  });
+
   it("shows the server's refusal when the scan gate says no", async () => {
     const { ApiError } = await import("./api");
     backend();
