@@ -136,3 +136,10 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# `tools/` holds the licence gate and the SBOM generator: repo scripts, not installed
+# packages, and `tests/test_tool_licenses.py` imports the gate directly. Running as
+# `python -m pytest` puts the repo root on `sys.path` and hides that; the bare `pytest`
+# console script does not, which is how CI collected 1972 tests and then aborted on
+# `ModuleNotFoundError: No module named 'tools'` — one import error taking the whole run
+# with it. Stated here so both invocations behave the same.
+pythonpath = ["."]
