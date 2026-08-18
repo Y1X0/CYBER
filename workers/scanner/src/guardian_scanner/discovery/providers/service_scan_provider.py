@@ -28,8 +28,13 @@ from guardian_common.logging import get_logger
 from guardian_core.discovery import DiscoveredAsset, DiscoveredEdge, DiscoveryContext
 from guardian_core.enums import DiscoverySource, EdgeRelation, NodeType
 
-from guardian_scanner.discovery import fingerprint
-from guardian_scanner.discovery.ports import SENSITIVE_PORTS, expected_service, resolve_port_set
+from guardian_scanner.discovery import fingerprint, webprobe
+from guardian_scanner.discovery.ports import (
+    SENSITIVE_PORTS,
+    TLS_PORTS,
+    expected_service,
+    resolve_port_set,
+)
 from guardian_scanner.discovery.portscan import DEFAULT_RATE, OpenPort, SweepResult, sweep
 from guardian_scanner.discovery.protocol_registry import probe_for
 
@@ -43,6 +48,36 @@ _MAX_TARGETS = 256
 
 class TargetRefused(RuntimeError):
     """A target was refused before any packet was sent (fail-closed)."""
+
+
+_WEB_SERVICES = frozenset({"http", "https", "http-alt", "https-alt"})
+
+
+def _is_web(port: int, service: fingerprint.Service) -> bool:
+    """Whether an HTTP fetch is worth a second connection on this port.
+
+    Driven by what the service turned out to be, not only by the port: a web application on 8081 is
+    the normal case, and a plaintext fetch against a database port is a wasted connection.
+    """
+    if service.service in _WEB_SERVICES:
+        return True
+    return expected_service(port) in _WEB_SERVICES
+
+
+def _web_attributes(host: str, port: int, record: dict) -> dict:
+    """Analyse a recorded HTTP response from a snapshot through the production code path."""
+    scheme = "https" if port in TLS_PORTS else "http"
+    observation = webprobe.analyze(
+        record.get("url") or f"{scheme}://{host}:{port}/",
+        int(record.get("status", 0)),
+        dict(record.get("headers") or {}),
+        str(record.get("body") or ""),
+        set_cookies=list(record.get("set_cookies") or []),
+        redirect_chain=list(record.get("redirect_chain") or []),
+        left_scope=bool(record.get("left_scope")),
+        tls=record.get("tls"),
+    )
+    return observation.as_attributes()
 
 
 def _host_node_type(host: str) -> NodeType:
@@ -144,13 +179,25 @@ class ServiceScanProvider:
                 service.attributes.update(evidence.attributes)
                 service.service = service.service or evidence.protocol
                 service.confidence = max(service.confidence, evidence.confidence)
+                if _is_web(open_port.port, service):
+                    service.attributes.update(self._web(host, open_port.port))
                 return service
-        return fingerprint.probe(host, open_port.port, open_port.banner, expected=expected,
-                                 allow_probes=allow_probes)
+
+        service = fingerprint.probe(host, open_port.port, open_port.banner, expected=expected,
+                                    allow_probes=allow_probes)
+        if _is_web(open_port.port, service):
+            # WP-B3: a web service is worth far more than "port open". The technology inventory,
+            # the redirect chain and the missing security headers all come from one fetch.
+            service.attributes.update(self._web(host, open_port.port))
+        return service
+
+    def _web(self, host: str, port: int) -> dict:  # pragma: no cover - network
+        scheme = "https" if port in TLS_PORTS else "http"
+        observation = webprobe.probe(f"{scheme}://{host}:{port}/")
+        return observation.as_attributes()
 
     def _from_snapshot(self, host: str, host_snap: dict) -> Iterable[fingerprint.Service]:
         """Rebuild observations from a recorded snapshot, so CI exercises the same code path."""
-        del host
         for raw_port, record in sorted(host_snap.items(), key=lambda kv: int(kv[0])):
             port = int(raw_port)
             if not isinstance(record, dict):
@@ -160,6 +207,10 @@ class ServiceScanProvider:
             for key in ("tls", "missing_tls", "status", "server"):
                 if key in record:
                     service.attributes[key] = record[key]
+            # A recorded HTTP response goes through the same analysis a live one does, so the
+            # technology inventory in CI is produced by the code that produces it in production.
+            if isinstance(record.get("http"), dict):
+                service.attributes.update(_web_attributes(host, port, record["http"]))
             if record.get("tls") is not None:
                 service.service = service.service or "https"
             if banner == "" and record.get("tls") is None and not service.service:
