@@ -83,7 +83,9 @@ def test_k8s_flags_manifest_issues():
     findings = list(K8sEngine().run(_ctx("k8s_manifest", inline=MANIFEST)))
     titles = " ".join(f.title for f in findings)
     assert "Privileged container" in titles
-    assert "host namespace" in titles
+    # WP-D7 names which namespace is shared rather than lumping network/PID/IPC into one title:
+    # they are different exposures and a reader has to know which one is set.
+    assert "network namespace" in titles
     assert any(f.base_severity == Severity.CRITICAL for f in findings)
     assert all(f.engine == EngineKey.K8S for f in findings)
 
