@@ -152,7 +152,7 @@ nothing. All three remain fixed and guarded.
 
 | # | Item | Impact |
 |---|---|---|
-| R1 | Nothing executes in production | `POST /scans` enqueues to Celery; no worker consumes it. Every stage downstream of "accepted" is theoretical in a deployment. This is A1/A1b — see §8. The product now states this to the customer rather than spinning: a queued scan with a stalled scanner is shown as waiting, with the reason, and no result is implied. |
+| R1 | Nothing executes in production (deployment only) | `POST /scans` enqueues to Celery; no worker consumes it. Every stage downstream of "accepted" is theoretical in a deployment. This is A1/A1b — see §8. The product now states this to the customer rather than spinning: a queued scan with a stalled scanner is shown as waiting, with the reason, and no result is implied. |
 
 That is the only RED.
 
@@ -170,6 +170,25 @@ That is the only RED.
 | B-4 | No IdP | OIDC verified against real signed tokens, never a live provider |
 | B-5 | No controlled domain | A *passing* ownership check is unverified |
 | B-6 | No reachable webhook receiver | A 2xx delivery round trip is unverified |
+
+---
+
+## 8b. What the controlled pilot run established
+
+A single end-to-end run at `6c6dd64` against a real `celery worker` process, a real broker and a
+database built from empty under `guardian_app` — **25 stages PASS, 0 FAIL, 1 UNVERIFIED**. The
+execution path is no longer theoretical: a task crossed Redis into a separate OS process, six
+engines ran, 16 findings were persisted with evidence and deterministic scores, a report exported
+without the secret, remediation opened with due dates, a retest recorded a verdict, and four signed
+webhook deliveries were queued and attempted. Full evidence: `docs/PILOT_RUN.md`.
+
+Two properties were proven live rather than in a harness: a degraded engine is reported
+`inconclusive` and never `checked`, and a single-engine retest marked twelve other findings
+`not_checked` rather than resolving them.
+
+One defect surfaced — finding rows accumulate per scan, so a customer's open count over-reports
+(20 rows for 14 distinct issues after one retest). It over-reports rather than hides, and is
+recorded in `docs/PILOT_RUN.md` §4.1, not fixed.
 
 ---
 
