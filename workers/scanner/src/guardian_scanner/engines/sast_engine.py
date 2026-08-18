@@ -26,6 +26,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from guardian_common.logging import get_logger
 from guardian_core.enums import EngineKey, Severity
 from guardian_core.evidence import code_evidence
 from guardian_core.findings import RawFinding
@@ -216,6 +217,9 @@ _MAX_FILES = 20_000
 _TEST_MARKERS = ("/tests/", "/test/", "/spec/", "_test.", "test_", ".spec.", ".test.")
 
 
+log = get_logger("guardian.engine.sast")
+
+
 class SastEngine:
     key = EngineKey.SAST
     name = "Guardian SAST (taint analysis + pattern rules + optional semgrep)"
@@ -324,7 +328,12 @@ class SastEngine:
                 check=False,
             )
             data = json.loads(proc.stdout or "{}")
-        except (subprocess.SubprocessError, OSError, ValueError):
+        except (subprocess.SubprocessError, OSError, ValueError) as exc:
+            # semgrep is installed but did not answer. The built-in rules still ran, so this is
+            # reduced coverage rather than a failed scan — but it must not be silent, because
+            # fewer findings from a crashed tool looks exactly like a cleaner codebase
+            # (readiness audit, Phase 4).
+            log.warning("sast_semgrep_failed", error=f"{type(exc).__name__}: {exc}"[:200])
             return
         for res in data.get("results", []):
             extra = res.get("extra", {})

@@ -22,6 +22,7 @@ import subprocess  # noqa: S404 - fixed argv, no shell, bounded
 from collections.abc import Iterable
 from pathlib import Path
 
+from guardian_common.logging import get_logger
 from guardian_core.enums import EngineKey, Severity
 from guardian_core.findings import RawFinding
 
@@ -119,6 +120,9 @@ def _redact(value: str) -> str:
     return f"{value[:2]}{'*' * 8}{value[-2:]} (len={len(value)})"
 
 
+log = get_logger("guardian.engine.secrets")
+
+
 class SecretsInputError(RuntimeError):
     """There was nothing to read (readiness audit, Phase 4)."""
 
@@ -184,9 +188,14 @@ class SecretsEngine:
                  "--no-merges", "--unified=0", "--pretty=format:%x00commit %H"],
                 capture_output=True, text=True, timeout=_HISTORY_TIMEOUT, check=False,
             )
-        except (subprocess.SubprocessError, OSError):
-            return                      # history is a bonus surface; never fail the scan for it
+        except (subprocess.SubprocessError, OSError) as exc:
+            # History is a bonus surface and must never fail the scan — but a silent return loses
+            # the fact that it was not searched at all (readiness audit, Phase 4).
+            log.warning("secrets_history_unavailable", error=f"{type(exc).__name__}: {exc}"[:200])
+            return
         if proc.returncode != 0:
+            log.warning("secrets_history_failed", returncode=proc.returncode,
+                        stderr=(proc.stderr or "")[:300])
             return
 
         commit = "unknown"
