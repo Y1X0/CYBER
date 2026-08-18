@@ -17,6 +17,7 @@ from guardian_api.routes import (
     knowledge_base,
     reports,
     scans,
+    verifications,
     webhooks,
 )
 
@@ -29,6 +30,7 @@ v1 = APIRouter(prefix="/api/v1")
 v1.include_router(auth.router, prefix="/auth", tags=["auth"])
 v1.include_router(customers.router, prefix="/customers", tags=["customers"])
 v1.include_router(assets.router, prefix="/assets", tags=["assets"])
+v1.include_router(verifications.router, prefix="/verifications", tags=["ownership"])
 v1.include_router(scans.router, prefix="/scans", tags=["scans"])
 v1.include_router(discovery.router, prefix="/discovery", tags=["discovery"])
 v1.include_router(graph.router, prefix="/graph", tags=["graph"])

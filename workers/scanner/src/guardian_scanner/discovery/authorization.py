@@ -20,7 +20,16 @@ from guardian_db.models import Authorization, DomainEvent
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-_RECON_METHOD = "active_recon"
+# Two ways a target can be cleared for active probing, and the gate honours both:
+#
+# * `active_recon` — an operator recorded a written engagement scope.
+# * `ownership_verified` — the customer proved control of the domain itself, by publishing a token
+#   only its controller could publish (WP-F1). This is the *stronger* of the two: it is machine
+#   checked rather than asserted, so refusing it here would mean a proof Guardian went and read
+#   with its own eyes counts for less than a checkbox somebody ticked.
+#
+# Anything else — `written_consent` on an artifact, say — grants nothing on the network plane.
+_RECON_METHODS = ("active_recon", "ownership_verified")
 
 
 def _host_of(target: str) -> str:
@@ -67,11 +76,11 @@ def target_matches(authorized_targets: list[dict], target: str) -> bool:
 def load_recon_authorizations(
     session: Session, *, tenant_id: uuid.UUID, customer_id: uuid.UUID | None, now: dt.datetime
 ) -> list[Authorization]:
-    """Valid active-recon authorizations for this tenant (+customer if given). DB-trusted only."""
+    """Valid probe-granting authorizations for this tenant (+customer if given). DB-trusted only."""
     stmt = (
         select(Authorization)
         .where(Authorization.tenant_id == tenant_id)
-        .where(Authorization.method == _RECON_METHOD)
+        .where(Authorization.method.in_(_RECON_METHODS))
         .where(Authorization.revoked_at.is_(None))
         .where(Authorization.valid_from <= now)
         .where(Authorization.valid_until >= now)

@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -95,3 +95,37 @@ class Authorization(Base, TimestampMixin):
     revoked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     asset: Mapped[Asset | None] = relationship()
+
+
+class DomainVerification(Base, TimestampMixin):
+    """Proof that a customer controls a domain (WP-F1).
+
+    `Authorization.method` has always had a value `ownership_verified`, and nothing verified
+    ownership — a human asserted it and the platform believed them. This is the record that makes
+    the value mean something.
+    """
+
+    __tablename__ = "domain_verifications"
+    __table_args__ = (
+        UniqueConstraint("token", name="uq_domain_verification_token"),
+        Index("idx_domain_verification_tenant", "tenant_id", "domain"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id"), nullable=False)
+    domain: Mapped[str] = mapped_column(String(253), nullable=False)
+    method: Mapped[str] = mapped_column(String(20), nullable=False)
+    token: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_checked_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verified_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    authorization_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("authorizations.id"), nullable=True
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)

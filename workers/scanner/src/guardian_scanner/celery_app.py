@@ -66,6 +66,8 @@ celery_app = Celery(
         "guardian_scanner.correlation",
         # Validation and retest (WP-E2).
         "guardian_scanner.verification",
+        # Domain ownership verification (WP-F1).
+        "guardian_scanner.ownership",
     ],
 )
 
@@ -103,6 +105,7 @@ celery_app.conf.update(
         "guardian.match_service_versions": {"queue": "default"},
         "guardian.correlate_findings": {"queue": "default"},
         "guardian.retest_finding": {"queue": "default"},
+        "guardian.check_domain_verification": {"queue": "default"},
     },
     # Recurring work. Beat fires these; per-tenant cadence lives in the `schedules` table, because
     # a static config file cannot be edited through the API and cannot hold one customer's timing

@@ -10,7 +10,8 @@ against a real system and the output was inspected — not that a test double re
 
 Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 0% operable.
 
-**Current: 1226 tests passing** (+674), 18 work packages delivered, CI green.
+**Current: 1269 tests passing** (+717, 14 skipped — RLS assertions that need an RLS-enforced app
+session), 19 work packages delivered, CI green.
 
 ---
 
@@ -71,7 +72,7 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
-| F1 | Onboarding + assets | `NOT_STARTED` | — | — | |
+| F1 | Onboarding + assets — domain ownership verification | `TESTED` | `PENDING` | 57 (`test_ownership`, `integration/test_ownership_flow`) | `Authorization.method` has always had the value `ownership_verified` and nothing verified ownership — a human asserted it and the platform believed them. Now a customer is issued a per-verification high-entropy token, publishes it as a DNS TXT record or a `/.well-known/` file, and the worker goes and reads it; only then is the `Authorization` created, scoped to that domain and its subdomains and expiring with the proof. **A redirect never verifies** (it proves the redirect target's owner published something), a record that merely *contains* the token never verifies, and a subdomain proof never claims the apex. The active-discovery gate now honours `ownership_verified` alongside `active_recon` — before this, a machine-checked proof cleared nothing while a checkbox cleared everything — and `written_consent` still clears no network target. Revoking the proof revokes the permission and the gate denies from that moment. Migration `0017`, RLS live-verified on `domain_verifications` (`rowsecurity = t`, `tenant_isolation`). |
 | F2 | Findings workbench | `NOT_STARTED` | — | — | |
 | F3 | Attack graph UI | `NOT_STARTED` | — | — | |
 | F4 | Reports + compliance | `NOT_STARTED` | — | — | |
