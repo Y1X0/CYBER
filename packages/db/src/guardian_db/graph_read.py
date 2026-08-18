@@ -17,11 +17,12 @@ import datetime as dt
 import uuid
 
 from guardian_core import attack_graph as ag
+from guardian_core import attack_paths as ap
 from guardian_core.enums import FindingStatus, Severity
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from guardian_db.models import Customer, Finding, GraphEdge, GraphNode, NodeEvent
+from guardian_db.models import Asset, Customer, Finding, GraphEdge, GraphNode, NodeEvent
 
 _SEV_RANK: dict[str, int] = {s.value: s.rank for s in Severity}
 # Findings that still represent live exposure (excludes false_positive / accepted_risk / resolved).
@@ -146,6 +147,109 @@ class DbGraphProjector:
         )
         return {"paths": [self._path(p, by_id) for p in res.paths],
                 "truncated": res.truncated or truncated}
+
+    def attack_chains(self, *, tenant_id: str, max_length: int = 4, limit: int = 50) -> dict:
+        """Multi-step attack chains (WP-E4): what an attacker does *after* the first finding.
+
+        `attack_paths` ends at the first finding it reaches. This continues, using what each finding
+        grants as the precondition for the next — and it moves between assets only along edges the
+        discovery graph actually contains, so a chain is an ordering of observations rather than a
+        new claim.
+        """
+        tid = uuid.UUID(str(tenant_id))
+        nodes, edges, truncated = self._load(tenant_id)
+        by_id = {n.id: n for n in nodes}
+
+        # Which assets an internet-facing entry can reach, and how assets reach each other. Both
+        # come from the graph; nothing here infers adjacency.
+        asset_of_node = {
+            str(r.id): str(r.asset_id) for r in self._s.execute(
+                select(GraphNode.id, GraphNode.asset_id).where(
+                    GraphNode.tenant_id == tid, GraphNode.asset_id.isnot(None)
+                )
+            ).all() if r.asset_id
+        }
+        reach = ag.build_adjacency(nodes, edges, ag.ATTACK_RELATIONS)
+        asset_reach: dict[str, set[str]] = {}
+        for src, dsts in reach.items():
+            src_asset = asset_of_node.get(src)
+            if not src_asset:
+                continue
+            for dst in dsts:
+                dst_asset = asset_of_node.get(dst)
+                if dst_asset and dst_asset != src_asset:
+                    asset_reach.setdefault(src_asset, set()).add(dst_asset)
+
+        # An "entry asset" is one an unauthenticated attacker can reach from the internet: walk
+        # forward from every internet-facing node over the same edges an attack path uses. Using
+        # exposure paths here would be wrong — those *end* at the first sensitive node, so a
+        # subdomain that is itself exposed hides everything behind it.
+        entry_assets: set[str] = set()
+        entry_keys: dict[str, str] = {}
+        frontier = list(ag.entry_ids(nodes))
+        reachable_node_ids: set[str] = set(frontier)
+        while frontier:
+            current = frontier.pop()
+            for neighbour in sorted(reach.get(current, [])):
+                if neighbour not in reachable_node_ids:
+                    reachable_node_ids.add(neighbour)
+                    frontier.append(neighbour)
+        for node_id in sorted(reachable_node_ids):
+            asset = asset_of_node.get(node_id)
+            if not asset:
+                continue
+            entry_assets.add(asset)
+            entry_keys.setdefault(asset, by_id[node_id].canonical_key if node_id in by_id else "")
+
+        findings = [
+            ap.FindingView(
+                id=str(r.id), asset_id=str(r.asset_id), title=r.title, severity=r.severity,
+                risk_score=int(r.risk_score or 0), category=r.category or "", cwe_id=r.cwe_id,
+                kev=bool(r.kev), exploit_maturity=r.exploit_maturity,
+            )
+            for r in self._s.execute(
+                select(Finding).where(
+                    Finding.tenant_id == tid, Finding.status.in_(_OPEN_FINDING_STATUSES)
+                ).limit(2000)
+            ).scalars()
+        ]
+
+        criticality = {}
+        for asset_id, crit in self._s.execute(
+            select(Asset.id, Customer.criticality)
+            .join(Customer, Customer.id == Asset.customer_id)
+            .where(Asset.tenant_id == tid)
+        ).all():
+            criticality[str(asset_id)] = crit
+
+        result = ap.build_chains(
+            findings, reachable=asset_reach, entry_assets=entry_assets, entry_keys=entry_keys,
+            criticality=criticality, max_length=max_length, max_chains=limit,
+        )
+        return {
+            "chains": [
+                {
+                    "entry": chain.entry_key,
+                    "length": chain.length,
+                    "likelihood": chain.likelihood,
+                    "impact": chain.impact,
+                    "score": chain.score,
+                    "capabilities": sorted(chain.capabilities),
+                    "narrative": ap.describe(chain),
+                    "steps": [
+                        {"finding_id": s.finding_id, "asset_id": s.asset_id, "title": s.title,
+                         "severity": s.severity, "cwe_id": s.cwe_id, "grants": list(s.grants),
+                         "reliability": s.reliability, "rationale": s.rationale}
+                        for s in chain.steps
+                    ],
+                }
+                for chain in result.chains
+            ],
+            "truncated": result.truncated or truncated,
+            # Findings whose class maps to no capability: they are still findings, they simply
+            # cannot be used as a step. Saying so beats implying the chain analysis saw everything.
+            "unchainable_findings": len(result.unmapped),
+        }
 
     def blast_radius(
         self, *, tenant_id: str, node_type: str, node_id: str, max_depth: int = 6

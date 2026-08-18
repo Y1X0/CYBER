@@ -16,6 +16,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from guardian_db.graph_read import DbGraphProjector
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from guardian_api.deps import Identity, get_current_identity, get_db
@@ -66,6 +67,54 @@ def get_attack_paths(
         tenant_id=str(identity.tenant_id), max_depth=max_depth, limit=limit
     )
     return ExposurePathsOut.model_validate(out)
+
+
+class AttackChainStep(BaseModel):
+    finding_id: str
+    asset_id: str
+    title: str
+    severity: str
+    cwe_id: str | None = None
+    grants: list[str] = []
+    reliability: int
+    rationale: str
+
+
+class AttackChain(BaseModel):
+    entry: str
+    length: int
+    likelihood: int
+    impact: int
+    score: int
+    capabilities: list[str] = []
+    narrative: str
+    steps: list[AttackChainStep] = []
+
+
+class AttackChainsOut(BaseModel):
+    chains: list[AttackChain] = []
+    truncated: bool = False
+    unchainable_findings: int = 0
+
+
+@router.get("/attack-chains", response_model=AttackChainsOut)
+def get_attack_chains(
+    identity: Identity = Depends(_staff),
+    db: Session = Depends(get_db),
+    max_length: int = Query(default=4, ge=2, le=6),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> AttackChainsOut:
+    """Multi-step attack chains (WP-E4): what an attacker does *after* the first finding.
+
+    `/attack-paths` ends at the first finding it reaches. A chain continues, using what each finding
+    grants as the precondition for the next, and moving between assets only along edges the
+    discovery graph actually contains. Every hop names the finding it rests on, so a reader who
+    doubts a step can go and read its evidence.
+    """
+    out = DbGraphProjector(db).attack_chains(
+        tenant_id=str(identity.tenant_id), max_length=max_length, limit=limit
+    )
+    return AttackChainsOut.model_validate(out)
 
 
 @router.get("/chokepoints", response_model=ChokepointsOut)
