@@ -71,6 +71,9 @@ celery_app = Celery(
         # Outbound webhook delivery (WP-G3). A customer's slow endpoint must never hold up a scan,
         # which is why this is a queue rather than a call.
         "guardian_scanner.webhooks",
+        # Recovering scans whose broker message was lost (WP-P1). Without a consumer registered
+        # here the sweep exists and never runs, which is the shape several capabilities took before.
+        "guardian_scanner.recovery",
     ],
 )
 
@@ -111,6 +114,7 @@ celery_app.conf.update(
         "guardian.check_domain_verification": {"queue": "default"},
         "guardian.deliver_webhook": {"queue": "default"},
         "guardian.sweep_webhook_deliveries": {"queue": "default"},
+        "guardian.sweep_stranded_scans": {"queue": "default"},
     },
     # Recurring work. Beat fires these; per-tenant cadence lives in the `schedules` table, because
     # a static config file cannot be edited through the API and cannot hold one customer's timing
@@ -127,6 +131,13 @@ celery_app.conf.update(
             # Every minute: the shortest retry backoff is 60 seconds, and a sweep slower than the
             # backoff turns "retry in a minute" into "retry whenever the sweep next runs".
             "schedule": 60.0,
+        },
+        "recover-stranded-scans": {
+            "task": "guardian.sweep_stranded_scans",
+            # Every five minutes, like the schedule sweep. The grace period before a scan is even a
+            # candidate is 40 minutes, so this only sets how promptly a genuinely lost scan is
+            # recovered once it qualifies — not how eagerly anything is re-sent.
+            "schedule": 300.0,
         },
         "sync-vulnerability-feeds": {
             "task": "guardian.sync_feeds",

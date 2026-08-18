@@ -31,7 +31,7 @@ from guardian_db.models import (
     UsageRecord,
 )
 from guardian_db.session import session_scope
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from guardian_scanner import sandbox
 from guardian_scanner.celery_app import celery_app
@@ -214,8 +214,21 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
             scan.error = "asset or customer missing"
             return {"scan_id": scan_id, "status": "failed"}
 
-        scan.status = ScanStatus.RUNNING.value
-        scan.started_at = _now()
+        # Claim the scan, atomically. `queued → running` is a conditional UPDATE that exactly one
+        # caller can win, so a message delivered twice — a broker redelivery, or a recovery sweep
+        # racing a message that turned up after all — runs the scan once and returns. Without this
+        # the second run would reach `ScanEngineRun` and collide on `uq_engine_run_scan_engine`,
+        # turning a duplicate delivery into a failed scan.
+        claimed = session.execute(
+            update(Scan)
+            .where(Scan.id == scan.id, Scan.status == ScanStatus.QUEUED.value)
+            .values(status=ScanStatus.RUNNING.value, started_at=_now())
+        ).rowcount
+        if not claimed:
+            session.expire(scan)
+            log.info("scan_already_claimed", scan_id=scan_id, status=scan.status)
+            return {"scan_id": scan_id, "status": scan.status, "claimed": False}
+        session.expire(scan)
         session.flush()
 
         workspace, inline, cleanup = None, None, None

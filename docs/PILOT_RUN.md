@@ -205,12 +205,63 @@ but describes the wrong cause and still recovers nothing.
   a scan that is gone.
 * **Scope:** only bites when the broker loses data. A Redis with persistence on, or any managed
   Redis, does not hit it. It is one of the reasons the free instance is not suitable for a customer.
-* **Smallest fix:** a fourth beat sweep beside `sweep_schedules` and `sweep_webhook_deliveries` that
-  re-dispatches scans sitting in `queued` past a threshold. The one subtlety worth getting right is
-  telling a lost message from a genuinely long queue, because re-dispatching a scan that is merely
-  waiting risks two workers running it at once and colliding on
-  `uq_engine_run_scan_engine`. **Not built** — this phase was proof, and the design choice belongs
-  to the operator.
+* **Fixed** in `guardian_scanner.recovery` — see §4d.
+
+---
+
+## 4d. Recovering the lost scan
+
+The whole difficulty is telling **lost** from **waiting**: re-sending a message that is merely
+queued behind other work runs one scan on two workers. Two facts make it decidable, and neither is
+a guess.
+
+**`run_scan` claims its scan atomically.** Its first database write is now a conditional
+`UPDATE … WHERE status = 'queued'` that exactly one caller can win. So a scan still sitting at
+`queued` has definitely not begun executing — whatever the broker holds — and a duplicate delivery
+returns `claimed: False` instead of reaching `ScanEngineRun` and colliding on
+`uq_engine_run_scan_engine`.
+
+**The broker can be read.** Celery's Redis transport keeps pending messages in a list per queue and
+delivered-but-unacknowledged ones in the `unacked` hash — verified against the running transport,
+not assumed. A scan whose message is in neither is not going to be delivered by anybody.
+
+So `guardian.sweep_stranded_scans` (beat, every 5 minutes) re-sends a scan only when it is `queued`,
+older than a 40-minute grace period, and absent from the broker. Everything else is left alone, and
+if the broker cannot be read — unreachable, too long to enumerate, a message that will not parse —
+it recovers **nothing**. "I could not look" must never be read as "nothing is there", which is the
+rule the scanners already follow about empty results.
+
+**Proven live**, repeating the experiment that found the defect:
+
+```
+1. scan accepted: HTTP 202  status='queued'
+2. broker holds: 1 message
+3. FLUSHDB — broker holds: 0 messages
+4. worker started and healthy → scan status: queued        ← the defect
+5. guardian.sweep_stranded_scans dispatched over the real broker
+   scan_requeued  waited_seconds=3629
+   recovery_requeued_scans  candidates=1 requeued=1 waiting=0 skipped_unknown_broker=0
+6. run_scan received and succeeded → status='completed'
+7. final: scan status=completed  findings=2
+```
+
+The audit row the sweep leaves:
+
+```json
+{"reason": "the broker no longer holds this scan's message",
+ "status": "queued", "waited_seconds": 3629}
+```
+
+**And queue-health stopped vouching for it.** Past the grace period the state is `delayed`, not
+`working`, and the wording no longer promises anything about the future:
+
+> *"A scan has been waiting 50 minutes, which is longer than one should. Guardian re-checks for work
+> that never reached a scanner and re-submits it automatically. Nothing has been lost and no result
+> has been produced — if this does not clear, the scanner needs attention rather than your target."*
+
+Ten tests hold this in place, and most of them are about recovery doing **nothing**: a scan still in
+the broker, a recently queued scan, a running scan, and an unreadable broker are all left alone; a
+duplicate delivery neither re-runs the scan nor duplicates its findings.
 
 ---
 

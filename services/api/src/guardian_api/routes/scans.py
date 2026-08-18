@@ -155,6 +155,8 @@ def queue_health(
     Tenant-scoped counts, platform-wide liveness — the queue is shared, so "nothing is running
     anywhere" is the fact that explains their wait.
     """
+    from guardian_scanner.recovery import STRANDED_AFTER_SECONDS
+
     from guardian_api.observability import _scanner_liveness
 
     now = dt.datetime.now(dt.UTC)
@@ -174,6 +176,17 @@ def queue_health(
             "infrastructure problem on our side, not a problem with your target — your scan is "
             "queued and will run when the scanner is available. It has not been lost, and no "
             "result has been produced."
+        )
+    elif queued and waiting_seconds > STRANDED_AFTER_SECONDS:
+        # "Processed in order" is a claim about the future, and past this point it is one we cannot
+        # make: a scan waiting this long is either behind a very deep backlog or its broker message
+        # is gone (`docs/PILOT_RUN.md` §4c). Recovery re-sends the lost case; until it does, saying
+        # anything reassuring here would be the platform vouching for work it has not verified.
+        state, detail = "delayed", (
+            f"A scan has been waiting {waiting_seconds // 60} minutes, which is longer than one "
+            "should. Guardian re-checks for work that never reached a scanner and re-submits it "
+            "automatically. Nothing has been lost and no result has been produced — if this does "
+            "not clear, the scanner needs attention rather than your target."
         )
     elif queued or running:
         state, detail = "working", (
