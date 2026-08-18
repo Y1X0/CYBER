@@ -343,4 +343,19 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
         except Exception as exc:  # noqa: BLE001 - a reconciliation failure must not fail the scan
             log.error("reconcile_failed", scan_id=scan_id, error=str(exc)[:300])
             result["verification"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
+        # Close the remediation items this scan proved fixed, and reopen what came back (WP-F5).
+        # Runs after reconciliation because it reads the verification records — a fix is verified by
+        # the engine that found the issue running again and not reporting it, never by a person
+        # marking it done.
+        from guardian_scanner.remediation import verify_after_scan
+
+        try:
+            with session_scope() as session:
+                result["remediation"] = verify_after_scan(
+                    session, scan_id=uuid.UUID(str(scan_id))
+                )
+        except Exception as exc:  # noqa: BLE001 - must not fail a completed scan
+            log.error("remediation_verify_failed", scan_id=scan_id, error=str(exc)[:300])
+            result["remediation"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
     return result
