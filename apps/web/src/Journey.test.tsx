@@ -309,9 +309,12 @@ describe("a customer, start to finish, without touching the API", () => {
     // Every route fails. No screen may render as though it had an answer — the one failure mode
     // that turns this product into a liar is a blank panel where a refusal belongs.
     const { ApiError } = await import("./api");
-    for (const key of Object.keys(api) as (keyof typeof api)[]) {
-      if (typeof api[key] === "function") {
-        vi.spyOn(api, key).mockRejectedValue(new ApiError(503, "the backend is unreachable"));
+    // Widened deliberately: spying over every key of `api` by its literal type builds a union of
+    // ~50 overloads that TypeScript refuses to represent (TS2590).
+    const every = api as unknown as Record<string, (...args: unknown[]) => unknown>;
+    for (const key of Object.keys(every)) {
+      if (typeof every[key] === "function") {
+        vi.spyOn(every, key).mockRejectedValue(new ApiError(503, "the backend is unreachable"));
       }
     }
     vi.spyOn(api, "me").mockResolvedValue(
