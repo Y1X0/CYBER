@@ -223,6 +223,16 @@ export interface RemediationItem {
   risk_score: number;
 }
 
+export interface RemediationSla {
+  total: number;
+  active: number;
+  overdue: number;
+  verified: number;
+  accepted: number;
+  on_time_rate: number;
+  by_severity: Record<string, number>;
+}
+
 export interface Report {
   id: string;
   scan_id: string;
@@ -415,8 +425,14 @@ export const api = {
   openRemediation: (customer_id: string) =>
     req<{ opened: number; existing: number; grouped: number; reason?: string }>(
       "/remediation", { method: "POST", body: JSON.stringify({ customer_id }) }),
-  updateRemediation: (id: string, body: { status?: string; justification?: string }) =>
+  updateRemediation: (id: string, body: {
+    status?: string; justification?: string; assignee_id?: string | null; due_at?: string;
+  }) =>
     req<RemediationItem>(`/remediation/${id}`, { method: "PATCH", body: JSON.stringify(body) }),
+  remediationSla: () => req<RemediationSla>("/remediation/sla"),
+  remediationTicket: (id: string) =>
+    req<{ title: string; body: string; labels: string[]; due_at: string | null }>(
+      `/remediation/${id}/ticket`),
 
   // ── notifications ─────────────────────────────────────────────────────────────────────────────
   webhooks: () => paged<WebhookEndpoint>("/webhook-endpoints"),

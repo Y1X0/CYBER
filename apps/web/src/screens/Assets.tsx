@@ -105,7 +105,7 @@ function NewAsset({ customers, onDone }: { customers: Customer[]; onDone: () => 
   if (customers.length === 0) {
     return <p className="err">
       There is no customer record to attach an asset to. One is created with your organization;
-      if you are seeing this, create one from the Organization screen first.
+      if you are seeing this, add one on the Organization screen first.
     </p>;
   }
 

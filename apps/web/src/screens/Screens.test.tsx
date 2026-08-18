@@ -11,6 +11,7 @@ import { AuthorizationScreen } from "./Authorization";
 import { DashboardScreen } from "./Dashboard";
 import { FindingsScreen } from "./Findings";
 import { AuthScreen } from "./Onboarding";
+import { OrganizationScreen } from "./Organization";
 import { RemediationScreen } from "./Remediation";
 
 afterEach(() => vi.restoreAllMocks());
@@ -145,6 +146,51 @@ describe("authorization", () => {
   });
 });
 
+describe("organization", () => {
+  function stub(over: {
+    verifications?: unknown[]; authorizations?: unknown[];
+  } = {}) {
+    vi.spyOn(api, "me").mockResolvedValue({
+      id: "u1", email: "owner@acme.example", name: "Owner", tenant_id: "t1",
+      staff_role: "owner", portal_customer_id: null,
+    } as never);
+    vi.spyOn(api, "customers").mockResolvedValue(
+      page([{ id: "c1", name: "Acme Production", criticality: "high" }]) as never);
+    vi.spyOn(api, "assets").mockResolvedValue(page([]) as never);
+    vi.spyOn(api, "verifications").mockResolvedValue((over.verifications ?? []) as never);
+    vi.spyOn(api, "authorizations").mockResolvedValue(page(over.authorizations ?? []) as never);
+  }
+
+  it("counts proof of control and granted permission separately", async () => {
+    stub({
+      verifications: [{ id: "v1", customer_id: "c1", domain: "acme.example", method: "dns_txt",
+                        status: "verified", attempts: 1, last_error: null,
+                        expires_at: null, verified_at: "2026-02-01T00:00:00Z",
+                        authorization_id: null, instructions: null }],
+      authorizations: [],
+    });
+
+    render(<OrganizationScreen />);
+
+    // One verified domain, zero authorizations — and the screen must not let those blur together.
+    expect(await screen.findByText("Verified domains")).toBeInTheDocument();
+    expect(screen.getByText("Active authorizations")).toBeInTheDocument();
+    expect(screen.getByText(/authorizes nothing on its own/i)).toBeInTheDocument();
+    expect(screen.getByText(/Nothing is authorized/i)).toBeInTheDocument();
+  });
+
+  it("does not claim a count it has not loaded", async () => {
+    stub();
+    vi.spyOn(api, "verifications").mockRejectedValue(new ApiError(503, "unreachable"));
+
+    render(<OrganizationScreen />);
+
+    // A failed count renders as unknown, never as zero — zero would read as "no domains verified".
+    await waitFor(() => expect(screen.getAllByText("—").length).toBeGreaterThan(0));
+    expect(await screen.findByText("This could not be loaded")).toBeInTheDocument();
+  });
+});
+
 describe("findings", () => {
   const SUMMARY = {
     total: 0, by_severity: {}, by_status: {}, by_engine: {},
@@ -172,8 +218,14 @@ describe("findings", () => {
 });
 
 describe("remediation", () => {
+  const SLA = {
+    total: 0, active: 0, overdue: 0, verified: 0, accepted: 0, on_time_rate: 100, by_severity: {},
+  };
+
   it("shows why nothing was opened rather than a silent success", async () => {
     vi.spyOn(api, "remediation").mockResolvedValue([] as never);
+    vi.spyOn(api, "remediationSla").mockResolvedValue(SLA as never);
+    vi.spyOn(api, "me").mockResolvedValue({ id: "u1", email: "o@x" } as never);
     vi.spyOn(api, "customers").mockResolvedValue(page([{ id: "c1", name: "Acme" }]) as never);
     vi.spyOn(api, "openRemediation").mockResolvedValue({
       opened: 0, existing: 2, grouped: 0,
@@ -188,11 +240,48 @@ describe("remediation", () => {
 
   it("explains that only a scan can mark work verified", async () => {
     vi.spyOn(api, "remediation").mockResolvedValue([] as never);
+    vi.spyOn(api, "remediationSla").mockResolvedValue(SLA as never);
+    vi.spyOn(api, "me").mockResolvedValue({ id: "u1", email: "o@x" } as never);
     vi.spyOn(api, "customers").mockResolvedValue(page([]) as never);
 
     render(<RemediationScreen />);
 
     expect(await screen.findByText(/Only a scan that re-checks/i)).toBeInTheDocument();
+  });
+
+  it("lets a person take ownership of an item and shows its clock", async () => {
+    const item = {
+      id: "rem1", finding_id: "f1", customer_id: "c1", status: "open", assignee_id: null,
+      due_at: "2026-03-01T00:00:00Z", overdue: false, justification: null,
+      verified_by_scan_id: null, finding_title: "Exposed key", severity: "critical",
+      risk_score: 90,
+    };
+    vi.spyOn(api, "remediation").mockResolvedValue([item] as never);
+    vi.spyOn(api, "remediationSla").mockResolvedValue(
+      { ...SLA, total: 1, active: 1, overdue: 1, on_time_rate: 0 } as never);
+    vi.spyOn(api, "me").mockResolvedValue({ id: "u1", email: "o@x" } as never);
+    vi.spyOn(api, "customers").mockResolvedValue(page([]) as never);
+    const update = vi.spyOn(api, "updateRemediation").mockResolvedValue(item as never);
+
+    render(<RemediationScreen />);
+
+    expect(await screen.findByText("Overdue")).toBeInTheDocument();
+    expect(screen.getByText("nobody")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Take" }));
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith("rem1", { assignee_id: "u1" }));
+  });
+
+  it("does not let a failed clock read as work that is on time", async () => {
+    vi.spyOn(api, "remediation").mockResolvedValue([] as never);
+    vi.spyOn(api, "me").mockResolvedValue({ id: "u1", email: "o@x" } as never);
+    vi.spyOn(api, "customers").mockResolvedValue(page([]) as never);
+    vi.spyOn(api, "remediationSla").mockRejectedValue(new ApiError(500, "the clock is down"));
+
+    render(<RemediationScreen />);
+
+    expect(await screen.findByText(/should be read as on time/i)).toBeInTheDocument();
+    expect(screen.getByText(/the clock is down/)).toBeInTheDocument();
   });
 });
 

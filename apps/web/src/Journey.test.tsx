@@ -172,6 +172,10 @@ function backend() {
   });
 
   vi.spyOn(api, "remediation").mockImplementation(async () => state.remediation as never);
+  vi.spyOn(api, "remediationSla").mockImplementation(async () => ({
+    total: state.remediation.length, active: state.remediation.length, overdue: 0,
+    verified: 0, accepted: 0, on_time_rate: 100, by_severity: {},
+  }) as never);
   vi.spyOn(api, "openRemediation").mockImplementation(async () => {
     state.remediation.push({
       id: "rem1", finding_id: "f1", finding_title: FINDING.title, severity: "critical",

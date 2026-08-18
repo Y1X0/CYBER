@@ -12,6 +12,7 @@ import { DiscoveryScreen } from "./screens/Discovery";
 import { FindingDetailScreen, FindingsScreen } from "./screens/Findings";
 import { NotificationsScreen } from "./screens/Notifications";
 import { AuthScreen } from "./screens/Onboarding";
+import { OrganizationScreen } from "./screens/Organization";
 import { OwnershipScreen } from "./screens/Ownership";
 import { RemediationScreen } from "./screens/Remediation";
 import { ReportsScreen } from "./screens/Reports";
@@ -20,6 +21,7 @@ import { Async, useAsync } from "./ui";
 
 const NAV = [
   { screen: "dashboard", label: "Dashboard" },
+  { screen: "organization", label: "Organization" },
   { screen: "assets", label: "Assets" },
   { screen: "ownership", label: "Domains" },
   { screen: "authorization", label: "Authorization" },
@@ -76,6 +78,7 @@ function Console({ onSignOut }: { onSignOut: () => void }) {
 function Screen({ screen, id }: { screen: string; id: string | null }) {
   switch (screen) {
     case "dashboard": return <DashboardScreen />;
+    case "organization": return <OrganizationScreen />;
     case "assets": return <AssetsScreen />;
     case "ownership": return <OwnershipScreen />;
     case "authorization": return <AuthorizationScreen />;
