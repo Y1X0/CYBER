@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from guardian_api.routes import (
+    apikeys,
     assets,
     auth,
     chat,
@@ -30,6 +31,7 @@ api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"]
 
 v1 = APIRouter(prefix="/api/v1")
 v1.include_router(auth.router, prefix="/auth", tags=["auth"])
+v1.include_router(apikeys.router, prefix="/api-keys", tags=["api-keys"])
 v1.include_router(customers.router, prefix="/customers", tags=["customers"])
 v1.include_router(assets.router, prefix="/assets", tags=["assets"])
 v1.include_router(verifications.router, prefix="/verifications", tags=["ownership"])

@@ -22,6 +22,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from guardian_common.logging import get_logger
+from guardian_core.apikeys import Scope
 from guardian_core.redaction import scrub
 from guardian_db.audit import record_audit
 from guardian_db.models import (
@@ -42,6 +43,7 @@ from guardian_api.deps import (
     client_ip,
     get_current_identity,
     get_db,
+    require_scope,
     require_staff_write,
 )
 from guardian_api.schemas import FindingOut, FindingTriage
@@ -103,6 +105,10 @@ def _out(finding: Finding) -> FindingOut:
 def _visible(query, identity: Identity):
     """Tenant scoping, plus the portal restriction. Applied to every read path without exception."""
     query = query.where(Finding.tenant_id == identity.tenant_id)
+    if identity.is_machine:
+        # An API key belongs to a tenant, not to a customer contact. It sees the tenant it was
+        # issued for and nothing else; what it may *do* there is decided by its scopes (WP-G1).
+        return query
     if not identity.is_staff:
         # A portal contact sees their own customer or nothing — never "everything" because the
         # customer id happened to be null.
@@ -134,7 +140,7 @@ def list_findings(  # noqa: PLR0913 - a workbench filter set is wide by nature
     q: str | None = Query(default=None, max_length=200),
     cursor: str | None = Query(default=None, max_length=500),
     limit: int = Query(default=50, ge=1, le=MAX_PAGE),
-    identity: Identity = Depends(get_current_identity),
+    identity: Identity = Depends(require_scope(Scope.FINDINGS_READ)),
     db: Session = Depends(get_db),
 ) -> list[FindingOut]:
     """Worst first, filtered, and keyset-paged so the order survives writes underneath it."""
@@ -185,7 +191,7 @@ def summarize_findings(
     scan_id: uuid.UUID | None = None,
     asset_id: uuid.UUID | None = None,
     customer_id: uuid.UUID | None = None,
-    identity: Identity = Depends(get_current_identity),
+    identity: Identity = Depends(require_scope(Scope.FINDINGS_READ)),
     db: Session = Depends(get_db),
 ) -> FindingSummary:
     """Counts, aggregated by the database.

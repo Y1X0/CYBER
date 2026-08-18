@@ -62,6 +62,16 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_ttl_minutes: int = 60
 
+    # Pepper for API-key digests (WP-G1). Separate from the JWT secret when set, so rotating one
+    # does not invalidate the other; falls back to the JWT secret so a deployment that has not set
+    # it still peppers rather than storing a bare SHA-256 that a stolen database could be brute
+    # forced against offline.
+    api_key_pepper: str = ""
+
+    @property
+    def apikey_pepper(self) -> str:
+        return self.api_key_pepper or self.jwt_secret
+
     # Login rate limit (P1-γ): max /auth/login attempts per source IP and per account within a
     # 60s sliding window. Bounds password guessing and Argon2 CPU-exhaustion from a single source
     # BEFORE the hash runs. Raise it for shared-NAT deployments; a global limit across replicas is a
