@@ -31,11 +31,12 @@ from guardian_db.models import (
     UsageRecord,
 )
 from guardian_db.session import session_scope
+from sqlalchemy import select
 
 from guardian_scanner import sandbox
 from guardian_scanner.celery_app import celery_app
 from guardian_scanner.engines.base import ScanContext
-from guardian_scanner.normalize import severity_counts, to_finding
+from guardian_scanner.normalize import merge_sighting, severity_counts, to_finding
 from guardian_scanner.registry import get_engine
 from guardian_scanner.vuln_match import KbVulnMatcher
 
@@ -218,8 +219,20 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
         session.flush()
 
         workspace, inline, cleanup = None, None, None
-        all_findings: list[Finding] = []
         engine_statuses: list[str] = []
+        # Every issue already known for this asset, by fingerprint. A scan re-observing one folds
+        # into it rather than filing a duplicate, so the row count tracks distinct issues and a
+        # finding keeps its history across rescans.
+        known: dict[str, Finding] = {
+            row.fingerprint: row for row in session.execute(
+                select(Finding).where(
+                    Finding.tenant_id == scan.tenant_id,
+                    Finding.asset_id == asset.id,
+                )
+            ).scalars()
+        }
+        # What *this* scan saw, deduplicated — two engines reporting one issue is one sighting.
+        observed: dict[str, Finding] = {}
 
         try:
             for engine_key in scan.requested_engines or [EngineKey.SECRETS.value]:
@@ -340,8 +353,18 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                             asset_criticality=customer.criticality,
                             business_impact=business_impact,
                         )
-                        session.add(finding)
-                        all_findings.append(finding)
+                        # One row per issue, not one per sighting. Without this a rescan filed a
+                        # duplicate of everything it saw and the customer's open count climbed while
+                        # nothing got worse — and a returning issue arrived as a new finding with no
+                        # history, which is the case `verification._apply` was written to prevent.
+                        prior = known.get(finding.fingerprint)
+                        if prior is None:
+                            session.add(finding)
+                            known[finding.fingerprint] = finding
+                            observed[finding.fingerprint] = finding
+                        else:
+                            observed[finding.fingerprint] = merge_sighting(
+                                prior, finding, scan_id=scan.id, engine_run_id=run.id)
                     run.status = "completed"
                     engine_statuses.append("completed")
                 except Exception as exc:  # noqa: BLE001 - isolate per-engine failure
@@ -382,7 +405,7 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                 shutil.rmtree(cleanup, ignore_errors=True)
 
         session.flush()
-        scan.stats = severity_counts(all_findings)
+        scan.stats = severity_counts(list(observed.values()))
         scan.finished_at = _now()
         if engine_statuses and all(s == "failed" for s in engine_statuses):
             scan.status = ScanStatus.FAILED.value

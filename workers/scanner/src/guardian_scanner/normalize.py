@@ -69,6 +69,37 @@ def to_finding(
     )
 
 
+# Fields a rescan re-observes and may therefore overwrite. Deliberately excludes everything a human
+# owns — `status`, `justification`, `reopened_count` — and everything about the finding's history.
+# A scan reports what it sees; it does not overturn a triage decision.
+_OBSERVED_FIELDS = (
+    "title", "description", "category", "cwe_id", "owasp_ref", "cve_ids", "cvss_base",
+    "epss_score", "kev", "exploit_maturity", "ransomware", "severity", "risk_score",
+    "risk_rationale", "confidence", "location", "evidence", "references",
+)
+
+
+def merge_sighting(existing: Finding, fresh: Finding, *, scan_id, engine_run_id) -> Finding:  # noqa: ANN001
+    """Fold a fresh sighting into the finding that already represents this issue.
+
+    One row per `(asset, fingerprint)` is what `verification._apply` has always assumed — its own
+    comment says a returning issue is handled by "reopening the original rather than filing a new
+    finding … otherwise 'fixed twice' is invisible". The scan path never implemented that half and
+    inserted unconditionally, so every rescan added a row and the customer's open count grew while
+    nothing got worse.
+
+    `scan_id` and `engine_run_id` move to the observing scan, which is what makes
+    `reconcile_scan` able to tell what this scan saw from what it did not. Status is untouched here:
+    reconciliation owns every status transition, so there is still exactly one place that decides
+    whether a finding is resolved, still present, or unchecked.
+    """
+    for field in _OBSERVED_FIELDS:
+        setattr(existing, field, getattr(fresh, field))
+    existing.scan_id = scan_id
+    existing.engine_run_id = engine_run_id
+    return existing
+
+
 def severity_counts(findings: list[Finding]) -> dict[str, int]:
     counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
     for f in findings:

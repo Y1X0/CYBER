@@ -128,11 +128,18 @@ def reconcile_scan(scan_id: str) -> dict:
             ).scalars()
         }
 
+        # Every finding on this asset, including the ones this scan just re-observed.
+        #
+        # It used to exclude `scan_id == scan.id`, which was correct only while each scan filed its
+        # own copy of everything it saw. Now that a re-sighting folds into the existing row (WP-P0,
+        # `normalize.merge_sighting`), excluding them would mean a finding that had been resolved
+        # and has just come back is never looked at — it would stay `resolved` while the scanner is
+        # reporting it. Judging every finding keeps the reopen path alive and leaves this the only
+        # place a status moves.
         existing = session.execute(
             select(Finding).where(
                 Finding.tenant_id == scan.tenant_id,
                 Finding.asset_id == scan.asset_id,
-                Finding.scan_id != scan.id,
             )
         ).scalars().all()
 

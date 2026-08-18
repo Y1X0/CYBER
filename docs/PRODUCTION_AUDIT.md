@@ -186,9 +186,12 @@ Two properties were proven live rather than in a harness: a degraded engine is r
 `inconclusive` and never `checked`, and a single-engine retest marked twelve other findings
 `not_checked` rather than resolving them.
 
-One defect surfaced — finding rows accumulate per scan, so a customer's open count over-reports
-(20 rows for 14 distinct issues after one retest). It over-reports rather than hides, and is
-recorded in `docs/PILOT_RUN.md` §4.1, not fixed.
+Two defects surfaced and were then fixed: finding rows accumulated per scan, so a customer's open
+count over-reported (20 rows for 14 distinct issues after one retest); and `queue-health` reported
+a stalled scanner on a fresh deployment's first scan while a healthy worker was running it. The run
+was repeated after both fixes — **27 PASS, 0 FAIL, 1 UNVERIFIED**, 14 rows for 14 distinct issues,
+and the reconcile output shows the retest still marking 11 findings `not_checked` rather than
+resolving them. `docs/PILOT_RUN.md` §4 and §4b.
 
 ---
 

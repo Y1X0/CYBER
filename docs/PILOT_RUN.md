@@ -114,7 +114,7 @@ Two fingerprints carry four rows each. The customer's dashboard would report **2
   `GET /findings` has no per-fingerprint deduplication.
 * **Impact on a pilot:** a design partner scanning weekly sees their open count climb while nothing
   gets worse. For a security product that is a credibility problem, not a safety one.
-* **Not fixed here.** This phase was proof, not code.
+* **Fixed** in `normalize.merge_sighting` + `tasks.run_scan`; see §4b.
 
 ### 4.2 `queue-health` reports "stalled" on the first scan of a fresh deployment
 
@@ -136,7 +136,35 @@ it — while it is being run. Once one scan had completed, the endpoint reported
 
 * **Direction:** cries wolf. It errs toward alarm, never toward reassurance, so it cannot produce a
   false-clean. It is a first-impression defect, not a safety one.
-* **Not fixed here.** This phase was proof, not code.
+* **Fixed** in `_scanner_liveness`: with nothing ever finished, the age of the oldest waiting scan
+  is what separates a new deployment from a dead worker. See §4b.
+
+---
+
+## 4b. Second run, after both defects were fixed
+
+Both defects in §4 were fixed and the run was repeated from an empty database with the same target
+and the same stack. **27 PASS · 0 FAIL · 1 UNVERIFIED** (the webhook round trip, unchanged).
+
+| Stage | Before | After |
+|---|---|---|
+| findings from one scan | **16 rows** for 14 distinct issues | **14 rows** — the within-scan duplicate is gone |
+| after scan + retest | **20 rows** for 14 distinct issues | **14 rows for 14 distinct issues** |
+| queue-health at submit | `state='stalled'`, scanner `degraded` | `state='working'`, scanner `unknown` — *"0 scan(s) running and 1 waiting. Scans are processed in order."* |
+
+**The safety property survived the deduplication**, which was the risk. The retest's own reconcile
+output, from the worker log:
+
+```
+verification: {checked: 14, resolved: 0, still_present: 3, not_checked: 11, inconclusive: 0}
+```
+
+A single-engine retest re-reported 3 findings and marked the other 11 **`not_checked`** — not
+resolved. Three new tests drive the real `run_scan` path to hold this in place: a rescan folds
+instead of duplicating, a scan that stops reporting an issue still resolves it, and an issue that
+comes back reopens the original row rather than filing a new one.
+
+Full suite after the fixes: **2164 passed, 0 failed, 0 skipped** under `guardian_app`.
 
 ---
 

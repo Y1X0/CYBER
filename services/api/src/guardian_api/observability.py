@@ -321,10 +321,26 @@ def _scanner_liveness(session, now: dt.datetime) -> Slo:  # noqa: ANN001
                    "scanner and a dead one look identical from here",
                    value=0.0, threshold=float(stall_seconds))
     if newest is None:
+        # Nothing has ever finished. On a deployment that has been running for a while that means
+        # the worker has never worked; on a brand-new one it means the first scan was submitted
+        # moments ago and has not had time to finish. Those need opposite answers, and the age of
+        # the oldest waiting scan is what separates them — without it, every new deployment told
+        # its first customer that nothing was executing their scan while a healthy worker ran it.
+        oldest = session.execute(
+            select(func.min(Scan.created_at)).where(Scan.status.in_(("queued", "running")))
+        ).scalar()
+        waited = (now - _aware(oldest)).total_seconds() if oldest is not None else 0.0
+        if waited <= stall_seconds:
+            return Slo("scanner_liveness", UNKNOWN,
+                       f"{waiting} scan(s) are waiting and none has finished yet — the oldest has "
+                       f"been waiting {int(waited)}s, which is not yet long enough to tell a "
+                       "working scanner from a missing one",
+                       value=round(waited, 1), threshold=float(stall_seconds))
         return Slo("scanner_liveness", DEGRADED,
-                   f"{waiting} scan(s) are waiting and no scan has ever finished — the worker has "
-                   "either never run or cannot reach the database",
-                   value=float(stall_seconds), threshold=float(stall_seconds))
+                   f"{waiting} scan(s) are waiting, the oldest for {int(waited // 60)} minutes, "
+                   "and no scan has ever finished — the worker has either never run or cannot "
+                   "reach the database",
+                   value=round(waited, 1), threshold=float(stall_seconds))
     if idle_for is not None and idle_for > stall_seconds:
         return Slo("scanner_liveness", DEGRADED,
                    f"{waiting} scan(s) are waiting and nothing has finished for "

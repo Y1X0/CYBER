@@ -36,12 +36,16 @@ def _slos(**kwargs):
         return {slo.name: slo for slo in evaluate_slos(db, **kwargs)}
 
 
-def _clear():
+def _clear(*, never_finished: bool = False):
     """Each test owns the deployment-wide state these SLOs read.
 
     Scans are aged out of the window rather than deleted: other tests' findings reference them, and
     the SLO reads a 24-hour window, so shifting `created_at` back isolates this test without
     touching anything else's data.
+
+    `never_finished` additionally clears `finished_at`, which is the one state a shared database
+    cannot otherwise present: a deployment where no scan has *ever* completed. Opt-in, because the
+    completion SLO reads that column and every other test here wants it left alone.
     """
     import datetime as _dt
 
@@ -56,6 +60,8 @@ def _clear():
             scan.created_at = old
             if scan.status in ("queued", "running"):
                 scan.status = "completed"
+            if never_finished:
+                scan.finished_at = None
 
 
 def _feed(source: str, *, hours_ago: float | None):
@@ -179,6 +185,27 @@ def test_a_recent_running_scan_is_not_reported_as_stuck():
     _clear()
     _scan(status="running", age_hours=0.1)
     assert _slos()["scan_completion"].status == HEALTHY
+
+
+def test_a_brand_new_deployments_first_scan_is_not_reported_as_a_dead_scanner():
+    """The second defect the first pilot run found.
+
+    Nothing had ever finished, because the deployment was minutes old — and the first queued scan
+    was therefore reported as a stalled scanner while a healthy worker was picking it up 200ms
+    later. The console rendered that as "nothing is executing it", which is the opposite of true and
+    the first thing a design partner would have read.
+    """
+    from guardian_api.observability import DEGRADED, UNKNOWN
+
+    _clear(never_finished=True)
+    _scan(status="queued")                       # queued now; nothing has ever finished
+    assert _slos()["scanner_liveness"].status == UNKNOWN
+
+    _clear(never_finished=True)
+    _scan(status="queued", age_hours=48)         # waiting two days, still nothing finished
+    stalled = _slos()["scanner_liveness"]
+    assert stalled.status == DEGRADED
+    assert "never run" in stalled.detail
 
 
 def test_an_overdue_backlog_is_degraded():
