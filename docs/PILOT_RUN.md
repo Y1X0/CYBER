@@ -168,6 +168,52 @@ Full suite after the fixes: **2164 passed, 0 failed, 0 skipped** under `guardian
 
 ---
 
+## 4c. A third defect, found by testing the operator's own warning
+
+The free Render Key Value instance runs with `persistenceMode: off`. The question that raises is
+what happens to work the API has already accepted when the broker loses its data — so it was
+measured rather than assumed.
+
+**Method.** An API with no worker running. `POST /scans` → **202 Accepted**, and the task is visible
+in Redis (`LLEN default` → 1). `FLUSHDB`, which is what a restart of a non-persistent Redis does to
+the queue. Then start a healthy worker and wait.
+
+**Result.** After 90 seconds with a worker connected and idle:
+
+```
+scan status: queued          (unchanged)
+worker log:  celery@vm ready.    — no guardian.run_scan execution
+```
+
+The scan stays `queued` **forever**. Nothing re-dispatches it: `sweep_schedules` creates new scans
+from schedules and never re-sends an existing one, and no other sweep looks for scans stranded in
+`queued`. `grep` for a recovery path finds none.
+
+**What the customer is told**, from the same run:
+
+```
+queue-health: state='working'  queued=1  running=0
+detail: "0 scan(s) running and 1 waiting. Scans are processed in order."
+```
+
+That is reassuring and false — the scan will never be processed. After 45 minutes it becomes
+`degraded` ("the worker has either never run or cannot reach the database"), which alarms correctly
+but describes the wrong cause and still recovers nothing.
+
+* **Direction:** the API's `202 Accepted` is a promise the platform can break silently and
+  permanently. It does not produce a false-clean — no result is reported — but a customer waits on
+  a scan that is gone.
+* **Scope:** only bites when the broker loses data. A Redis with persistence on, or any managed
+  Redis, does not hit it. It is one of the reasons the free instance is not suitable for a customer.
+* **Smallest fix:** a fourth beat sweep beside `sweep_schedules` and `sweep_webhook_deliveries` that
+  re-dispatches scans sitting in `queued` past a threshold. The one subtlety worth getting right is
+  telling a lost message from a genuinely long queue, because re-dispatching a scan that is merely
+  waiting risks two workers running it at once and colliding on
+  `uq_engine_run_scan_engine`. **Not built** — this phase was proof, and the design choice belongs
+  to the operator.
+
+---
+
 ## 5. What this run does *not* establish
 
 | | Why |
@@ -256,8 +302,54 @@ env -u GUARDIAN_DATABASE_URL -u GUARDIAN_APP_DATABASE_URL -u GUARDIAN_JWT_SECRET
   celery -A guardian_scanner.celery_app.celery_app worker --queues recon --concurrency 1
 
 # 5. drive the journey
-python pilot_run.py
+python tools/production_golden_run.py --api http://127.0.0.1:8099 --repo <url> --inline
 ```
 
-The driver and its raw JSON evidence are in the session scratchpad (`pilot_run.py`,
-`pilot_evidence.json`); the reproduction above is the whole of what it needs.
+---
+
+## 8. The production golden run — the last gate
+
+Everything above proves the code. It does not prove a *deployment*, because the worker ran on a
+development host. `tools/production_golden_run.py` is the same journey pointed at any base URL, so
+the proof can be repeated against the deployed API the moment a worker consumes its queue. It goes
+through the public API and touches no database — which is the point: if it passes against your
+deployment, a customer can do the same thing.
+
+**Step 1 — a worker.** Any host that runs one long-lived process. No privileges, no code change:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d worker-default
+# or, from a checkout:
+GUARDIAN_DATABASE_URL=... GUARDIAN_REDIS_URL=... \
+  celery -A guardian_scanner.celery_app.celery_app worker --queues default --concurrency 1
+```
+
+**Step 2 — a target you are authorized to scan.** `--make-target` writes the same deliberately
+vulnerable estate the controlled run used; commit and push it to a repository you own:
+
+```bash
+python tools/production_golden_run.py --make-target ./vulnerable-sample
+```
+
+**Step 3 — the run.**
+
+```bash
+python tools/production_golden_run.py \
+    --api https://your-guardian-api \
+    --repo https://github.com/you/vulnerable-sample.git \
+    --webhook https://your-receiver/guardian     # optional; closes B-6 if it 2xxs
+```
+
+It exits non-zero if any stage fails, and prints UNVERIFIED for anything it could not establish. If
+the deployed worker never picks the scan up, it says so and names A1 rather than timing out
+silently.
+
+Two flags exist for the blockers this environment could not clear. `--domain-is-ours` expects a
+*passing* ownership check, so publishing the TXT record and passing it closes **B-5**; `--webhook`
+with a reachable receiver closes **B-6** when a delivery reaches `delivered`.
+
+`--inline` supplies the vulnerable content directly instead of cloning, for a run before the
+repository is published. Fewer engines have anything to read — IaC, Kubernetes and container
+manifests need a workspace — and the ones that do not read anything say so rather than reporting
+clean. Proven end to end against a live stack in this configuration: **21 PASS, 0 FAIL, 1
+UNVERIFIED** (the webhook, with no receiver given).
