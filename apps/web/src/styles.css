@@ -34,3 +34,37 @@ code { background: #12141c; padding: 2px 5px; border-radius: 4px; }
   background: #12141c; color: var(--fg); }
 .answer { background: #12141c; padding: 12px; border-radius: 8px; white-space: pre-wrap;
   border-left: 3px solid var(--accent); }
+
+/* ── attack graph (WP-F3) ─────────────────────────────────────────────────────────────────────── */
+.attack-graph .chain-list { list-style: none; padding: 0; }
+.attack-graph .chain-card {
+  display: block; width: 100%; text-align: left; margin: 0 0 12px;
+  padding: 12px; border: 1px solid #333; border-radius: 6px; background: #16181d; color: inherit;
+  cursor: pointer;
+}
+.attack-graph .chain-card header { display: flex; gap: 12px; align-items: baseline; }
+.attack-graph .score {
+  font-size: 20px; font-weight: 700; padding: 2px 8px; border-radius: 4px; background: #b00020;
+  color: #fff;
+}
+.attack-graph .entry { font-family: monospace; }
+.attack-graph .meta, .attack-graph .note, .attack-graph .capabilities { color: #9aa0a6; font-size: 13px; }
+.attack-graph .hops { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 8px 0 0; }
+.attack-graph .hops li { display: flex; align-items: center; gap: 6px; }
+.attack-graph .hop {
+  display: inline-flex; flex-direction: column; padding: 6px 10px; border-left: 4px solid #777;
+  background: #1e2127; border-radius: 4px;
+}
+.attack-graph .hop small { color: #9aa0a6; }
+.attack-graph .arrow { color: #9aa0a6; }
+.attack-graph .chain-detail {
+  border: 1px solid #333; border-radius: 6px; padding: 12px; margin-top: 12px; position: relative;
+  background: #16181d;
+}
+.attack-graph .chain-detail .close {
+  position: absolute; top: 6px; right: 8px; background: none; border: none; color: #9aa0a6;
+  font-size: 20px; cursor: pointer;
+}
+.attack-graph .grants { color: #9aa0a6; font-size: 13px; }
+.attack-graph .finding-ref { font-family: monospace; font-size: 12px; }
+.attack-graph .err { color: #ff6b6b; }

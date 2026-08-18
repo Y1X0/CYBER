@@ -68,6 +68,31 @@ jobs:
           GUARDIAN_RUN_DB_TESTS: "1"
         run: pytest -ra --cov=guardian_core --cov=guardian_scanner --cov=guardian_api
 
+      # The console is part of the product, and one of its screens can mislead a customer about
+      # their own security posture — an attack-graph view that renders a failed request as an empty
+      # graph says "you are safe" on evidence it does not have. Its tests run here for that reason.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+
+      - name: Install web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Typecheck web
+        working-directory: apps/web
+        run: npm run typecheck
+
+      - name: Test web
+        working-directory: apps/web
+        run: npm test
+
+      - name: Build web
+        working-directory: apps/web
+        run: npm run build
+
       # A scanner platform runs on tools other people wrote, so licence compliance is a shipping
       # gate rather than paperwork: nmap's NPSL restricts commercial redistribution, and AGPL §13
       # covers exactly the network interaction a SaaS product is. A tool nobody reviewed is treated

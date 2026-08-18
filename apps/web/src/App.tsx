@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AttackGraph } from "./AttackGraph";
 import { api, Dashboard, Finding, getToken, Scan, setToken } from "./api";
 
 const SEV_COLOR: Record<string, string> = {
@@ -107,6 +108,10 @@ function Console({ onLogout }: { onLogout: () => void }) {
             </p>
           </section>
         )}
+
+        {/* The attack graph sits above the chat: what an attacker would do with these findings is
+            a more useful next question than any the analyst can be asked. */}
+        <AttackGraph />
 
         <ChatBox scanId={scan?.id} />
       </main>
