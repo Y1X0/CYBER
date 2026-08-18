@@ -63,6 +63,7 @@ sca = "guardian_scanner.engines.sca_engine:ScaEngine"
 cspm = "guardian_scanner.engines.cspm_engine:CspmEngine"
 container = "guardian_scanner.engines.container_engine:ContainerEngine"
 k8s = "guardian_scanner.engines.k8s_engine:K8sEngine"
+iac = "guardian_scanner.engines.iac_engine:IacEngine"
 dast = "guardian_scanner.engines.dast_engine:DastEngine"
 api = "guardian_scanner.engines.api_engine:ApiEngine"
 

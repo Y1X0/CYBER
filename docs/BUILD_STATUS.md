@@ -10,7 +10,7 @@ against a real system and the output was inspected — not that a test double re
 
 Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 0% operable.
 
-**Current: 953 tests passing** (+401), 10 work packages delivered, CI green.
+**Current: 993 tests passing** (+441), 11 work packages delivered, CI green.
 
 ---
 
@@ -55,7 +55,7 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 | D6 | Container / image | `TESTED` | `d355d30` | 31 (`test_container_image`) | Reads a `docker save`/OCI archive in-process — no binary, no daemon, no registry. Detects **a secret deleted in a later layer but still in the image**, the finding a flattened-filesystem scan cannot see; sensitive files and key material by path and by content; config issues (root, ENV secrets, mutable tag, SSH, no healthcheck, `curl \| sh` in history). Packages from dpkg/apk/dist-info/node_modules go through the existing `VulnMatcher` seam rather than a second matcher. An unreadable archive and an unparsed RPM database are reported as findings, not silence. A well-built image produces zero findings. |
 | D7 | Kubernetes posture | `NOT_STARTED` | — | — | |
 | D8 | Cloud CSPM | `NOT_STARTED` | — | — | |
-| D9 | IaC | `NOT_STARTED` | — | — | |
+| D9 | IaC | `TESTED` | `pending` | 40 (`test_iac_engine`) | New `iac` engine: a purpose-built HCL2 reader, a CloudFormation loader that keeps `!Ref`-style intrinsics as data (a plain `safe_load` refuses those documents outright), and a Terraform-plan loader. 20 rules across AWS/Azure/GCP — open admin ports graded by service, public buckets, unencrypted/public RDS, IAM wildcards, hardcoded credentials, CloudTrail, EKS. **Silence on the unknown is enforced**: `storage_encrypted = var.encrypt` produces nothing, and the plan loader exists so CI can turn that unknown into an answer. |
 | D10 | API security | `NOT_STARTED` | — | — | |
 
 ## Track E — Correlation & intelligence

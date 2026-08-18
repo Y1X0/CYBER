@@ -34,6 +34,8 @@ class EngineKey(str, Enum):
     CSPM = "cspm"
     CONTAINER = "container"
     K8S = "k8s"
+    # Infrastructure-as-code: Terraform, CloudFormation, Terraform plan (WP-D9).
+    IAC = "iac"
     # Read-only Web/TLS tool provider (Security Tool Execution Framework — first provider).
     WEB_TLS = "web_tls"
     # Offline PCAP header/metadata analysis provider (Framework — second, artifact/non-network).

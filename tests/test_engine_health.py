@@ -10,6 +10,8 @@ healthy while contributing 13 regex rules instead of thousands, and nothing said
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 from guardian_scanner.engines.base import EngineHealth
 from guardian_scanner.engines.sast_engine import SastEngine
@@ -75,3 +77,21 @@ def test_an_engine_that_raises_is_failed_not_silently_skipped(monkeypatch):
 def test_health_defaults_keep_existing_engines_valid(field, default):
     """Engines written before degradation existed must still construct."""
     assert getattr(EngineHealth(ok=True, detail="x"), field) == default
+
+
+def test_every_declared_scanner_plugin_resolves():
+    """A typo in an entry-point path is invisible until deploy: the engine simply never loads, the
+    scan reports fewer findings, and nothing says why. Assert the declarations import."""
+    import tomllib
+    from pathlib import Path
+
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text())
+    declared = pyproject["project"]["entry-points"]["guardian.scanner_plugins"]
+    assert declared, "no scanner plugins declared"
+
+    for key, target in declared.items():
+        module_path, _, class_name = target.partition(":")
+        module = importlib.import_module(module_path)
+        engine = getattr(module, class_name)()
+        assert engine.key.value == key, f"{key} declares an engine whose key is {engine.key.value}"
+        assert engine.health().ok is not None
