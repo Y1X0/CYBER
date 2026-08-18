@@ -116,6 +116,28 @@ Two fingerprints carry four rows each. The customer's dashboard would report **2
   gets worse. For a security product that is a credibility problem, not a safety one.
 * **Not fixed here.** This phase was proof, not code.
 
+### 4.2 `queue-health` reports "stalled" on the first scan of a fresh deployment
+
+At the moment the pilot's first scan was submitted — with a healthy worker running and about to
+pick it up 200 ms later — `GET /scans/queue-health` returned:
+
+```
+state='stalled'  queued=1  running=0  scanner='degraded'
+```
+
+`_scanner_liveness` (`services/api/src/guardian_api/observability.py:298`) reads
+`max(finished_at)` across all scans; on a deployment where **no scan has ever finished** that is
+`NULL`, and any waiting scan is therefore reported as degraded. The console renders this as
+*"Guardian has accepted your scan but nothing is executing it."*
+
+So the first thing a new design partner is told about their first scan is that nothing is running
+it — while it is being run. Once one scan had completed, the endpoint reported correctly (`idle` /
+`unknown`) for the rest of the run.
+
+* **Direction:** cries wolf. It errs toward alarm, never toward reassurance, so it cannot produce a
+  false-clean. It is a first-impression defect, not a safety one.
+* **Not fixed here.** This phase was proof, not code.
+
 ---
 
 ## 5. What this run does *not* establish
