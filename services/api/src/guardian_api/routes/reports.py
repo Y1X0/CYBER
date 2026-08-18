@@ -12,8 +12,11 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from guardian_ai.providers import get_provider
 from guardian_ai.reporting import generate_report_content, render_html, render_pdf
+from guardian_common.logging import get_logger
+from guardian_core import quota
 from guardian_db.audit import record_audit
 from guardian_db.models import Finding, Report, ReportApproval, Scan
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from guardian_api.deps import (
@@ -24,22 +27,43 @@ from guardian_api.deps import (
     require_reviewer,
     require_staff_write,
 )
+from guardian_api.pagination import apply_cursor, order_newest_first, page_request, paginate
 from guardian_api.schemas import ReportAction, ReportCreate, ReportOut
+
+log = get_logger("guardian.api.reports")
 
 router = APIRouter()
 
 
 def _build_summary(db: Session, scan: Scan) -> dict:
-    findings = db.query(Finding).filter(Finding.scan_id == scan.id).all()
+    """Counts and the five worst findings, computed in the database (WP-G2).
+
+    This used to load every finding of the scan to count them and sort five out — the whole result
+    set in memory to produce eleven numbers. The counts are a `GROUP BY` and the top five are an
+    `ORDER BY ... LIMIT 5`, which is what an index is for.
+    """
     counts: dict[str, int] = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-    for f in findings:
-        counts[f.severity] = counts.get(f.severity, 0) + 1
-    top = sorted(findings, key=lambda f: -f.risk_score)[:5]
+    total = 0
+    for severity, count in db.execute(
+        select(Finding.severity, func.count())
+        .where(Finding.scan_id == scan.id)
+        .group_by(Finding.severity)
+    ).all():
+        counts[severity] = int(count)
+        total += int(count)
+
+    top = db.execute(
+        select(Finding.title, Finding.severity, Finding.risk_score)
+        .where(Finding.scan_id == scan.id)
+        .order_by(Finding.risk_score.desc(), Finding.id)
+        .limit(5)
+    ).all()
     return {
-        "total_findings": len(findings),
+        "total_findings": total,
         "severity_counts": counts,
         "top_risks": [
-            {"title": f.title, "severity": f.severity, "risk_score": f.risk_score} for f in top
+            {"title": row.title, "severity": row.severity, "risk_score": row.risk_score}
+            for row in top
         ],
     }
 
@@ -167,14 +191,35 @@ def export_report(
         report.customer_id != identity.portal_customer_id or report.status != "published"
     ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "report not found")
-    findings = db.query(Finding).filter(Finding.scan_id == report.scan_id).all()
+    # Bounded, and the document says so (WP-G2). Rendering every finding of a 50,000-finding scan
+    # is a memory event and a PDF nobody opens; rendering the first few thousand *without saying so*
+    # is worse, because the reader cannot tell "nothing else was found" from "nothing else fitted".
+    ceiling = identity.limits.max_report_findings
+    total = db.execute(
+        select(func.count()).select_from(Finding).where(Finding.scan_id == report.scan_id)
+    ).scalar_one()
+    findings = db.execute(
+        select(Finding).where(Finding.scan_id == report.scan_id)
+        .order_by(Finding.risk_score.desc(), Finding.id)
+        .limit(ceiling)
+    ).scalars().all()
+    note = quota.truncation_note(shown=len(findings), total=int(total))
+    if note:
+        response_headers = {"X-Findings-Truncated": "true"}
+        log.warning("report_findings_truncated", report=str(report.id),
+                    shown=len(findings), total=int(total))
+    else:
+        response_headers = {}
+
     if format == "html":
-        return Response(content=render_html(report, findings), media_type="text/html")
+        return Response(content=render_html(report, findings, truncation_note=note),
+                        media_type="text/html", headers=response_headers)
     if format == "pdf":
         return Response(
-            content=render_pdf(report, findings),
+            content=render_pdf(report, findings, truncation_note=note),
             media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="report-{report.id}.pdf"'},
+            headers={"Content-Disposition": f'attachment; filename="report-{report.id}.pdf"',
+                     **response_headers},
         )
     raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "format must be pdf or html")
 
@@ -273,17 +318,22 @@ def publish_report(
 
 @router.get("", response_model=list[ReportOut])
 def list_reports(
+    response: Response,
+    limit: int | None = None,
+    cursor: str | None = None,
     identity: Identity = Depends(get_current_identity),
     db: Session = Depends(get_db),
 ) -> list[ReportOut]:
+    size, after = page_request(limit, cursor, maximum=identity.limits.max_page_size)
     q = db.query(Report).filter(Report.tenant_id == identity.tenant_id)
     if not identity.is_staff:
         # Portal contacts only ever see published reports for their own customer.
         q = q.filter(
             Report.customer_id == identity.portal_customer_id, Report.status == "published"
         )
-    rows = q.order_by(Report.created_at.desc()).limit(200).all()
-    return [ReportOut.model_validate(r, from_attributes=True) for r in rows]
+    rows = order_newest_first(apply_cursor(q, Report, after), Report).limit(size + 1).all()
+    return [ReportOut.model_validate(r, from_attributes=True)
+            for r in paginate(response, rows, size)]
 
 
 @router.get("/{report_id}", response_model=ReportOut)

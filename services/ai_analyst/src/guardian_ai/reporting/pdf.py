@@ -25,7 +25,12 @@ _SEV_COLOR = {
 }
 
 
-def render_pdf(report, findings: list) -> bytes:  # noqa: ANN001
+def render_pdf(report, findings: list, *, truncation_note: str = "") -> bytes:  # noqa: ANN001
+    """`truncation_note` is non-empty when the caller could not fit every finding (WP-G2).
+
+    Printed immediately under the title, because a PDF is the artefact most likely to be read
+    without the context that produced it.
+    """
     summary = report.summary or {}
     counts = summary.get("severity_counts", {})
     buf = io.BytesIO()
@@ -35,6 +40,8 @@ def render_pdf(report, findings: list) -> bytes:  # noqa: ANN001
 
     story.append(Paragraph("Security Assessment Report", styles["Title"]))
     story.append(Paragraph(report.title or "", styles["Heading3"]))
+    if truncation_note:
+        story.append(Paragraph(f"<b>Partial report.</b> {truncation_note}", styles["Normal"]))
     story.append(Spacer(1, 6 * mm))
 
     story.append(Paragraph("Executive Summary", styles["Heading1"]))

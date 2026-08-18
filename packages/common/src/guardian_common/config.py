@@ -76,6 +76,13 @@ class Settings(BaseSettings):
     # touches a customer's network refuses, whatever their authorization says.
     active_scanning_paused: bool = False
 
+    # Per-tenant ceilings (WP-G2). Platform defaults; a tenant may lower or raise them within the
+    # hard ceiling via `tenants.settings["quota"]`. 0 disables that limit entirely, which is a
+    # deliberate operational choice and not the effect of leaving a value unset.
+    tenant_rate_limit_per_minute: int = 600
+    tenant_concurrent_scans: int = 10
+    tenant_max_page_size: int = 200
+
     @property
     def apikey_pepper(self) -> str:
         return self.api_key_pepper or self.jwt_secret

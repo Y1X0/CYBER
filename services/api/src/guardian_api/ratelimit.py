@@ -27,16 +27,23 @@ class SlidingWindowLimiter:
         self._hits: dict[str, list[float]] = {}
         self._lock = threading.Lock()
 
-    def hit(self, key: str) -> tuple[bool, float]:
-        """Record an attempt for ``key``. Returns (allowed, retry_after_seconds)."""
-        if self._max <= 0:
+    def hit(self, key: str, *, max_hits: int | None = None) -> tuple[bool, float]:
+        """Record an attempt for ``key``. Returns (allowed, retry_after_seconds).
+
+        ``max_hits`` overrides the limiter's ceiling for this key only, so one shared window can
+        serve callers with different limits (WP-G2: a tenant may be allowed fewer requests than the
+        platform default). It is passed per call rather than stored, because a ceiling mutated on a
+        shared object is a race between two tenants' requests.
+        """
+        ceiling = self._max if max_hits is None else max_hits
+        if ceiling <= 0:
             return True, 0.0                          # limiter disabled
         now = self._clock()
         with self._lock:
             if len(self._hits) > _MAX_KEYS:
                 self._hits.clear()                    # bound memory; brief accuracy loss is fine
             recent = [t for t in self._hits.get(key, ()) if now - t < self._window]
-            if len(recent) >= self._max:
+            if len(recent) >= ceiling:
                 self._hits[key] = recent
                 return False, max(0.0, self._window - (now - recent[0]))
             recent.append(now)
@@ -57,3 +64,34 @@ def login_limiter() -> SlidingWindowLimiter:
 def reset_login_limiter() -> None:
     """Drop the cached limiter (tests / config reload)."""
     login_limiter.cache_clear()
+
+
+@lru_cache
+def tenant_limiter() -> SlidingWindowLimiter:
+    """Process-wide limiter for authenticated traffic, keyed by tenant (WP-G2).
+
+    Sized generously here and narrowed per key at the call site, because a tenant's own limit may be
+    lower than the platform's; `hit_limited` applies the caller's ceiling against this window.
+
+    Per-process, like the login limiter and for the same reason: a limit shared across replicas is a
+    gateway concern. What that means in practice is stated rather than hidden — with N replicas a
+    tenant can reach roughly N× its configured rate before every replica refuses. That is a ceiling
+    on damage, not an exact quota, and `guardian_rate_limited_total` is what makes the difference
+    visible.
+    """
+    return SlidingWindowLimiter(0, 60.0)  # the ceiling is supplied per call by `hit_limited`
+
+
+def hit_limited(key: str, *, limit: int) -> tuple[bool, float]:
+    """Record a request for ``key`` and apply ``limit`` to the shared 60-second window.
+
+    A limit of 0 disables the check for that caller — an explicit operational choice, and the only
+    way to switch it off.
+    """
+    if limit <= 0:
+        return True, 0.0
+    return tenant_limiter().hit(key, max_hits=limit)
+
+
+def reset_tenant_limiter() -> None:
+    tenant_limiter.cache_clear()

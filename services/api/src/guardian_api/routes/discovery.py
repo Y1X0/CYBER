@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from guardian_db.audit import record_audit
 from guardian_db.models import Customer, DiscoveryRun, DiscoveryScope
 from sqlalchemy.orm import Session
 
 from guardian_api.deps import Identity, client_ip, get_current_identity, get_db, require_staff_write
+from guardian_api.pagination import apply_cursor, order_newest_first, page_request, paginate
 from guardian_api.publisher import enqueue_discovery
 from guardian_api.schemas import DiscoveryRunCreate, DiscoveryRunOut
 
@@ -67,11 +68,17 @@ def _scoped(db: Session, identity: Identity):  # noqa: ANN202
 
 @router.get("/runs", response_model=list[DiscoveryRunOut])
 def list_discovery_runs(
+    response: Response,
+    limit: int | None = None,
+    cursor: str | None = None,
     identity: Identity = Depends(get_current_identity),
     db: Session = Depends(get_db),
 ) -> list[DiscoveryRunOut]:
-    rows = _scoped(db, identity).order_by(DiscoveryRun.created_at.desc()).limit(200).all()
-    return [DiscoveryRunOut.model_validate(r, from_attributes=True) for r in rows]
+    size, after = page_request(limit, cursor, maximum=identity.limits.max_page_size)
+    q = apply_cursor(_scoped(db, identity), DiscoveryRun, after)
+    rows = order_newest_first(q, DiscoveryRun).limit(size + 1).all()
+    return [DiscoveryRunOut.model_validate(r, from_attributes=True)
+            for r in paginate(response, rows, size)]
 
 
 @router.get("/runs/{run_id}", response_model=DiscoveryRunOut)

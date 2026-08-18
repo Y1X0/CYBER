@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, Response
 from guardian_db.audit import record_audit
 from guardian_db.models import Customer
 from sqlalchemy.orm import Session
 
 from guardian_api.deps import Identity, client_ip, get_current_identity, get_db, require_staff_write
+from guardian_api.pagination import apply_cursor, order_newest_first, page_request, paginate
 from guardian_api.schemas import CustomerCreate, CustomerOut
 
 router = APIRouter()
@@ -41,11 +42,16 @@ def create_customer(
 
 @router.get("", response_model=list[CustomerOut])
 def list_customers(
+    response: Response,
+    limit: int | None = None,
+    cursor: str | None = None,
     identity: Identity = Depends(get_current_identity),
     db: Session = Depends(get_db),
 ) -> list[CustomerOut]:
+    size, after = page_request(limit, cursor, maximum=identity.limits.max_page_size)
     q = db.query(Customer).filter(Customer.tenant_id == identity.tenant_id)
     if not identity.is_staff:  # portal contact: restrict to own customer
         q = q.filter(Customer.id == identity.portal_customer_id)
-    rows = q.order_by(Customer.created_at.desc()).all()
-    return [CustomerOut.model_validate(r, from_attributes=True) for r in rows]
+    rows = order_newest_first(apply_cursor(q, Customer, after), Customer).limit(size + 1).all()
+    return [CustomerOut.model_validate(r, from_attributes=True)
+            for r in paginate(response, rows, size)]

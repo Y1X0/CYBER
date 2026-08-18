@@ -187,6 +187,9 @@ def sweep_webhook_deliveries(limit: int = 100) -> dict:
             .where(WebhookDelivery.status == "pending",
                    WebhookDelivery.next_attempt_at.isnot(None),
                    WebhookDelivery.next_attempt_at <= now)
+            # Oldest overdue first. An unordered LIMIT lets Postgres return the same arbitrary
+            # hundred rows on every sweep, and a delivery outside that set is never retried at all.
+            .order_by(WebhookDelivery.next_attempt_at)
             .limit(limit)
         ).scalars())
         ids = [str(row.id) for row in due]

@@ -70,7 +70,21 @@ def _compliance_table(coverage) -> str:  # noqa: ANN001
             + "".join(blocks))
 
 
-def render_html(report, findings: list) -> str:  # noqa: ANN001
+def _truncation_banner(note: str) -> str:
+    if not note:
+        return ""
+    return (
+        "<p style=\"background:#fff4e5;border-left:4px solid #f0ad4e;padding:10px;"
+        "margin:12px 0\"><strong>Partial report.</strong> " + _esc(note) + "</p>"
+    )
+
+
+def render_html(report, findings: list, *, truncation_note: str = "") -> str:  # noqa: ANN001
+    """`truncation_note` is non-empty when the caller could not fit every finding (WP-G2).
+
+    It is rendered at the top rather than the bottom: a reader who stops after the summary
+    must not come away believing they saw the whole assessment.
+    """
     summary = report.summary or {}
     counts = summary.get("severity_counts", {})
     score = summary.get("security_score", "n/a")
@@ -117,6 +131,7 @@ def render_html(report, findings: list) -> str:  # noqa: ANN001
  code{{background:#f6f6f6;padding:1px 4px}}
 </style></head><body>
 <h1>Security Assessment Report</h1>
+{_truncation_banner(truncation_note)}
 <p><strong>{_esc(report.title)}</strong> — status: {_esc(report.status)}</p>
 <h2>Executive Summary</h2>
 <p class="score">{_esc(score)}/100 <small>({_esc(posture)})</small></p>

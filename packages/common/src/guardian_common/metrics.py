@@ -180,6 +180,11 @@ REGISTRY.counter("guardian_authorization_denied_total",
 REGISTRY.counter("guardian_scan_engine_runs_total", "Engine runs by engine and status.")
 REGISTRY.gauge("guardian_feed_age_seconds", "Age of the newest record from each intelligence feed.")
 REGISTRY.gauge("guardian_slo_healthy", "1 when a named SLO is met, 0 when it is not.")
+# WP-G2. A quota nobody can see is a quota nobody knows they are hitting: the first sign
+# should be a graph, not a customer asking why their pipeline started failing.
+REGISTRY.counter("guardian_rate_limited_total", "Requests refused by the per-tenant rate limit.")
+REGISTRY.counter("guardian_scan_admission_refused_total",
+                 "Scans refused at submission because the tenant was at its concurrency limit.")
 
 
 __all__ = ["DEFAULT_BUCKETS", "REGISTRY", "Registry", "escape_label"]

@@ -17,13 +17,19 @@ import jwt
 from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from guardian_common.config import get_settings
+from guardian_common.logging import get_logger
+from guardian_common.metrics import REGISTRY
 from guardian_common.security import decode_access_token
-from guardian_core import apikeys
+from guardian_core import apikeys, quota
 from guardian_core.enums import StaffRole
 from guardian_db.models import ApiKey, User
 from guardian_db.session import get_app_session, reset_tenant, set_tenant
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from guardian_api.ratelimit import hit_limited
+
+log = get_logger("guardian.api.deps")
 
 _bearer = HTTPBearer(auto_error=True)
 
@@ -59,6 +65,9 @@ class Identity:
     # scopes are the ceiling on what it may do, whatever role it borrows.
     api_key: ApiKey | None = None
     scopes: tuple[str, ...] = ()
+    # Resolved once per request (WP-G2) so a handler that needs the page ceiling does not go back
+    # to the database for it.
+    limits: quota.Quota = quota.DEFAULT
 
     @property
     def is_machine(self) -> bool:
@@ -153,6 +162,9 @@ def get_current_identity(
     # two schemes never have to guess about each other.
     machine = _api_key_identity(creds.credentials, db)
     if machine is not None:
+        # A key is the principal most likely to run away: a pipeline retrying in a loop does not
+        # get bored. It is rate-limited on the same path as a person.
+        _enforce_rate_limit(machine, db)
         return machine
 
     try:
@@ -196,7 +208,62 @@ def get_current_identity(
 
     # Bind the request session to this tenant so RLS filters every subsequent query.
     set_tenant(db, identity.tenant_id)
+    _enforce_rate_limit(identity, db)
     return identity
+
+
+def resolve_quota(tenant_id: uuid.UUID, db: Session) -> quota.Quota:
+    """The ceilings that apply to this tenant (WP-G2).
+
+    Platform defaults from settings, then the tenant's own overrides. An override that cannot be
+    read leaves the platform default in place and is logged — read as "unlimited" it would be one
+    typo away from removing the limit entirely, and the two directions of that mistake are not
+    equally survivable.
+    """
+    settings = get_settings()
+    base = quota.Quota(
+        requests_per_minute=settings.tenant_rate_limit_per_minute,
+        concurrent_scans=settings.tenant_concurrent_scans,
+        max_page_size=settings.tenant_max_page_size,
+    )
+    raw = db.execute(
+        text("SELECT settings FROM tenants WHERE id = :id"), {"id": tenant_id}
+    ).scalar()
+    resolved, problems = base.with_overrides((raw or {}).get("quota") if isinstance(raw, dict)
+                                             else None)
+    for problem in problems:
+        log.warning("tenant_quota_override_ignored", tenant=str(tenant_id), reason=problem)
+    return resolved
+
+
+def _rate_limit_key(identity: Identity) -> str:
+    """An API key gets its own window inside the tenant's.
+
+    Otherwise one runaway CI pipeline consumes the whole tenant's budget and locks the humans out
+    of the console — the people most likely to be trying to find out what is going on.
+    """
+    if identity.api_key is not None:
+        return f"key:{identity.api_key.id}"
+    return f"tenant:{identity.tenant_id}"
+
+
+def _enforce_rate_limit(identity: Identity, db: Session) -> None:
+    limits = resolve_quota(identity.tenant_id, db)
+    identity.limits = limits
+    allowed, retry_after = hit_limited(_rate_limit_key(identity),
+                                       limit=limits.requests_per_minute)
+    if allowed:
+        return
+    decision = quota.rate_refusal(retry_after, limit=limits.requests_per_minute)
+    REGISTRY.inc("guardian_rate_limited_total",
+                 {"principal": "key" if identity.is_machine else "user"})
+    log.warning("tenant_rate_limited", tenant=str(identity.tenant_id),
+                principal="key" if identity.is_machine else "user",
+                retry_after=decision.retry_after)
+    raise HTTPException(
+        status.HTTP_429_TOO_MANY_REQUESTS, decision.reason,
+        headers={"Retry-After": str(decision.retry_after)},
+    )
 
 
 def require_staff_write(identity: Identity = Depends(get_current_identity)) -> Identity:

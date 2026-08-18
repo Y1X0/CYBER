@@ -489,7 +489,9 @@ def test_the_sweep_dispatches_only_deliveries_whose_backoff_has_elapsed(monkeypa
 
     now = dt.datetime.now(dt.UTC)
     with session_scope() as db:
-        db.get(WebhookDelivery, due).next_attempt_at = now - dt.timedelta(minutes=1)
+        # Far enough in the past to sort ahead of anything another test left behind: the sweep
+        # takes the oldest overdue deliveries first, and this database is shared.
+        db.get(WebhookDelivery, due).next_attempt_at = now - dt.timedelta(days=3650)
         row = db.get(WebhookDelivery, later)
         row.next_attempt_at = now + dt.timedelta(hours=1)
         finished = db.get(WebhookDelivery, done)

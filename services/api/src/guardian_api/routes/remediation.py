@@ -25,7 +25,7 @@ from guardian_core.redaction import scrub_text
 from guardian_db.audit import record_audit
 from guardian_db.models import Asset, Finding, RemediationItem, User
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from guardian_api.deps import (
@@ -217,9 +217,13 @@ def get_ticket_payload(
     asset = db.get(Asset, finding.asset_id)
     duplicates = 0
     if finding.correlation_id:
-        duplicates = db.execute(
-            select(Finding).where(Finding.correlation_id == finding.correlation_id)
-        ).scalars().all().__len__() - 1
+        # Counted in the database (WP-G2): this loaded every finding in the correlation group to
+        # take its length, which on a group of a thousand duplicates is a thousand rows fetched to
+        # produce one integer.
+        duplicates = int(db.execute(
+            select(func.count()).select_from(Finding)
+            .where(Finding.correlation_id == finding.correlation_id)
+        ).scalar_one()) - 1
 
     remediation_text = ""
     if isinstance(finding.remediation, dict):
