@@ -71,9 +71,12 @@ jobs:
       # The console is part of the product, and one of its screens can mislead a customer about
       # their own security posture — an attack-graph view that renders a failed request as an empty
       # graph says "you are safe" on evidence it does not have. Its tests run here for that reason.
+      # Node 22, not 20: the console's test environment is jsdom 30, which requires
+      # ^22.22.2 || ^24.15.0 || >=26 and fails within a second on Node 20 — the whole web half of
+      # this pipeline was red for that one reason.
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
 

@@ -3,7 +3,10 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Security Guardian \u2014 customer security dashboard (React + TS + Vite)",
+  "engines": {
+    "node": ">=22.22.2"
+  },
+  "description": "Security Guardian — customer security dashboard (React + TS + Vite)",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
