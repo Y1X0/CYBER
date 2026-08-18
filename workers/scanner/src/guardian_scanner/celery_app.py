@@ -68,6 +68,9 @@ celery_app = Celery(
         "guardian_scanner.verification",
         # Domain ownership verification (WP-F1).
         "guardian_scanner.ownership",
+        # Outbound webhook delivery (WP-G3). A customer's slow endpoint must never hold up a scan,
+        # which is why this is a queue rather than a call.
+        "guardian_scanner.webhooks",
     ],
 )
 
@@ -106,6 +109,8 @@ celery_app.conf.update(
         "guardian.correlate_findings": {"queue": "default"},
         "guardian.retest_finding": {"queue": "default"},
         "guardian.check_domain_verification": {"queue": "default"},
+        "guardian.deliver_webhook": {"queue": "default"},
+        "guardian.sweep_webhook_deliveries": {"queue": "default"},
     },
     # Recurring work. Beat fires these; per-tenant cadence lives in the `schedules` table, because
     # a static config file cannot be edited through the API and cannot hold one customer's timing
@@ -116,6 +121,12 @@ celery_app.conf.update(
             # Every five minutes. The sweep is cheap (one indexed query) and this bounds how late
             # a schedule can fire to well under the shortest cadence the table permits.
             "schedule": 300.0,
+        },
+        "retry-webhook-deliveries": {
+            "task": "guardian.sweep_webhook_deliveries",
+            # Every minute: the shortest retry backoff is 60 seconds, and a sweep slower than the
+            # backoff turns "retry in a minute" into "retry whenever the sweep next runs".
+            "schedule": 60.0,
         },
         "sync-vulnerability-feeds": {
             "task": "guardian.sync_feeds",

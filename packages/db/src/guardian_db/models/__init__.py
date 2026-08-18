@@ -47,6 +47,7 @@ from guardian_db.models.tenancy import (
     TenantMembership,
     User,
 )
+from guardian_db.models.webhooks import WebhookDelivery, WebhookEndpoint
 
 __all__ = [
     "Advisory",
@@ -99,4 +100,6 @@ __all__ = [
     "User",
     "Vulnerability",
     "Weakness",
+    "WebhookDelivery",
+    "WebhookEndpoint",
 ]
