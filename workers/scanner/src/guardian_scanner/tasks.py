@@ -239,7 +239,15 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                 business_impact = (asset.config or {}).get("business_impact", customer.criticality)
                 try:
                     raws = _run_engine(engine, ctx)
-                    run.tool_versions = {engine.key.value: engine.version}
+                    # Record the engine's own health alongside its version. WP-E2 reads this to
+                    # decide whether an empty result is evidence: an engine that completed without
+                    # its tool saw less, and calling that "resolved" would close real findings.
+                    health = engine.health()
+                    run.tool_versions = {
+                        engine.key.value: engine.version,
+                        "degraded": bool(getattr(health, "degraded", False)),
+                        "missing": list(getattr(health, "missing", ())),
+                    }
                     for raw in raws:
                         finding = to_finding(
                             raw,
@@ -324,4 +332,15 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
         from guardian_scanner.discovery.tasks import enrich_graph
 
         enrich_graph.apply_async(args=[_tenant, _customer])
+
+        # Compare this scan against what was already open on the asset (WP-E2). Findings it did not
+        # report are resolved only where the engine that would have found them completed cleanly —
+        # the reconciliation itself enforces that, which is why it is called rather than inlined.
+        from guardian_scanner.verification import reconcile_scan
+
+        try:
+            result["verification"] = reconcile_scan(scan_id)
+        except Exception as exc:  # noqa: BLE001 - a reconciliation failure must not fail the scan
+            log.error("reconcile_failed", scan_id=scan_id, error=str(exc)[:300])
+            result["verification"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
     return result

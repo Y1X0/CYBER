@@ -112,6 +112,15 @@ class Finding(Base, TimestampMixin):
     correlation_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("finding_correlations.id"), nullable=True
     )
+    # Verification state (WP-E2). The full history lives in `finding_verifications`; these are the
+    # latest values, denormalized for list views.
+    last_verified_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    verification_verdict: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # How many times this exact issue came back after being resolved. A finding on its third reopen
+    # is a process problem rather than a scanning one, and the number is what shows that.
+    reopened_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     location: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     evidence: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
@@ -197,3 +206,29 @@ class FindingCorrelationMember(Base, TimestampMixin):
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), nullable=False)
     role: Mapped[str] = mapped_column(String(20), default="corroborating", nullable=False)
+
+
+class FindingVerification(Base, TimestampMixin):
+    """One check of whether a finding is still true (WP-E2).
+
+    A separate table rather than a column because the history is the point: "resolved on the 3rd,
+    still present on the 10th, resolved again on the 24th" is a fact about how remediation is going,
+    and a single last-verdict column throws it away.
+    """
+
+    __tablename__ = "finding_verifications"
+    __table_args__ = (Index("idx_verification_finding", "finding_id", "checked_at"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    finding_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("findings.id", ondelete="CASCADE"), nullable=False
+    )
+    scan_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scans.id"), nullable=True)
+    # still_present | resolved | not_checked | inconclusive
+    verdict: Mapped[str] = mapped_column(String(20), nullable=False)
+    method: Mapped[str] = mapped_column(String(20), default="rescan", nullable=False)
+    engine: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    rationale: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    evidence: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    checked_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)

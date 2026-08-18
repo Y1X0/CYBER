@@ -10,7 +10,7 @@ against a real system and the output was inspected — not that a test double re
 
 Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 0% operable.
 
-**Current: 1211 tests passing** (+659), 17 work packages delivered, CI green.
+**Current: 1226 tests passing** (+674), 18 work packages delivered, CI green.
 
 ---
 
@@ -63,7 +63,7 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
 | E1 | Cross-engine correlation | `TESTED` | `fc1adf1` | 36 (`test_correlation`, `integration/test_correlation_persistence`) | Five deterministic rules producing three kinds of group: **duplicate** (one credential seen by three engines is one problem), **corroboration** (a SAST taint path plus a DAST observation of the same CWE), **chain** (a vulnerable dependency that is also answering on a port; an exposed `.git` plus a committed secret). Escalations are recorded in the group's rationale. **No member is ever deleted or hidden** — the evidence trail is the product. Migration `0015`, RLS live-verified on both tables. |
-| E2 | Validation & retest | `NOT_STARTED` | — | — | |
+| E2 | Validation & retest | `TESTED` | `pending` | 15 (`integration/test_verification`) | Four verdicts, not two: `resolved` only when the engine **completed cleanly**; `not_checked` when it failed or never ran; `inconclusive` when it ran degraded. Every check is recorded with its rationale, so "resolved on the 3rd, back on the 10th" survives. A returning finding reopens the original with a `reopened_count` rather than filing a new one. Human decisions (accepted risk, false positive) are never overturned by a scanner. Wired into `run_scan`; migration `0016`, RLS live-verified. |
 | E3 | AI analyst v2 | `BLOCKED_EXTERNAL` | — | — | Needs `ANTHROPIC_API_KEY` in the production environment. Provider selection already implemented (`providers/__init__.py:19`); production currently runs the deterministic stub. |
 | E4 | Attack path v2 | `NOT_STARTED` | — | — | |
 
