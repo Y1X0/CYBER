@@ -38,7 +38,7 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
-| C1 | Feed ingestion pipeline | `TESTED` | `pending` | 49 (`test_feed_clients`, `integration/test_feed_ingestion`) | The KB was empty and nothing filled it — the old sync only *enriched* rows that did not exist, and reported `completed`. Now: NVD (with **CPE applicability**, the field that makes a service version matchable), OSV bulk per ecosystem, KEV records, EPSS bulk CSV. Migration `0013` adds `feed_state` watermarks + `cpe_configurations` + a GIN index, verified live. Failures raise, are recorded as failures, and **never advance the watermark**. |
+| C1 | Feed ingestion pipeline | `TESTED` | `e04c09f` | 49 (`test_feed_clients`, `integration/test_feed_ingestion`) | The KB was empty and nothing filled it — the old sync only *enriched* rows that did not exist, and reported `completed`. Now: NVD (with **CPE applicability**, the field that makes a service version matchable), OSV bulk per ecosystem, KEV records, EPSS bulk CSV. Migration `0013` adds `feed_state` watermarks + `cpe_configurations` + a GIN index, verified live. Failures raise, are recorded as failures, and **never advance the watermark**. |
 | C2 | Version range matching | `TESTED` | `cb47daa` | 56 (`test_versioning`) | Replaces exact-string matching. Verified against SemVer §11, PEP 440, Debian policy and rpmvercmp published orderings, and end-to-end on a Debian backport where only the release field separates patched from vulnerable. |
 | C3 | Service version → CVE | `NOT_STARTED` | — | — | |
 | C4 | Exploit intelligence | `NOT_STARTED` | — | — | |
