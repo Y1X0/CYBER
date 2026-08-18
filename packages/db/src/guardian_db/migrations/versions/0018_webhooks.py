@@ -18,6 +18,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from guardian_db.migration_utils import create_index_if_absent, table_exists
+
 revision = "0018_webhooks"
 down_revision = "0017_ownership_verification"
 branch_labels = None
@@ -27,6 +29,23 @@ _CUR = "NULLIF(current_setting('app.current_tenant', true), '')::uuid"
 
 
 def upgrade() -> None:
+    # Guarded: `0001_baseline` builds every registered model, so on an empty database these tables
+    # already exist. RLS and the grants below run either way.
+    if not table_exists("webhook_endpoints"):
+        _create_endpoints()
+    if not table_exists("webhook_deliveries"):
+        _create_deliveries()
+
+    for table in ("webhook_endpoints", "webhook_deliveries"):
+        op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+        op.execute(
+            f"CREATE POLICY tenant_isolation ON {table} TO guardian_app "
+            f"USING (tenant_id = {_CUR}) WITH CHECK (tenant_id = {_CUR})"
+        )
+        op.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO guardian_app")
+
+
+def _create_endpoints() -> None:
     op.create_table(
         "webhook_endpoints",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True,
@@ -56,8 +75,11 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False,
                   server_default=sa.text("now()")),
     )
-    op.create_index("idx_webhook_endpoint_tenant", "webhook_endpoints", ["tenant_id", "enabled"])
+    create_index_if_absent("idx_webhook_endpoint_tenant", "webhook_endpoints",
+                           ["tenant_id", "enabled"])
 
+
+def _create_deliveries() -> None:
     op.create_table(
         "webhook_deliveries",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True,
@@ -83,18 +105,10 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False,
                   server_default=sa.text("now()")),
     )
-    op.create_index("idx_webhook_delivery_endpoint", "webhook_deliveries",
-                    ["endpoint_id", "created_at"])
-    op.create_index("idx_webhook_delivery_pending", "webhook_deliveries",
-                    ["status", "next_attempt_at"])
-
-    for table in ("webhook_endpoints", "webhook_deliveries"):
-        op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
-        op.execute(
-            f"CREATE POLICY tenant_isolation ON {table} TO guardian_app "
-            f"USING (tenant_id = {_CUR}) WITH CHECK (tenant_id = {_CUR})"
-        )
-        op.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO guardian_app")
+    create_index_if_absent("idx_webhook_delivery_endpoint", "webhook_deliveries",
+                           ["endpoint_id", "created_at"])
+    create_index_if_absent("idx_webhook_delivery_pending", "webhook_deliveries",
+                           ["status", "next_attempt_at"])
 
 
 def downgrade() -> None:

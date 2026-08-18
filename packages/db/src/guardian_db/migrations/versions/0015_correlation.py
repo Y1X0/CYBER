@@ -26,6 +26,12 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from guardian_db.migration_utils import (
+    add_column_if_absent,
+    create_index_if_absent,
+    table_exists,
+)
+
 revision = "0015_correlation"
 down_revision = "0014_exploit_intelligence"
 branch_labels = None
@@ -35,6 +41,26 @@ _CUR = "NULLIF(current_setting('app.current_tenant', true), '')::uuid"
 
 
 def upgrade() -> None:
+    # Guarded: `0001_baseline` builds every registered model, so on an empty database these tables
+    # and this column already exist. RLS and the grants below run either way.
+    if not table_exists("finding_correlations"):
+        _create_correlations()
+    if not table_exists("finding_correlation_members"):
+        _create_members()
+    add_column_if_absent("findings", sa.Column("correlation_id", postgresql.UUID(as_uuid=True),
+                                               sa.ForeignKey("finding_correlations.id"),
+                                               nullable=True))
+
+    for table in ("finding_correlations", "finding_correlation_members"):
+        op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+        op.execute(
+            f"CREATE POLICY tenant_isolation ON {table} TO guardian_app "
+            f"USING (tenant_id = {_CUR}) WITH CHECK (tenant_id = {_CUR})"
+        )
+        op.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO guardian_app")
+
+
+def _create_correlations() -> None:
     op.create_table(
         "finding_correlations",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True,
@@ -61,9 +87,11 @@ def upgrade() -> None:
                   server_default=sa.text("now()")),
         sa.UniqueConstraint("tenant_id", "fingerprint", name="uq_correlation_tenant_fingerprint"),
     )
-    op.create_index("idx_correlation_tenant_customer", "finding_correlations",
-                    ["tenant_id", "customer_id"])
+    create_index_if_absent("idx_correlation_tenant_customer", "finding_correlations",
+                           ["tenant_id", "customer_id"])
 
+
+def _create_members() -> None:
     op.create_table(
         "finding_correlation_members",
         sa.Column("correlation_id", postgresql.UUID(as_uuid=True),
@@ -79,18 +107,8 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False,
                   server_default=sa.text("now()")),
     )
-    op.create_index("idx_correlation_member_finding", "finding_correlation_members", ["finding_id"])
-
-    op.add_column("findings", sa.Column("correlation_id", postgresql.UUID(as_uuid=True),
-                                        sa.ForeignKey("finding_correlations.id"), nullable=True))
-
-    for table in ("finding_correlations", "finding_correlation_members"):
-        op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
-        op.execute(
-            f"CREATE POLICY tenant_isolation ON {table} TO guardian_app "
-            f"USING (tenant_id = {_CUR}) WITH CHECK (tenant_id = {_CUR})"
-        )
-        op.execute(f"GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO guardian_app")
+    create_index_if_absent("idx_correlation_member_finding", "finding_correlation_members",
+                           ["finding_id"])
 
 
 def downgrade() -> None:

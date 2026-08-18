@@ -26,6 +26,12 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from guardian_db.migration_utils import (
+    add_column_if_absent,
+    create_index_if_absent,
+    table_exists,
+)
+
 revision = "0013_feed_intelligence"
 down_revision = "0012_scheduling"
 branch_labels = None
@@ -33,21 +39,37 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
+    # Guarded because `0001_baseline` builds every registered model on an empty database, so on a
+    # fresh one these columns and this table are already present. The grant below runs either way.
+    add_column_if_absent(
         "vulnerabilities",
         sa.Column("cpe_configurations", postgresql.JSONB(), nullable=False, server_default="[]"),
     )
     # The lookup WP-C3 performs is "which advisories mention this CPE product", which is a
     # containment query over JSONB — the one thing a GIN index makes fast.
-    op.create_index(
+    create_index_if_absent(
         "idx_vuln_cpe_configurations", "vulnerabilities", ["cpe_configurations"],
         postgresql_using="gin",
     )
-    op.add_column(
+    add_column_if_absent(
         "vulnerabilities",
         sa.Column("severity", sa.String(20), nullable=True),
     )
 
+    if not table_exists("feed_state"):
+        _create_feed_state()
+    op.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON feed_state TO guardian_app")
+
+    # `items_ingested` counted only enrichment before. A sync now reports what it created and what
+    # it updated separately, because "0 new advisories" is a healthy daily result and "0 records
+    # seen" is an outage, and one number cannot say both.
+    add_column_if_absent("feed_syncs", sa.Column("items_created", sa.Integer(), nullable=False,
+                                                 server_default="0"))
+    add_column_if_absent("feed_syncs", sa.Column("items_failed", sa.Integer(), nullable=False,
+                                                 server_default="0"))
+
+
+def _create_feed_state() -> None:
     op.create_table(
         "feed_state",
         sa.Column("source", sa.String(32), primary_key=True),
@@ -65,15 +87,6 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False,
                   server_default=sa.text("now()")),
     )
-    op.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON feed_state TO guardian_app")
-
-    # `items_ingested` counted only enrichment before. A sync now reports what it created and what
-    # it updated separately, because "0 new advisories" is a healthy daily result and "0 records
-    # seen" is an outage, and one number cannot say both.
-    op.add_column("feed_syncs", sa.Column("items_created", sa.Integer(), nullable=False,
-                                          server_default="0"))
-    op.add_column("feed_syncs", sa.Column("items_failed", sa.Integer(), nullable=False,
-                                          server_default="0"))
 
 
 def downgrade() -> None:

@@ -84,11 +84,14 @@ def _api_key_identity(token: str, db: Session) -> Identity | None:
     except apikeys.InvalidKey:
         return None
 
-    # Looked up by id, then one constant-time digest comparison. No table scan, and no timing
-    # signal from comparing the secret.
+    # Looked up by id through the same `SECURITY DEFINER` seam the JWT path uses (WP-G1b). A plain
+    # SELECT here returns nothing under the RLS-enforced app role, because a key's tenant is a
+    # property of the key and cannot be bound until the key has been read — so a valid key was
+    # refused as invalid in exactly the deployments RLS is turned on for. Reading the row is not
+    # authentication: the constant-time digest comparison below still decides.
     record = db.execute(
         text("SELECT id, tenant_id, name, key_hash, scopes, expires_at, revoked_at "
-             "FROM api_keys WHERE id = :id"),
+             "FROM auth_api_key(:id)"),
         {"id": _key_uuid(key_id)},
     ).first()
     if record is None or not apikeys.verify(token, record.key_hash,
@@ -100,20 +103,24 @@ def _api_key_identity(token: str, db: Session) -> Identity | None:
     if record.expires_at is not None and record.expires_at <= now:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "this API key has expired")
 
+    # Bound before touching the row: `api_keys` is RLS-protected like everything else, and the
+    # `last_used_at` write has to satisfy the policy rather than sidestep it.
+    set_tenant(db, record.tenant_id)
     key = db.get(ApiKey, record.id)
     if key is not None:
         key.last_used_at = now
         db.commit()
+        # `set_config(..., is_local => true)` is transaction-local, so the commit above dropped the
+        # binding. Re-bind, or every query the request goes on to make sees an empty database.
+        set_tenant(db, record.tenant_id)
 
-    identity = Identity(
+    return Identity(
         user=_MachineUser(str(record.name), record.id), tenant_id=record.tenant_id,
         # A key is not a person and holds no staff role: what it may do comes from its scopes and
         # nothing else. Borrowing a role would give it whatever that role gains later.
         staff_role=None, portal_customer_id=None, api_key=key,
         scopes=tuple(record.scopes or ()),
     )
-    set_tenant(db, identity.tenant_id)
-    return identity
 
 
 def _key_uuid(key_id: str) -> uuid.UUID:

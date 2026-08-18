@@ -15,6 +15,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -96,7 +98,8 @@ class Finding(Base, TimestampMixin):
     # Exploit intelligence carried onto the finding (WP-C4), so a report ranks without re-reading
     # the KB and a finding keeps the maturity it was actually scored with.
     exploit_maturity: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    ransomware: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    ransomware: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False,
+                                             server_default=text("false"))
 
     severity: Mapped[str] = mapped_column(String(10), nullable=False)
     # Risk Engine output: 0–100 business-risk score + the transparent rationale behind it.
@@ -120,7 +123,8 @@ class Finding(Base, TimestampMixin):
     verification_verdict: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # How many times this exact issue came back after being resolved. A finding on its third reopen
     # is a process problem rather than a scanning one, and the number is what shows that.
-    reopened_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    reopened_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False,
+                                                server_default="0")
 
     location: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     evidence: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
@@ -177,19 +181,24 @@ class FindingCorrelation(Base, TimestampMixin):
         Index("idx_correlation_tenant_customer", "tenant_id", "customer_id"),
     )
 
-    id: Mapped[uuid.UUID] = uuid_pk()
+    id: Mapped[uuid.UUID] = uuid_pk(db_generated=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), nullable=False)
     customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id"), nullable=False)
     rule: Mapped[str] = mapped_column(String(60), nullable=False)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     title: Mapped[str] = mapped_column(String(300), nullable=False)
-    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False,
+                                             server_default="")
     # duplicate | corroboration | chain
-    kind: Mapped[str] = mapped_column(String(20), default="duplicate", nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), default="duplicate", nullable=False,
+                                      server_default="duplicate")
     severity: Mapped[str] = mapped_column(String(10), nullable=False)
-    risk_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    rationale: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
-    member_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    risk_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False,
+                                            server_default="0")
+    rationale: Mapped[list] = mapped_column(JSONB, default=list, nullable=False,
+                                            server_default="[]")
+    member_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False,
+                                              server_default="0")
 
 
 class FindingCorrelationMember(Base, TimestampMixin):
@@ -205,7 +214,8 @@ class FindingCorrelationMember(Base, TimestampMixin):
         ForeignKey("findings.id", ondelete="CASCADE"), primary_key=True
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), default="corroborating", nullable=False)
+    role: Mapped[str] = mapped_column(String(20), default="corroborating", nullable=False,
+                                      server_default="corroborating")
 
 
 class FindingVerification(Base, TimestampMixin):
@@ -219,7 +229,7 @@ class FindingVerification(Base, TimestampMixin):
     __tablename__ = "finding_verifications"
     __table_args__ = (Index("idx_verification_finding", "finding_id", "checked_at"),)
 
-    id: Mapped[uuid.UUID] = uuid_pk()
+    id: Mapped[uuid.UUID] = uuid_pk(db_generated=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), nullable=False)
     finding_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("findings.id", ondelete="CASCADE"), nullable=False
@@ -227,8 +237,11 @@ class FindingVerification(Base, TimestampMixin):
     scan_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("scans.id"), nullable=True)
     # still_present | resolved | not_checked | inconclusive
     verdict: Mapped[str] = mapped_column(String(20), nullable=False)
-    method: Mapped[str] = mapped_column(String(20), default="rescan", nullable=False)
+    method: Mapped[str] = mapped_column(String(20), default="rescan", nullable=False,
+                                        server_default="rescan")
     engine: Mapped[str | None] = mapped_column(String(30), nullable=True)
-    rationale: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    evidence: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
-    checked_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, default="", nullable=False, server_default="")
+    evidence: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False,
+                                           server_default="{}")
+    checked_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+                                                    server_default=func.now())

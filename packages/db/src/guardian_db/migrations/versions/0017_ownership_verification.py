@@ -22,6 +22,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from guardian_db.migration_utils import create_index_if_absent, table_exists
+
 revision = "0017_ownership_verification"
 down_revision = "0016_verification"
 branch_labels = None
@@ -31,6 +33,20 @@ _CUR = "NULLIF(current_setting('app.current_tenant', true), '')::uuid"
 
 
 def upgrade() -> None:
+    # Guarded: `0001_baseline` builds every registered model, so on an empty database this table
+    # already exists. RLS and the grant below run either way.
+    if not table_exists("domain_verifications"):
+        _create()
+
+    op.execute("ALTER TABLE domain_verifications ENABLE ROW LEVEL SECURITY")
+    op.execute(
+        f"CREATE POLICY tenant_isolation ON domain_verifications TO guardian_app "
+        f"USING (tenant_id = {_CUR}) WITH CHECK (tenant_id = {_CUR})"
+    )
+    op.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON domain_verifications TO guardian_app")
+
+
+def _create() -> None:
     op.create_table(
         "domain_verifications",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True,
@@ -64,15 +80,8 @@ def upgrade() -> None:
                   server_default=sa.text("now()")),
         sa.UniqueConstraint("token", name="uq_domain_verification_token"),
     )
-    op.create_index("idx_domain_verification_tenant", "domain_verifications",
-                    ["tenant_id", "domain"])
-
-    op.execute("ALTER TABLE domain_verifications ENABLE ROW LEVEL SECURITY")
-    op.execute(
-        f"CREATE POLICY tenant_isolation ON domain_verifications TO guardian_app "
-        f"USING (tenant_id = {_CUR}) WITH CHECK (tenant_id = {_CUR})"
-    )
-    op.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON domain_verifications TO guardian_app")
+    create_index_if_absent("idx_domain_verification_tenant", "domain_verifications",
+                           ["tenant_id", "domain"])
 
 
 def downgrade() -> None:

@@ -24,6 +24,12 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
+from guardian_db.migration_utils import (
+    add_column_if_absent,
+    create_index_if_absent,
+    table_exists,
+)
+
 revision = "0016_verification"
 down_revision = "0015_correlation"
 branch_labels = None
@@ -33,6 +39,29 @@ _CUR = "NULLIF(current_setting('app.current_tenant', true), '')::uuid"
 
 
 def upgrade() -> None:
+    # Guarded: `0001_baseline` builds every registered model, so on an empty database this table and
+    # these columns already exist. RLS and the grant below run either way.
+    if not table_exists("finding_verifications"):
+        _create()
+
+    op.execute("ALTER TABLE finding_verifications ENABLE ROW LEVEL SECURITY")
+    op.execute(
+        f"CREATE POLICY tenant_isolation ON finding_verifications TO guardian_app "
+        f"USING (tenant_id = {_CUR}) WITH CHECK (tenant_id = {_CUR})"
+    )
+    op.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON finding_verifications TO guardian_app")
+
+    add_column_if_absent("findings", sa.Column("last_verified_at", sa.DateTime(timezone=True),
+                                               nullable=True))
+    add_column_if_absent("findings", sa.Column("verification_verdict", sa.String(20),
+                                               nullable=True))
+    # How many times this exact issue has come back after being resolved. A finding on its third
+    # reopen is a process problem, not a scanning problem, and the number is what shows that.
+    add_column_if_absent("findings", sa.Column("reopened_count", sa.Integer(), nullable=False,
+                                               server_default="0"))
+
+
+def _create() -> None:
     op.create_table(
         "finding_verifications",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True,
@@ -59,22 +88,8 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False,
                   server_default=sa.text("now()")),
     )
-    op.create_index("idx_verification_finding", "finding_verifications",
-                    ["finding_id", "checked_at"])
-    op.execute("ALTER TABLE finding_verifications ENABLE ROW LEVEL SECURITY")
-    op.execute(
-        f"CREATE POLICY tenant_isolation ON finding_verifications TO guardian_app "
-        f"USING (tenant_id = {_CUR}) WITH CHECK (tenant_id = {_CUR})"
-    )
-    op.execute("GRANT SELECT, INSERT, UPDATE, DELETE ON finding_verifications TO guardian_app")
-
-    op.add_column("findings", sa.Column("last_verified_at", sa.DateTime(timezone=True),
-                                        nullable=True))
-    op.add_column("findings", sa.Column("verification_verdict", sa.String(20), nullable=True))
-    # How many times this exact issue has come back after being resolved. A finding on its third
-    # reopen is a process problem, not a scanning problem, and the number is what shows that.
-    op.add_column("findings", sa.Column("reopened_count", sa.Integer(), nullable=False,
-                                        server_default="0"))
+    create_index_if_absent("idx_verification_finding", "finding_verifications",
+                           ["finding_id", "checked_at"])
 
 
 def downgrade() -> None:

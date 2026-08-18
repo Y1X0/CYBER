@@ -111,14 +111,16 @@ class DomainVerification(Base, TimestampMixin):
         Index("idx_domain_verification_tenant", "tenant_id", "domain"),
     )
 
-    id: Mapped[uuid.UUID] = uuid_pk()
+    id: Mapped[uuid.UUID] = uuid_pk(db_generated=True)
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), nullable=False)
     customer_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("customers.id"), nullable=False)
     domain: Mapped[str] = mapped_column(String(253), nullable=False)
     method: Mapped[str] = mapped_column(String(20), nullable=False)
     token: Mapped[str] = mapped_column(String(80), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
-    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False,
+                                        server_default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False,
+                                         server_default="0")
     last_checked_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

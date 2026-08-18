@@ -10,7 +10,17 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -44,12 +54,14 @@ class Vulnerability(Base, TimestampMixin):
     # CPE applicability from NVD: [{"vendor","product","version_start_including", ...}]. Answers
     # "is this OpenSSH build vulnerable", which is the question a service fingerprint raises and
     # `affected` cannot express (WP-C1/C3).
-    cpe_configurations: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
+    cpe_configurations: Mapped[list] = mapped_column(JSONB, default=list, nullable=False,
+                                                    server_default="[]")
     severity: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # Exploit intelligence (WP-C4), denormalized so the risk engine does not join per finding.
     # "how hard would this be" is the question a remediation queue is actually ordered by.
     exploit_maturity: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    ransomware: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    ransomware: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False,
+                                             server_default=text("false"))
     references: Mapped[list] = mapped_column(JSONB, default=list, nullable=False)
 
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -106,8 +118,10 @@ class FeedSync(Base, TimestampMixin):
     items_ingested: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # Created and failed are tracked apart from the total: "0 new advisories" is a healthy daily
     # result and "0 records seen" is an outage, and one number cannot say both.
-    items_created: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    items_failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    items_created: Mapped[int] = mapped_column(Integer, default=0, nullable=False,
+                                               server_default="0")
+    items_failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False,
+                                              server_default="0")
     started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cursor: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -133,8 +147,10 @@ class FeedState(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    records_ingested: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False,
+                                                      server_default="0")
+    records_ingested: Mapped[int] = mapped_column(Integer, default=0, nullable=False,
+                                                  server_default="0")
 
 
 class Exploit(Base, TimestampMixin):
@@ -151,12 +167,15 @@ class Exploit(Base, TimestampMixin):
         Index("idx_exploits_cve", "cve_id"),
     )
 
-    id: Mapped[uuid.UUID] = uuid_pk()
+    id: Mapped[uuid.UUID] = uuid_pk(db_generated=True)
     cve_id: Mapped[str] = mapped_column(String(32), nullable=False)
     source: Mapped[str] = mapped_column(String(32), nullable=False)
     external_id: Mapped[str] = mapped_column(String(120), nullable=False)
-    title: Mapped[str] = mapped_column(String(400), default="", nullable=False)
+    title: Mapped[str] = mapped_column(String(400), default="", nullable=False,
+                                       server_default="")
     reference_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    maturity: Mapped[str] = mapped_column(String(20), default="poc", nullable=False)
-    verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    maturity: Mapped[str] = mapped_column(String(20), default="poc", nullable=False,
+                                          server_default="poc")
+    verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False,
+                                           server_default=text("false"))
     published_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
