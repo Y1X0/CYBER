@@ -183,3 +183,107 @@ def test_a_repository_scan_needs_no_network_authorization():
             ScanEngineRun.scan_id == ctx["scan"], ScanEngineRun.engine == "secrets"
         ).one()
     assert row.status != "skipped"
+
+
+# ── safe-scanning controls (WP-H3) ────────────────────────────────────────────────────────────────
+def _set_settings(ctx, settings: dict):
+    from guardian_db.models import Asset, Customer
+    from guardian_db.session import session_scope
+
+    with session_scope() as db:
+        asset = db.get(Asset, ctx["asset"])
+        db.get(Customer, asset.customer_id).settings = settings
+
+
+def _authorized_estate():
+    return _estate(authorization={"method": "ownership_verified",
+                                  "targets": [{"type": "domain", "value": DOMAIN_SUFFIX}]})
+
+
+def test_a_blackout_window_defers_the_engine_rather_than_skipping_it():
+    """A skipped engine reads as a clean one. Deferred says what happened and when to retry."""
+    ctx = _authorized_estate()
+    _set_settings(ctx, {"safe_scanning": {"blackout_windows": [
+        {"days": [], "start_hour": 0, "end_hour": 24, "label": "always"}]}})
+
+    _run(ctx)
+
+    run = _dast_run(ctx)
+    assert run["status"] == "deferred"
+    assert "deferred rather than skipped" in run["error"]
+
+
+def test_a_paused_customer_refuses_active_scanning():
+    ctx = _authorized_estate()
+    _set_settings(ctx, {"safe_scanning": {"paused": True, "pause_reason": "change freeze"}})
+
+    _run(ctx)
+
+    run = _dast_run(ctx)
+    assert run["status"] == "skipped"
+    assert "change freeze" in run["error"]
+
+
+def test_the_platform_kill_switch_stops_active_scanning(monkeypatch):
+    from guardian_common.config import get_settings
+
+    ctx = _authorized_estate()
+    monkeypatch.setattr(get_settings(), "active_scanning_paused", True, raising=False)
+
+    _run(ctx)
+
+    run = _dast_run(ctx)
+    assert run["status"] == "skipped"
+    assert "platform-wide" in run["error"]
+
+
+def test_a_malformed_blackout_window_refuses_rather_than_scanning_through_it():
+    """A window the customer meant to have is not the same as no window."""
+    ctx = _authorized_estate()
+    _set_settings(ctx, {"safe_scanning": {"blackout_windows": [
+        {"days": ["mon"], "start_hour": "nine", "end_hour": 17}]}})
+
+    _run(ctx)
+
+    run = _dast_run(ctx)
+    assert run["status"] == "skipped"
+    assert "malformed" in run["error"]
+
+
+def test_the_deferral_is_audited_with_a_retry_time():
+    from guardian_db.models import AuditLog
+    from guardian_db.session import session_scope
+
+    ctx = _authorized_estate()
+    _set_settings(ctx, {"safe_scanning": {"blackout_windows": [
+        {"days": [], "start_hour": 0, "end_hour": 24, "label": "always"}]}})
+    _run(ctx)
+
+    with session_scope() as db:
+        rows = db.query(AuditLog).filter(
+            AuditLog.tenant_id == ctx["tenant"],
+            AuditLog.action == "scan.engine.deferred_safe_scanning",
+        ).all()
+    assert rows
+    assert rows[0].metadata_["action"] == "defer"
+    assert rows[0].metadata_["retry_after"]
+
+
+def test_a_repository_scan_is_not_held_by_the_active_scanning_controls():
+    """These controls exist to protect a customer's running systems. A repository scan touches
+    none of them."""
+    from guardian_db.models import Scan, ScanEngineRun
+    from guardian_db.session import session_scope
+
+    ctx = _estate(kind="repo", identifier="inline")
+    _set_settings(ctx, {"safe_scanning": {"paused": True}})
+    with session_scope() as db:
+        db.get(Scan, ctx["scan"]).requested_engines = ["secrets"]
+
+    _run(ctx)
+
+    with session_scope() as db:
+        row = db.query(ScanEngineRun).filter(
+            ScanEngineRun.scan_id == ctx["scan"], ScanEngineRun.engine == "secrets"
+        ).one()
+    assert row.status != "skipped"

@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     # the endpoint is closed: an unset secret must never mean "no authentication required".
     metrics_token: str = ""
 
+    # Emergency stop for active scanning, platform-wide (WP-H3). Set it and every engine that
+    # touches a customer's network refuses, whatever their authorization says.
+    active_scanning_paused: bool = False
+
     @property
     def apikey_pepper(self) -> str:
         return self.api_key_pepper or self.jwt_secret

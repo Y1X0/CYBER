@@ -18,6 +18,7 @@ from guardian_common.config import get_settings
 from guardian_common.crypto import decrypt_json
 from guardian_common.logging import get_logger
 from guardian_core import authorization as authz
+from guardian_core import safescan
 from guardian_core.enums import ACTIVE_ENGINES, EngineKey, ScanStatus
 from guardian_db.audit import record_audit
 from guardian_db.models import (
@@ -171,6 +172,33 @@ def _authorized(session, asset: Asset, *, engine_key: str) -> authz.Decision:
     )
 
 
+def _safe_scan_verdict(session, scan: Scan, asset: Asset, customer: Customer) -> safescan.Verdict:
+    """The safe-scanning gate (WP-H3): may an active engine run *now*, and how hard.
+
+    Authorization answers whether we may scan this at all. This answers whether now is a time the
+    customer agreed to, whether something is already scanning the same host, and whether anybody
+    has hit the stop button.
+    """
+    settings = get_settings()
+    try:
+        policy = safescan.parse_policy(customer.settings or {})
+    except safescan.SafeScanRefusal as exc:
+        # A malformed window is not "no window" — it is a window the customer meant to have.
+        return safescan.Verdict(False, str(exc), action="refuse")
+
+    concurrent = session.query(Scan).filter(
+        Scan.asset_id == asset.id,
+        Scan.id != scan.id,
+        Scan.status.in_((ScanStatus.RUNNING.value, ScanStatus.QUEUED.value)),
+    ).count()
+    return safescan.check(
+        policy,
+        now=_now(),
+        active_scans_on_asset=concurrent,
+        platform_paused=bool(getattr(settings, "active_scanning_paused", False)),
+    )
+
+
 @celery_app.task(name="guardian.run_scan", bind=True)
 def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
     """Execute all requested engines for a scan."""
@@ -210,6 +238,39 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                 # Use the engine's own key (already an EngineKey) — never coerce the raw request
                 # string, which would raise on an unknown/third-party key and fail the whole scan.
                 needs_auth = engine.requires_authorization or engine.key in ACTIVE_ENGINES
+                if needs_auth:
+                    safe = _safe_scan_verdict(session, scan, asset, customer)
+                    if not safe.allowed:
+                        # Deferred, not silently skipped: a skipped engine reads as a clean one.
+                        run.status = "deferred" if safe.action == "defer" else "skipped"
+                        run.error = safe.reason
+                        engine_statuses.append("skipped")
+                        record_audit(
+                            session,
+                            action="scan.engine.deferred_safe_scanning",
+                            tenant_id=scan.tenant_id,
+                            customer_id=scan.customer_id,
+                            entity_type="scan_engine_run",
+                            entity_id=str(run.id),
+                            metadata={"engine": engine_key, "reason": safe.reason,
+                                      "action": safe.action,
+                                      "retry_after": (safe.retry_after.isoformat()
+                                                      if safe.retry_after else None)},
+                        )
+                        continue
+                    # The customer's intensity profile caps what the active engines may spend.
+                    # Named for the engines that read them (WP-D2/B2), so a customer dialling the
+                    # profile down actually slows the scanner rather than only the paperwork.
+                    scan_settings = {
+                        "dast_max_requests": safe.limits["max_requests"],
+                        "dast_rate": safe.limits["rate_per_second"],
+                        "api_max_requests": safe.limits["max_requests"],
+                        "api_rate": safe.limits["rate_per_second"],
+                        "scan_profile": safe.reason,
+                    }
+                else:
+                    scan_settings = {}
+
                 decision = (_authorized(session, asset, engine_key=engine_key)
                             if needs_auth else None)
                 if decision is not None and not decision.allowed:
@@ -246,6 +307,7 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                     exposure=asset.exposure,
                     vuln_matcher=KbVulnMatcher(session),  # SCA matches against the local KB
                     asset_config=asset.config or {},  # offline snapshots for active engines
+                    settings=scan_settings,  # the customer's intensity profile (WP-H3)
                     # Least privilege: decrypt credentials only for engines that declare they need
                     # them (cloud/DAST/API) — a SAST/secrets engine never receives cloud keys.
                     secret_config=(
