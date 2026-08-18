@@ -122,3 +122,27 @@ def test_notice_lists_approved_tools_and_omits_blocked_ones(registry):
     assert "gitleaks" in notice
     assert "masscan" not in notice, "a prohibited tool must never appear in attribution"
     assert "OSV.dev" in notice, "data sources carry their own attribution requirement"
+
+
+def test_an_unknown_state_is_fatal_rather_than_silently_dropping_the_row(tmp_path):
+    """A typo in a state used to remove the tool from the registry entirely. A gate that forgets a
+    tool cannot refuse it."""
+    table = (
+        "| Tool | Version | Licence | Status | Notes |\n"
+        "|---|---|---|---|---|\n"
+        "| widget | 1.0 | MIT | `APROVED` | typo |\n"
+    )
+    path = tmp_path / "TOOL_LICENSES.md"
+    path.write_text(table)
+    with pytest.raises(SystemExit, match="unknown state"):
+        load_registry(path)
+
+
+def test_not_adopted_is_a_blocked_state():
+    """interactsh is MIT and still refused: an out-of-band callback sends customer data to a third
+    host, which is a capability decision rather than a licence one."""
+    from tools.check_tool_licenses import REGISTRY
+
+    registry = load_registry(REGISTRY)
+    assert registry["interactsh"].state == "NOT_ADOPTED"
+    assert "NOT_ADOPTED" in BLOCKED_STATES

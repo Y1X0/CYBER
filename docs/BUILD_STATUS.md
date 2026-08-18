@@ -10,7 +10,7 @@ against a real system and the output was inspected — not that a test double re
 
 Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 0% operable.
 
-**Current: 857 tests passing** (+305), 8 work packages delivered, CI green.
+**Current: 922 tests passing** (+370), 9 work packages delivered, CI green.
 
 ---
 
@@ -47,7 +47,7 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
-| D1 | Nuclei | `NOT_STARTED` | — | — | |
+| D1 | Nuclei | `LIVE_VERIFIED` | `pending` | 65 (`test_template_loader`, `test_template_runner`, `test_web_checks_provider_unit`) | Nuclei's **template format** is executed natively — no binary, so it stays in the artifact plane and off `uid_nft`. `templates/loader.py` denies by default (http+GET/HEAD only; no DSL, payloads, raw, redirects, or OOB callbacks); 17 templates ship. Verified over a real socket against a local HTTP fixture: 8 exposures detected, a present-but-harmless `/phpinfo.php` correctly silent, every 404 route silent. Adding a check is now a reviewed YAML file. |
 | D2 | ZAP full DAST | `NOT_STARTED` | — | — | |
 | D3 | SCA v2 | `TESTED` | `def7df6` | 30 (`test_sca_lockfiles`) | 9 lockfile formats incl. transitive deps; `OsvVulnMatcher` connects the client that had zero call sites; `CompositeVulnMatcher` merges sources by advisory id; CVSS v3.x base scoring. Live OSV query needs egress (see BLOCKER-4). |
 | D4 | SAST v2 | `LIVE_VERIFIED` | `2aadc76` | 54 (`test_sast_taint`, `test_sast_engine`) | AST taint analysis: 11 sink classes, class-specific sanitizers, import-alias resolution, inter-procedural summaries, comment/string masking. Against an 11-route vulnerable fixture: **8/8 planted flaws found, 0 false positives on the 3 safe variants**. Against Guardian's own 26k lines: 40 findings → 4 after fixing the noise the first run exposed, all true positives. |

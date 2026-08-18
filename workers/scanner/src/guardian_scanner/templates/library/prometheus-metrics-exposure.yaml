@@ -1,0 +1,25 @@
+id: prometheus-metrics-exposure
+info:
+  name: Exposed Prometheus metrics
+  author: guardian
+  severity: low
+  description: |
+    A metrics endpoint is public. It leaks internal route names, dependency hosts, build versions
+    and traffic volumes — the reconnaissance an attacker would otherwise have to guess at.
+  remediation: Restrict the metrics endpoint to the monitoring network.
+  classification:
+    cwe-id: CWE-200
+  tags: exposure,monitoring
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/metrics"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: regex
+        part: body
+        regex:
+          - '(?m)^# (HELP|TYPE) [a-z_]+'

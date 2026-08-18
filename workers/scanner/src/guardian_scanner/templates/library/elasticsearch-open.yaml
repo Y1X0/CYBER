@@ -1,0 +1,28 @@
+id: elasticsearch-open
+info:
+  name: Unauthenticated Elasticsearch
+  author: guardian
+  severity: high
+  description: |
+    An Elasticsearch node answers unauthenticated. Every index it holds is readable, and in most
+    default deployments writable, by anyone who can reach the port.
+  remediation: Enable authentication and bind the node to a private interface.
+  classification:
+    cwe-id: CWE-306
+    cvss-score: 7.5
+  tags: exposure,elastic,auth-bypass
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/_cluster/health"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - '"cluster_name"'
+          - '"number_of_nodes"'
+        condition: and

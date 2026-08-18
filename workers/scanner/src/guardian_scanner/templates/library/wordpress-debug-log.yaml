@@ -1,0 +1,28 @@
+id: wordpress-debug-log
+info:
+  name: Exposed WordPress debug.log
+  author: guardian
+  severity: medium
+  description: |
+    WP_DEBUG_LOG output is readable. Debug logs routinely contain absolute paths, SQL statements and
+    session or nonce values.
+  remediation: Disable WP_DEBUG_LOG in production and delete wp-content/debug.log.
+  classification:
+    cwe-id: CWE-532
+  tags: exposure,wordpress,log
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/wp-content/debug.log"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - "PHP Notice"
+          - "PHP Warning"
+          - "PHP Fatal error"
+        condition: or

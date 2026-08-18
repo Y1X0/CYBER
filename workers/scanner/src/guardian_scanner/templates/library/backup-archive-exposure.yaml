@@ -1,0 +1,30 @@
+id: backup-archive-exposure
+info:
+  name: Exposed database backup
+  author: guardian
+  severity: high
+  description: |
+    A SQL dump is downloadable from the document root. A database backup is the entire application's
+    data — including password hashes and session tables — in one file.
+  remediation: Remove the file and move backups out of any web-served directory.
+  classification:
+    cwe-id: CWE-530
+    cvss-score: 7.5
+  tags: exposure,backup,secret
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/backup.sql"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - "CREATE TABLE"
+          - "INSERT INTO"
+          - "MySQL dump"
+          - "PostgreSQL database dump"
+        condition: or

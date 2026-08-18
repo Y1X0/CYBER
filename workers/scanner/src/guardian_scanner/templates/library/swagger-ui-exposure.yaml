@@ -1,0 +1,38 @@
+id: swagger-ui-exposure
+info:
+  name: Exposed API documentation
+  author: guardian
+  severity: low
+  description: |
+    An interactive API specification is published. It is not a vulnerability by itself, but it hands
+    an attacker the complete endpoint inventory, including routes never linked from the application.
+  remediation: Restrict the specification to authenticated users in production.
+  classification:
+    cwe-id: CWE-200
+  tags: exposure,api,swagger
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/swagger.json"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - '"swagger"'
+          - '"openapi"'
+        condition: or
+      - type: word
+        part: body
+        words:
+          - '"paths"'
+    extractors:
+      - type: regex
+        name: title
+        part: body
+        regex:
+          - '"title"\s*:\s*"([^"]{1,60})"'
+        group: 1

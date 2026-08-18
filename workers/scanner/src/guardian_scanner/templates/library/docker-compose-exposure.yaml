@@ -1,0 +1,25 @@
+id: docker-compose-exposure
+info:
+  name: Exposed docker-compose.yml
+  author: guardian
+  severity: high
+  description: |
+    The compose file is served over HTTP. It names every internal service and image tag, and its
+    environment blocks routinely hold database passwords and API keys in cleartext.
+  remediation: Remove deployment manifests from the document root and rotate anything they contained.
+  classification:
+    cwe-id: CWE-538
+  tags: exposure,docker,secret
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/docker-compose.yml"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: regex
+        part: body
+        regex:
+          - '(?m)^services:'

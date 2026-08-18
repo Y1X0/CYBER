@@ -1,0 +1,33 @@
+id: jenkins-unauthenticated
+info:
+  name: Unauthenticated Jenkins
+  author: guardian
+  severity: critical
+  description: |
+    A Jenkins controller answers without authentication. Anyone reaching it can read every job's
+    configuration and credentials binding, and in the default configuration can run a build — which
+    is arbitrary code execution on the build agents.
+  remediation: Enable security, require authentication, and take the instance off the public internet.
+  classification:
+    cwe-id: CWE-306
+    cvss-score: 9.8
+  tags: exposure,jenkins,auth-bypass
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/api/json"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: header
+        words:
+          - "X-Jenkins"
+        case-insensitive: true
+    extractors:
+      - type: kval
+        name: version
+        kval:
+          - x_jenkins

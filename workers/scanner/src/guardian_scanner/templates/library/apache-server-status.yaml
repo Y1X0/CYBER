@@ -1,0 +1,25 @@
+id: apache-server-status
+info:
+  name: Exposed Apache server-status
+  author: guardian
+  severity: medium
+  description: |
+    mod_status is reachable without restriction. It discloses live request URLs, client addresses
+    and internal virtual hosts — a running map of the application and its users.
+  remediation: Restrict /server-status to localhost, or disable mod_status.
+  classification:
+    cwe-id: CWE-200
+  tags: exposure,apache
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/server-status"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - "Apache Server Status"

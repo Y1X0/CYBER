@@ -1,0 +1,32 @@
+id: missing-security-headers
+info:
+  name: No Content-Security-Policy
+  author: guardian
+  severity: low
+  description: |
+    The response carries no Content-Security-Policy. CSP is the control that turns a successful
+    injection into a blocked one; without it any XSS that gets through executes with full privilege.
+  remediation: Send a Content-Security-Policy header, starting in report-only mode.
+  classification:
+    cwe-id: CWE-693
+  tags: misconfig,headers
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: header
+        words:
+          - "content-security-policy"
+        case-insensitive: true
+        negative: true
+    extractors:
+      - type: kval
+        name: server
+        kval:
+          - server

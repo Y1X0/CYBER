@@ -1,0 +1,23 @@
+id: git-head-exposure
+info:
+  name: Exposed .git/HEAD
+  author: guardian
+  severity: medium
+  description: The git HEAD reference is served over HTTP, indicating the .git directory is deployed.
+  remediation: Block /.git/ at the web server or reverse proxy.
+  classification:
+    cwe-id: CWE-527
+  tags: exposure,git
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.git/HEAD"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: regex
+        part: body
+        regex:
+          - '^ref:\s+refs/'

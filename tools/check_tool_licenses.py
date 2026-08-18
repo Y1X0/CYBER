@@ -25,7 +25,14 @@ from pathlib import Path
 REGISTRY = Path("docs/TOOL_LICENSES.md")
 
 APPROVED_STATES = {"APPROVED", "APPROVED_SEPARATE_PROCESS"}
-BLOCKED_STATES = {"LEGAL_REVIEW", "PROHIBITED"}
+# NOT_ADOPTED: the licence is fine but the capability is deliberately not used, so the tool must not
+# appear in an image either. Blocked, with a different reason from a licence block.
+BLOCKED_STATES = {"LEGAL_REVIEW", "PROHIBITED", "NOT_ADOPTED"}
+# Column headings, not states. Anything else unrecognized is a typo in a security gate and is
+# fatal:
+# silently skipping it would drop a tool out of the registry, and an unregistered tool is one the
+# gate can no longer refuse.
+_NON_STATE = {"STATUS", "STATE", "APPROVAL"}
 
 _ROW = re.compile(r"^\|\s*\*{0,2}([^|*]+?)\*{0,2}\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|"
                   r"\s*`?(\w+)`?\s*\|\s*([^|]*?)\s*\|\s*$")
@@ -74,8 +81,13 @@ def load_registry(path: Path = REGISTRY) -> dict[str, Entry]:
         if not m:
             continue
         name, version, licence, state, notes = m.groups()
+        if state.upper() in _NON_STATE:
+            continue                      # the table header
         if state.upper() not in APPROVED_STATES | BLOCKED_STATES:
-            continue                      # header and separator rows
+            raise SystemExit(
+                f"licence registry: unknown state {state!r} for {name.strip()!r}. "
+                f"Valid states: {sorted(APPROVED_STATES | BLOCKED_STATES)}"
+            )
         entry = Entry(name, version, licence, state, notes)
         if entry.name and not entry.name.startswith(("tool", "source", "-")):
             entries[entry.name] = entry

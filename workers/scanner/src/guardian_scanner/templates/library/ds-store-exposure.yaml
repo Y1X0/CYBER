@@ -1,0 +1,25 @@
+id: ds-store-exposure
+info:
+  name: Exposed .DS_Store
+  author: guardian
+  severity: low
+  description: |
+    A macOS directory index is served. It lists filenames that are not linked from anywhere,
+    which is how unlisted backups and admin pages get found.
+  remediation: Remove the file and exclude it from deployments.
+  classification:
+    cwe-id: CWE-548
+  tags: exposure,misconfig
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.DS_Store"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: regex
+        part: body
+        regex:
+          - '^\x00\x00\x00\x01Bud1'

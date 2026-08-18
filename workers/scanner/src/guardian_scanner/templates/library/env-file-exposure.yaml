@@ -1,0 +1,26 @@
+id: env-file-exposure
+info:
+  name: Exposed .env file
+  author: guardian
+  severity: high
+  description: |
+    A dotenv file is readable over HTTP. These hold database passwords, API keys and signing
+    secrets; treat every value in it as compromised from the moment it was reachable.
+  remediation: Remove the file from the document root and rotate every credential it contained.
+  classification:
+    cwe-id: CWE-538
+    cvss-score: 7.5
+  tags: exposure,env,secret
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.env"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: regex
+        part: body
+        regex:
+          - '(?m)^[A-Z][A-Z0-9_]{2,}='

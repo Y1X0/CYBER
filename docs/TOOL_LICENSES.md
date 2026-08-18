@@ -42,9 +42,9 @@ cannot simply be bundled.
 | masscan | 1.3.x | AGPL-3.0 | `PROHIBITED` | AGPL §13 covers network interaction, which is what a SaaS product is. Use ZMap instead. |
 | ZMap | 4.x | Apache-2.0 | `APPROVED` | Permissive substitute for masscan. |
 | **Web / API** | | | | |
-| nuclei | 3.x | MIT | `APPROVED` | Templates are MIT as well. The single largest coverage gain available. |
-| nuclei-templates | — | MIT | `APPROVED` | Ships separately; pin by commit. |
-| interactsh | 1.2.x | MIT | `APPROVED` | Out-of-band detection. Self-host the server: the public instance would receive customer callback data. |
+| nuclei | 3.x | MIT | `APPROVED` | **Format adopted; binary not shipped.** WP-D1 reads the nuclei template format natively (`guardian_scanner/templates`) rather than shipping the binary. MIT permits either; the format was chosen because Guardian's own validator then decides what a template may do, and because an in-process check stays off the privileged `uid_nft` execution backend. |
+| nuclei-templates | — | MIT | `APPROVED` | **Per-template review.** Adopted one reviewed template at a time into `templates/library`, never fetched at scan time. MIT requires the notice to travel with any template text we copy. |
+| interactsh | 1.2.x | MIT | `NOT_ADOPTED` | Out-of-band detection. Licence is fine; the capability is not adopted — the template validator refuses any template referencing it, because an OOB callback sends customer data to a third host. Revisit only with a self-hosted server and an explicit customer agreement. |
 | OWASP ZAP | 2.15.x | Apache-2.0 | `APPROVED` | Full DAST. |
 | ffuf | 2.1.x | MIT | `APPROVED` | Content discovery. |
 | dalfox | 2.9.x | MIT | `APPROVED` | XSS. |

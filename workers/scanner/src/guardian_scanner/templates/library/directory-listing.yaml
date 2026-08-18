@@ -1,0 +1,23 @@
+id: directory-listing
+info:
+  name: Directory listing enabled
+  author: guardian
+  severity: low
+  description: The server renders an index of files instead of refusing the request.
+  remediation: Disable autoindex/Options Indexes.
+  classification:
+    cwe-id: CWE-548
+  tags: exposure,misconfig
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - "Index of /"

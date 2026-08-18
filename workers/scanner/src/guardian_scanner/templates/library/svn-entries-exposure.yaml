@@ -1,0 +1,23 @@
+id: svn-entries-exposure
+info:
+  name: Exposed .svn/entries
+  author: guardian
+  severity: medium
+  description: A Subversion working copy is deployed, exposing source paths and often full sources.
+  remediation: Block /.svn/ and stop deploying working-copy metadata.
+  classification:
+    cwe-id: CWE-527
+  tags: exposure,svn
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.svn/entries"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: regex
+        part: body
+        regex:
+          - '(?m)^(10|11|12)$'

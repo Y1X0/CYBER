@@ -10,9 +10,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from guardian_common.logging import get_logger
 from guardian_core.tool import RawEvidence, ToolJob
 
 from guardian_scanner import egress, sandbox
+
+log = get_logger("guardian.tools.inproc")
 
 _CPU_SECONDS = 30
 _WALL_SECONDS = 60
@@ -30,5 +33,15 @@ class InprocSandboxBackend:
                 with egress.allowlist(hosts):
                     return sandbox.run_in_sandbox(fn, policy)
             return sandbox.run_in_sandbox(fn, policy)
-        except sandbox.SandboxViolation:
-            return []  # contained — no result, never a crash
+        except sandbox.SandboxViolation as exc:
+            # Containment must not be silent. An empty evidence list is indistinguishable from a
+            # clean target to everything downstream, so a tool that was killed by a resource limit
+            # or crashed would otherwise be reported to the customer as "nothing found".
+            log.error(
+                "tool_contained",
+                tool=job.tool_key,
+                job_id=job.job_id,
+                targets=len(job.scope.targets),
+                reason=str(exc)[:500],
+            )
+            return []

@@ -1,0 +1,38 @@
+id: git-config-exposure
+info:
+  name: Exposed .git/config
+  author: guardian
+  severity: high
+  description: |
+    The repository's git configuration is served over HTTP. Where /.git/config is readable the rest
+    of the object store usually is too, which discloses the full source history — including
+    credentials committed and later removed.
+  remediation: Block /.git/ at the web server or reverse proxy, and stop deploying the .git directory.
+  reference:
+    - https://cwe.mitre.org/data/definitions/527.html
+  classification:
+    cwe-id: CWE-527
+    cvss-score: 7.5
+  tags: exposure,git,config
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.git/config"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - "[core]"
+          - "repositoryformatversion"
+        condition: and
+    extractors:
+      - type: regex
+        name: remote
+        part: body
+        regex:
+          - 'url\s*=\s*(\S+)'
+        group: 1

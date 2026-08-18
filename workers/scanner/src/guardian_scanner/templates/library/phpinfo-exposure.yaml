@@ -1,0 +1,27 @@
+id: phpinfo-exposure
+info:
+  name: Exposed phpinfo()
+  author: guardian
+  severity: medium
+  description: |
+    A phpinfo() page is reachable. It discloses the full PHP configuration, loaded extensions,
+    absolute paths and often environment variables including credentials.
+  remediation: Delete the file; it is a debugging artefact that should never be deployed.
+  classification:
+    cwe-id: CWE-200
+  tags: exposure,php,debug
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/phpinfo.php"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - "phpinfo()"
+          - "PHP Version"
+        condition: and
