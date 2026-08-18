@@ -1,8 +1,20 @@
-"""Render a professional HTML security report from a report + its findings."""
+"""Render a professional HTML security report from a report + its findings.
+
+The report is the artifact that leaves the platform: emailed to an auditor, attached to a board
+pack, forwarded to a prospect. Two consequences shape this module.
+
+Evidence is scrubbed on the way in (WP-F2's redactor). The engines redact at write time, but a
+report is the worst place for the one value they missed, and it is the copy nobody can recall.
+
+The compliance table prints `not assessed` as its own column rather than folding it into a pass
+rate, because a 100% pass over 20% coverage is the number that misleads an auditor.
+"""
 
 from __future__ import annotations
 
 import html
+
+from guardian_core.redaction import scrub_text
 
 _SEV_COLOR = {
     "critical": "#b00020",
@@ -17,6 +29,47 @@ def _esc(v) -> str:  # noqa: ANN001
     return html.escape(str(v if v is not None else ""))
 
 
+_STATUS_STYLE = {
+    "failing": "background:#b00020;color:#fff",
+    "passing": "background:#2e7d32;color:#fff",
+    "not_assessed": "background:#666;color:#fff",
+}
+
+
+def _compliance_table(coverage) -> str:  # noqa: ANN001
+    """The control table, with `not assessed` given equal billing.
+
+    Collapsing it into "passing" would be the single most misleading thing this product could
+    print: it would tell an auditor a control was verified when nothing looked at it.
+    """
+    if not isinstance(coverage, dict) or not coverage.get("frameworks"):
+        return ""
+    blocks = []
+    for framework in coverage["frameworks"]:
+        counts = framework.get("counts", {})
+        rows = "".join(
+            f"<tr><td><code>{_esc(control['id'])}</code></td>"
+            f"<td>{_esc(control['title'])}</td>"
+            f"<td><span style=\"{_STATUS_STYLE.get(control['status'], '')};"
+            f"padding:2px 6px;border-radius:3px\">"
+            f"{_esc(control['status'].replace('_', ' '))}</span></td>"
+            f"<td>{_esc(control['rationale'])}</td></tr>"
+            for control in framework.get("controls", [])
+        )
+        blocks.append(
+            f"<h3>{_esc(framework['framework'])}</h3>"
+            f"<p>{counts.get('failing', 0)} failing · {counts.get('passing', 0)} passing · "
+            f"{counts.get('not_assessed', 0)} not assessed — "
+            f"<strong>{framework.get('coverage', 0)}% of controls were assessed</strong> by "
+            f"{_esc(', '.join(framework.get('engines_assessed', [])) or 'no engine')}</p>"
+            f"<table><thead><tr><th>Control</th><th>Title</th><th>Status</th>"
+            f"<th>Basis</th></tr></thead><tbody>{rows}</tbody></table>"
+        )
+    return ("<h2>Control Coverage</h2>"
+            f"<p style=\"color:#777\">{_esc(coverage.get('disclaimer', ''))}</p>"
+            + "".join(blocks))
+
+
 def render_html(report, findings: list) -> str:  # noqa: ANN001
     summary = report.summary or {}
     counts = summary.get("severity_counts", {})
@@ -26,12 +79,14 @@ def render_html(report, findings: list) -> str:  # noqa: ANN001
     rows = []
     for f in sorted(findings, key=lambda x: -x.risk_score):
         color = _SEV_COLOR.get(f.severity, "#777")
-        evidence = _esc((f.evidence or {}).get("match") or (f.evidence or {}).get("summary") or "")
+        raw_evidence = ((f.evidence or {}).get("match")
+                        or (f.evidence or {}).get("summary") or "")
+        evidence = _esc(scrub_text(str(raw_evidence))[0])
         remediation = ""
         if isinstance(f.remediation, dict):
-            remediation = _esc(
-                f.remediation.get("remediation") or f.remediation.get("summary") or ""
-            )
+            remediation = _esc(scrub_text(
+                str(f.remediation.get("remediation") or f.remediation.get("summary") or "")
+            )[0])
         sev_cell = f"<span style='color:{color};font-weight:600'>{_esc(f.severity.upper())}</span>"
         rows.append(
             f"<tr>"
@@ -67,6 +122,7 @@ def render_html(report, findings: list) -> str:  # noqa: ANN001
 <p class="score">{_esc(score)}/100 <small>({_esc(posture)})</small></p>
 <p>{badges}</p>
 <p>{_esc(summary.get("recommendation", ""))}</p>
+{_compliance_table(summary.get("compliance"))}
 <h2>Findings</h2>
 <table>
 <thead><tr><th>Severity</th><th>Risk</th><th>Title</th><th>Standards</th>

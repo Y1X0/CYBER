@@ -87,6 +87,29 @@ export interface FindingSummary {
   unverified: number;
 }
 
+// ── WP-F4 compliance ─────────────────────────────────────────────────────────────────────────────
+export interface ComplianceControl {
+  id: string;
+  title: string;
+  description: string;
+  /** failing | passing | not_assessed — three, not two. See the note on Compliance.tsx. */
+  status: string;
+  rationale: string;
+  findings: { id: string; title: string; severity: string }[];
+}
+export interface ComplianceFramework {
+  framework: string;
+  counts: Record<string, number>;
+  coverage: number;
+  engines_assessed: string[];
+  controls: ComplianceControl[];
+}
+export interface Compliance {
+  frameworks: ComplianceFramework[];
+  overall_coverage: number;
+  disclaimer: string;
+}
+
 export const api = {
   async login(email: string, password: string): Promise<void> {
     const r = await req<{ access_token: string }>("/auth/login", {
@@ -102,6 +125,8 @@ export const api = {
     req<AttackChains>(`/graph/attack-chains?max_length=${maxLength}`),
   findingSummary: (scanId?: string) =>
     req<FindingSummary>(`/findings/summary${scanId ? `?scan_id=${scanId}` : ""}`),
+  compliance: (framework?: string) =>
+    req<Compliance>(`/compliance${framework ? `?framework=${framework}` : ""}`),
   chat: (question: string, scanId?: string) =>
     req<{ answer: string; cited_finding_ids: string[] }>("/chat", {
       method: "POST",

@@ -8,6 +8,7 @@ from guardian_api.routes import (
     assets,
     auth,
     chat,
+    compliance,
     customers,
     dashboard,
     discovery,
@@ -36,6 +37,7 @@ v1.include_router(discovery.router, prefix="/discovery", tags=["discovery"])
 v1.include_router(graph.router, prefix="/graph", tags=["graph"])
 v1.include_router(findings.router, prefix="/findings", tags=["findings"])
 v1.include_router(reports.router, prefix="/reports", tags=["reports"])
+v1.include_router(compliance.router, prefix="/compliance", tags=["compliance"])
 v1.include_router(knowledge_base.router, prefix="/knowledge-base", tags=["knowledge-base"])
 v1.include_router(chat.router, prefix="/chat", tags=["chat"])
 v1.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])

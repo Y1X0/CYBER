@@ -68,3 +68,21 @@ code { background: #12141c; padding: 2px 5px; border-radius: 4px; }
 .attack-graph .grants { color: #9aa0a6; font-size: 13px; }
 .attack-graph .finding-ref { font-family: monospace; font-size: 12px; }
 .attack-graph .err { color: #ff6b6b; }
+
+/* ── compliance (WP-F4) ───────────────────────────────────────────────────────────────────────── */
+.compliance .disclaimer { color: #9aa0a6; font-size: 13px; max-width: 70ch; }
+.compliance .coverage { font-weight: 400; color: #9aa0a6; font-size: 13px; }
+.compliance .counts { display: flex; gap: 10px; }
+.compliance .count { padding: 2px 8px; border-radius: 10px; font-size: 13px; background: #2b2f36; }
+.compliance .count.failing { background: #b00020; color: #fff; }
+.compliance .count.passing { background: #2e7d32; color: #fff; }
+/* Same visual weight as the other two: the distinction is the whole point of the panel. */
+.compliance .count.not-assessed { background: #666; color: #fff; }
+.compliance .engines { color: #9aa0a6; font-size: 13px; }
+.compliance .status { padding: 2px 6px; border-radius: 3px; font-size: 12px; }
+.compliance .status.failing { background: #b00020; color: #fff; }
+.compliance .status.passing { background: #2e7d32; color: #fff; }
+.compliance .status.not_assessed { background: #666; color: #fff; }
+.compliance .control-findings { margin: 4px 0 0; padding-left: 16px; font-size: 12px; }
+.compliance .sev.critical, .compliance .sev.high { color: #ff6b6b; }
+.compliance .err { color: #ff6b6b; }
