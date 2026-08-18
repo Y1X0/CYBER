@@ -1,0 +1,281 @@
+# The production golden run, with a temporary worker to execute it (WP-A1 acceptance).
+#
+# WHAT THIS IS. A finite, operator-triggered verification of the *deployed* Guardian. It borrows a
+# GitHub-hosted runner for the length of one run so that something consumes the queue, then throws
+# it away. That is the only reason a worker appears here.
+#
+# WHAT THIS IS NOT. It is not a deployment, and the worker it starts is not production
+# infrastructure. GitHub Actions is for building, testing, deploying and publishing the project it
+# belongs to; keeping a queue drained for real customers is a service, and a service does not belong
+# in CI. So:
+#
+#   * `workflow_dispatch` only — never `schedule`, never `push`. If you find yourself adding a cron
+#     to this file to keep customers' scans running, stop: that is the thing this file must not
+#     become, and the fix is a host, not a schedule.
+#   * a hard `timeout-minutes`, so the worker cannot outlive the verification even if a step hangs.
+#   * the worker is stopped in an `always()` step, so the job never ends with one running.
+#
+# The acceptance criterion is `tools/production_golden_run.py`'s own: every stage PASS, zero FAIL,
+# and UNVERIFIED only where this environment genuinely has no external access. That script drives
+# the public API and touches no database, so a green run here is a statement about the deployment,
+# not about this runner.
+#
+# Reused rather than duplicated: the worker command and its liveness probe are the ones
+# `docker-compose.prod.yml` uses for `worker-default`, the secret names are the ones the other
+# Guardian workflows already read, and the journey is the committed golden-run tool.
+name: Guardian Production Golden Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_url:
+        description: "Base URL of the DEPLOYED API. A local address is refused."
+        type: string
+        required: true
+        default: https://guardian-api-pjp3.onrender.com
+      repo_url:
+        description: "Clone URL of a vulnerable repository you own. Leave empty to supply the sample inline instead."
+        type: string
+        required: false
+        default: ""
+      webhook_url:
+        description: "Optional reachable receiver, to close B-6 (the webhook 2xx round trip)."
+        type: string
+        required: false
+        default: ""
+      guardian_env:
+        description: "GUARDIAN_ENV for the temporary worker. `production` makes it enforce the same TLS and secret invariants as the deployment."
+        type: choice
+        required: true
+        default: production
+        options: [production, local]
+      timeout_seconds:
+        description: "How long the golden run waits for the deployed worker on each scan."
+        type: string
+        required: true
+        default: "900"
+
+permissions:
+  contents: read
+
+# Two of these at once would mean two workers consuming one queue. Never cancel a run in flight —
+# a cancelled job leaves a scan half-executed rather than stopping cleanly.
+concurrency:
+  group: guardian-golden-run
+  cancel-in-progress: false
+
+jobs:
+  golden-run:
+    runs-on: ubuntu-latest
+    environment: production
+    # The verification is minutes of work. This ceiling exists so a hung step cannot leave a worker
+    # attached to a production broker for hours.
+    timeout-minutes: 45
+
+    steps:
+      - name: State what this run is
+        run: |
+          {
+            echo "## Ephemeral verification, not a deployment"
+            echo
+            echo "This job borrows a GitHub-hosted runner as a **temporary** Celery worker so that"
+            echo "one golden run has something to execute it. The worker lives only for this job and"
+            echo "is stopped before it ends. It is **not** production infrastructure, it is not"
+            echo "durable, and nothing here should be relied on to run a customer's scans."
+            echo
+            echo "The A1 blocker — no long-lived host consuming the queue — is **not** closed by this"
+            echo "workflow. It is closed by a host."
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Deployed API under test | \`${{ inputs.api_url }}\` |"
+            echo "| Worker | ephemeral, this runner, stopped at the end of the job |"
+            echo "| Worker \`GUARDIAN_ENV\` | \`${{ inputs.guardian_env }}\` |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Refuse a local API URL
+        env:
+          API_URL: ${{ inputs.api_url }}
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          from urllib.parse import urlsplit
+
+          url = os.environ["API_URL"].strip()
+          parts = urlsplit(url)
+          if parts.scheme not in ("http", "https"):
+              sys.exit(f"api_url must be http(s), got {parts.scheme or 'no scheme'}: {url!r}")
+          host = (parts.hostname or "").lower()
+          # A green run against a locally started API would prove nothing about the deployment, and
+          # it is the one way this workflow could quietly lie about production readiness.
+          if host in ("localhost", "127.0.0.1", "0.0.0.0", "::1") or host.endswith(".localhost"):
+              sys.exit(f"{url!r} is local. This workflow verifies a DEPLOYED API; a local run is "
+                       "not production verification.")
+          print(f"target host: {host}")
+          PY
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Guardian
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Check the worker has what it needs
+        env:
+          GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+        run: |
+          missing=""
+          [ -n "$GUARDIAN_DATABASE_URL" ] || missing="$missing GUARDIAN_DATABASE_URL"
+          [ -n "$GUARDIAN_REDIS_URL" ] || missing="$missing GUARDIAN_REDIS_URL"
+          if [ -n "$missing" ]; then
+            echo "::error::missing repository secret(s):$missing — the worker cannot reach the" \
+                 "deployment's database and broker without them"
+            exit 1
+          fi
+          echo "database and broker URLs are present"
+
+      # The command is `docker-compose.prod.yml`'s `worker-default`, narrowed to one process as the
+      # runbook specifies. Nothing about the worker is special here except that it is temporary.
+      - name: Start the temporary worker
+        env:
+          GUARDIAN_ENV: ${{ inputs.guardian_env }}
+          GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
+          GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_JWT_SECRET: ${{ secrets.GUARDIAN_JWT_SECRET }}
+          GUARDIAN_ENCRYPTION_KEY: ${{ secrets.GUARDIAN_ENCRYPTION_KEY }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+          GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
+          # Mirrors the compose default for this service, so what runs here is what runs in
+          # production rather than a laxer variant of it.
+          GUARDIAN_SANDBOX_ENGINES: "true"
+          GUARDIAN_RECON_PLANE: "false"
+        run: |
+          set -euo pipefail
+          nohup celery -A guardian_scanner.celery_app.celery_app worker \
+            --queues default --concurrency 1 --loglevel INFO \
+            > worker.log 2>&1 &
+          echo $! > worker.pid
+          echo "worker pid $(cat worker.pid)"
+
+      # Liveness is the compose healthcheck for `worker-default`: a Celery ping answered over the
+      # broker. A live process is not the same as a worker that reached Redis and is consuming, and
+      # only the second one makes the golden run meaningful.
+      - name: Verify the worker is alive and consuming
+        env:
+          GUARDIAN_ENV: ${{ inputs.guardian_env }}
+          GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
+          GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_JWT_SECRET: ${{ secrets.GUARDIAN_JWT_SECRET }}
+          GUARDIAN_ENCRYPTION_KEY: ${{ secrets.GUARDIAN_ENCRYPTION_KEY }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+          GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
+        run: |
+          set -uo pipefail
+          for attempt in $(seq 1 20); do
+            if ! kill -0 "$(cat worker.pid)" 2>/dev/null; then
+              echo "::error::the worker process exited before it answered a ping"
+              echo "----- worker.log -----"; cat worker.log
+              exit 1
+            fi
+            if celery -A guardian_scanner.celery_app.celery_app inspect ping \
+                 -d "celery@$(hostname)" --timeout 5 2>/dev/null | grep -q pong; then
+              echo "worker answered pong on attempt $attempt — it is consuming from the broker"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "::error::the worker never answered a Celery ping — it did not reach the broker"
+          echo "----- worker.log -----"; cat worker.log
+          exit 1
+
+      - name: Run the golden run against the deployed API
+        env:
+          API_URL: ${{ inputs.api_url }}
+          REPO_URL: ${{ inputs.repo_url }}
+          WEBHOOK_URL: ${{ inputs.webhook_url }}
+          RUN_TIMEOUT: ${{ inputs.timeout_seconds }}
+        run: |
+          set -o pipefail
+          args=(--api "$API_URL" --timeout "$RUN_TIMEOUT")
+          if [ -n "$REPO_URL" ]; then
+            args+=(--repo "$REPO_URL")
+          else
+            # The sample the tool already carries, supplied through the API instead of cloned, so a
+            # run needs no published repository. Fewer engines have anything to read, and the ones
+            # that do not say so rather than reporting clean.
+            args+=(--repo inline-verification --inline)
+          fi
+          [ -n "$WEBHOOK_URL" ] && args+=(--webhook "$WEBHOOK_URL")
+          python tools/production_golden_run.py "${args[@]}" | tee golden-run.txt
+
+      - name: Summarise the result
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, os
+
+          print("\n## Golden run")
+          try:
+              stages = json.load(open("production_golden_run.json"))
+          except (OSError, ValueError):
+              print("\nThe run produced no evidence file — it stopped before reporting. "
+                    "See the step log and `worker.log`.")
+              raise SystemExit(0)
+
+          counts = {}
+          for stage in stages:
+              counts[stage["status"]] = counts.get(stage["status"], 0) + 1
+          print(f"\n**{counts.get('PASS', 0)} PASS · {counts.get('FAIL', 0)} FAIL · "
+                f"{counts.get('UNVERIFIED', 0)} UNVERIFIED**\n")
+          print("| | Stage | Result |")
+          print("|---|---|---|")
+          for stage in stages:
+              print(f"| {stage['n']} | {stage['name']} | {stage['status']} |")
+          failed = [s for s in stages if s["status"] == "FAIL"]
+          if failed:
+              print("\n### Failed\n")
+              for stage in failed:
+                  print(f"- **{stage['n']}. {stage['name']}** — {stage['detail']}")
+          PY
+
+      - name: Worker log
+        if: always()
+        run: |
+          echo "----- worker.log -----"
+          tail -n 200 worker.log || echo "(no worker log)"
+
+      # The worker must not outlive the verification. `always()` so this runs even when the golden
+      # run failed, which is exactly when a forgotten worker would be attached to a live broker.
+      - name: Stop the temporary worker
+        if: always()
+        run: |
+          if [ -f worker.pid ] && kill -0 "$(cat worker.pid)" 2>/dev/null; then
+            kill "$(cat worker.pid)" || true
+            for _ in $(seq 1 10); do
+              kill -0 "$(cat worker.pid)" 2>/dev/null || break
+              sleep 1
+            done
+            kill -9 "$(cat worker.pid)" 2>/dev/null || true
+            echo "temporary worker stopped"
+          else
+            echo "no worker process to stop"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: golden-run-evidence
+          path: |
+            production_golden_run.json
+            golden-run.txt
+            worker.log
+          if-no-files-found: warn
+          retention-days: 30
