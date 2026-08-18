@@ -12,16 +12,27 @@ Baseline: commit `8e4338b` · 26,465 lines · 552 tests · 34% code-complete · 
 
 **Current: 2051 Python tests + 15 web tests passing** (+1514), 36 work packages delivered.
 
-Run two ways, because the difference between them was hiding two production defects:
-`GUARDIAN_APP_DATABASE_URL` pointed at the owner role by default, under which **2002 pass, 0 skip**
-only when it is pointed at the real RLS-enforced `guardian_app` role — the configuration production
-runs. With the owner default, 15 RLS assertions skip and the API-key tests pass for the wrong
-reason. See WP-G1b.
+Run two ways, because the difference between them was hiding a production defect:
+`GUARDIAN_APP_DATABASE_URL` pointed at the owner role by default, and the full suite passes with
+**0 skipped** only when it is pointed at the real RLS-enforced `guardian_app` role — the
+configuration production runs. With the owner default, 15 RLS assertions skip and the API-key tests
+pass for the wrong reason. See WP-G1b.
 
-**Correction to earlier entries: CI has not been green.** It had been failing on every commit of
-this branch at the *"Migrate database"* step, with the whole rest of the pipeline — tests, licence
-gate, SBOM, web build — skipped behind it. `alembic upgrade head` could not build a database from
-nothing. Fixed in WP-G1b; the earlier "CI green" claims in the rows below were wrong when written.
+**Correction to earlier entries: CI had not been green, on any commit of this branch.** It failed at
+*"Migrate database"* — `alembic upgrade head` could not build a database from nothing — with the
+entire rest of the pipeline skipped behind it, so the "CI green" claims in the rows below were wrong
+when they were written. Clearing that one unmasked two more, each hidden behind the last:
+
+1. `pytest` (the console script CI runs) does not put the repository root on `sys.path`, while
+   `python -m pytest` does — so `tests/test_tool_licenses.py` collected 1,972 tests and then aborted
+   the whole run on `ModuleNotFoundError: No module named 'tools'`. Fixed with `pythonpath = ["."]`.
+2. jsdom 30 requires Node `^22.22.2 || ^24.15.0 || >=26` and the workflow pinned Node 20, so the web
+   tests crashed in under a second. Fixed by moving CI to Node 22 and declaring `engines`.
+
+**CI is now green end to end** — run
+[32104995687](https://github.com/Y1X0/CYBER/actions/runs/32104995687) on `db7b288`: lint, migrate,
+seed, 2051 Python tests, web typecheck/test/build, the tool licence gate, the self-SBOM and
+pip-audit. The last four steps had never executed on this branch before.
 
 ---
 
