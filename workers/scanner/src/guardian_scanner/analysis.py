@@ -30,12 +30,21 @@ def analyze_scan(scan_id: str) -> dict:
         if scan is None:
             return {"scan_id": scan_id, "status": "not_found"}
         findings = session.query(Finding).filter(Finding.scan_id == scan.id).all()
+        failed: list[str] = []
+        guarded = 0
         for finding in findings:
             try:
                 out = explain_finding(session, finding, provider)
             except Exception as exc:  # noqa: BLE001 - one finding must not fail the batch
+                # Counted and returned, not merely logged: a run where the provider failed on every
+                # finding currently reports `completed` with `analyzed: 0`, which reads as "the
+                # findings needed no explanation" rather than "the analyst never ran".
+                failed.append(f"{finding.id}: {type(exc).__name__}: {exc}"[:200])
                 log.error("analysis_failed", finding_id=str(finding.id), error=str(exc))
                 continue
+            guard = out.get("_guard") or {}
+            if any(guard.values()):
+                guarded += 1
             finding.ai_explanation = out.get("explanation")
             finding.remediation = {
                 "summary": (out.get("remediation") or "")[:280],
@@ -43,6 +52,9 @@ def analyze_scan(scan_id: str) -> dict:
                 "impact": out.get("impact"),
                 "attack_scenario": out.get("attack_scenario"),
                 "references": out.get("references", []),
+                # What the guard did to this explanation, kept with it: a reader who sees an
+                # explanation that was altered on the way in or out should be able to find that out.
+                "guard": guard,
             }
             analyzed += 1
         record_audit(
@@ -52,11 +64,17 @@ def analyze_scan(scan_id: str) -> dict:
             customer_id=scan.customer_id,
             entity_type="scan",
             entity_id=str(scan.id),
-            metadata={"analyzed": analyzed, "provider": provider.name},
+            metadata={"analyzed": analyzed, "provider": provider.name,
+                      "failed": len(failed), "guarded": guarded},
         )
         return {
             "scan_id": scan_id,
-            "status": "completed",
+            # `partial` when some findings could not be explained: the difference between "every
+            # finding has an explanation" and "some do" is one a customer can act on.
+            "status": "completed" if not failed else ("failed" if analyzed == 0 else "partial"),
             "analyzed": analyzed,
+            "failed": len(failed),
+            "errors": failed[:10],
+            "guarded": guarded,
             "provider": provider.name,
         }
