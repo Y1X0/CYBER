@@ -1,150 +1,98 @@
-import { useEffect, useState } from "react";
+// The console shell: identity, navigation, and the routing table.
+
+import { useState } from "react";
 import { AttackGraph } from "./AttackGraph";
 import { CompliancePanel } from "./Compliance";
-import { api, Dashboard, Finding, getToken, Scan, setToken } from "./api";
+import { api, getToken, setToken } from "./api";
+import { navigate, useRoute } from "./router";
+import { AssetsScreen } from "./screens/Assets";
+import { AuthorizationScreen } from "./screens/Authorization";
+import { DashboardScreen } from "./screens/Dashboard";
+import { DiscoveryScreen } from "./screens/Discovery";
+import { FindingDetailScreen, FindingsScreen } from "./screens/Findings";
+import { NotificationsScreen } from "./screens/Notifications";
+import { AuthScreen } from "./screens/Onboarding";
+import { OwnershipScreen } from "./screens/Ownership";
+import { RemediationScreen } from "./screens/Remediation";
+import { ReportsScreen } from "./screens/Reports";
+import { ScanDetailScreen, ScansScreen } from "./screens/Scans";
+import { Async, useAsync } from "./ui";
 
-const SEV_COLOR: Record<string, string> = {
-  critical: "#b00020",
-  high: "#d9534f",
-  medium: "#f0ad4e",
-  low: "#5bc0de",
-  info: "#777",
-};
+const NAV = [
+  { screen: "dashboard", label: "Dashboard" },
+  { screen: "assets", label: "Assets" },
+  { screen: "ownership", label: "Domains" },
+  { screen: "authorization", label: "Authorization" },
+  { screen: "discovery", label: "Discovery" },
+  { screen: "scans", label: "Scans" },
+  { screen: "findings", label: "Findings" },
+  { screen: "remediation", label: "Remediation" },
+  { screen: "reports", label: "Reports" },
+  { screen: "compliance", label: "Compliance" },
+  { screen: "attack-paths", label: "Attack paths" },
+  { screen: "notifications", label: "Notifications" },
+];
 
 export function App() {
   const [authed, setAuthed] = useState<boolean>(!!getToken());
-  return authed ? <Console onLogout={() => { setToken(null); setAuthed(false); }} />
-                : <Login onLogin={() => setAuthed(true)} />;
+  if (!authed) return <AuthScreen onAuthed={() => setAuthed(true)} />;
+  return <Console onSignOut={() => { setToken(null); setAuthed(false); }} />;
 }
 
-function Login({ onLogin }: { onLogin: () => void }) {
-  const [email, setEmail] = useState("admin@example.com");
-  const [password, setPassword] = useState("ChangeMe123!");
-  const [err, setErr] = useState("");
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    try {
-      await api.login(email, password);
-      onLogin();
-    } catch {
-      setErr("Invalid credentials");
-    }
-  }
-  return (
-    <div className="center">
-      <form className="card" onSubmit={submit}>
-        <h1>🛡️ Security Guardian</h1>
-        <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
-        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)}
-               placeholder="Password" />
-        {err && <p className="err">{err}</p>}
-        <button type="submit">Sign in</button>
-      </form>
-    </div>
-  );
-}
+function Console({ onSignOut }: { onSignOut: () => void }) {
+  const route = useRoute();
+  const me = useAsync(() => api.me(), []);
 
-function Console({ onLogout }: { onLogout: () => void }) {
-  const [dash, setDash] = useState<Dashboard | null>(null);
-  const [scan, setScan] = useState<Scan | null>(null);
-  const [findings, setFindings] = useState<Finding[]>([]);
-
-  useEffect(() => { api.dashboard().then(setDash).catch(() => onLogout()); }, []);
-  useEffect(() => { if (scan) api.findings(scan.id).then(setFindings); }, [scan]);
-
-  if (!dash) return <div className="center">Loading…</div>;
   return (
     <div className="app">
       <header>
-        <h2>🛡️ Security Guardian</h2>
-        <button onClick={onLogout}>Sign out</button>
+        <h2 onClick={() => navigate("dashboard")} className="brand">🛡️ Security Guardian</h2>
+        <div className="header-right">
+          {me.data && <span className="muted">{me.data.email}</span>}
+          <button onClick={onSignOut}>Sign out</button>
+        </div>
       </header>
+
+      <nav className="tabs">
+        {NAV.map((item) => (
+          <button
+            key={item.screen}
+            className={route.screen === item.screen ? "tab on" : "tab"}
+            onClick={() => navigate(item.screen)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </nav>
+
       <main>
-        <section className="score-card">
-          <div className="score">{dash.security_score}<small>/100</small></div>
-          <div className="badges">
-            {Object.entries(dash.severity_counts).map(([s, n]) => (
-              <span key={s} style={{ background: SEV_COLOR[s] }}>{s}: {n}</span>
-            ))}
-          </div>
-          <p>{dash.total_findings} findings across recent scans</p>
-        </section>
-
-        <section>
-          <h3>Recent scans</h3>
-          <table>
-            <thead><tr><th>Scan</th><th>Status</th><th>Findings</th><th></th></tr></thead>
-            <tbody>
-              {dash.recent_scans.map((s) => (
-                <tr key={s.id}>
-                  <td><code>{s.id.slice(0, 8)}</code></td>
-                  <td>{s.status}</td>
-                  <td>{s.stats?.total ?? 0}</td>
-                  <td><button onClick={() => setScan(s)}>View</button></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-
-        {scan && (
-          <section>
-            <h3>Findings — scan {scan.id.slice(0, 8)}</h3>
-            <table>
-              <thead><tr><th>Severity</th><th>Risk</th><th>Title</th><th>Standards</th></tr></thead>
-              <tbody>
-                {findings.map((f) => (
-                  <tr key={f.id}>
-                    <td><span style={{ color: SEV_COLOR[f.severity] }}>{f.severity.toUpperCase()}</span></td>
-                    <td>{f.risk_score}</td>
-                    <td>{f.title}</td>
-                    <td>{f.cwe_id} {f.owasp_ref}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <p className="hint">
-              Export a professional PDF report at
-              <code> GET /api/v1/reports/{"{id}"}/export?format=pdf</code>.
-            </p>
-          </section>
-        )}
-
-        {/* The attack graph sits above the chat: what an attacker would do with these findings is
-            a more useful next question than any the analyst can be asked. */}
-        <AttackGraph />
-
-        <CompliancePanel />
-
-        <ChatBox scanId={scan?.id} />
+        {/* An expired session must not render as a set of empty screens. */}
+        <Async loader={me}>{() => <Screen screen={route.screen} id={route.id} />}</Async>
       </main>
     </div>
   );
 }
 
-function ChatBox({ scanId }: { scanId?: string }) {
-  const [q, setQ] = useState("");
-  const [a, setA] = useState("");
-  const [busy, setBusy] = useState(false);
-  async function ask() {
-    setBusy(true);
-    try {
-      const r = await api.chat(q, scanId);
-      setA(r.answer);
-    } finally {
-      setBusy(false);
-    }
+function Screen({ screen, id }: { screen: string; id: string | null }) {
+  switch (screen) {
+    case "dashboard": return <DashboardScreen />;
+    case "assets": return <AssetsScreen />;
+    case "ownership": return <OwnershipScreen />;
+    case "authorization": return <AuthorizationScreen />;
+    case "discovery": return <DiscoveryScreen />;
+    case "scans": return id ? <ScanDetailScreen id={id} /> : <ScansScreen />;
+    case "findings": return id ? <FindingDetailScreen id={id} /> : <FindingsScreen />;
+    case "remediation": return <RemediationScreen />;
+    case "reports": return <ReportsScreen />;
+    case "compliance": return <CompliancePanel />;
+    case "attack-paths": return <AttackGraph />;
+    case "notifications": return <NotificationsScreen />;
+    default:
+      return (
+        <div className="state state-empty">
+          <h4>Nothing here</h4>
+          <p>That screen does not exist. Pick one from the navigation above.</p>
+        </div>
+      );
   }
-  return (
-    <section className="chat">
-      <h3>Ask the AI analyst</h3>
-      <p className="hint">Answers are grounded strictly on your own findings.</p>
-      <div className="chat-row">
-        <input value={q} onChange={(e) => setQ(e.target.value)}
-               placeholder="e.g. What is my biggest risk?" />
-        <button onClick={ask} disabled={busy || !q}>{busy ? "…" : "Ask"}</button>
-      </div>
-      {a && <pre className="answer">{a}</pre>}
-    </section>
-  );
 }

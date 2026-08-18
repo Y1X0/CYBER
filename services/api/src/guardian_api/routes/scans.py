@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 from functools import lru_cache
 
@@ -11,7 +12,7 @@ from guardian_core import quota
 from guardian_core.enums import ScanStatus
 from guardian_core.policy import evaluate_gate
 from guardian_db.audit import record_audit
-from guardian_db.models import Asset, Finding, Policy, Scan
+from guardian_db.models import Asset, Finding, Policy, Scan, ScanEngineRun
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -139,6 +140,56 @@ def list_scans(
             for r in paginate(response, rows, size)]
 
 
+@router.get("/queue-health", response_model=dict)
+def queue_health(
+    identity: Identity = Depends(get_current_identity),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Why is my scan still waiting? (WP-P0)
+
+    A queued scan and a dead scanner look identical to a customer staring at a spinner, and the
+    honest answer is one the product should give without being asked. This is the same
+    `scanner_liveness` judgement the operator SLO uses, narrowed to what a customer needs: is the
+    platform executing work at all, and how much of theirs is waiting.
+
+    Tenant-scoped counts, platform-wide liveness — the queue is shared, so "nothing is running
+    anywhere" is the fact that explains their wait.
+    """
+    from guardian_api.observability import _scanner_liveness
+
+    now = dt.datetime.now(dt.UTC)
+    mine = _scoped_query(db, identity)
+    queued = mine.filter(Scan.status == "queued").count()
+    running = mine.filter(Scan.status == "running").count()
+    verdict = _scanner_liveness(db, now)
+
+    oldest = mine.filter(Scan.status.in_(("queued", "running"))).order_by(
+        Scan.created_at.asc()).first()
+    waiting_seconds = int((now - oldest.created_at.replace(tzinfo=dt.UTC)).total_seconds()) \
+        if oldest and oldest.created_at else 0
+
+    if verdict.status == "degraded":
+        state, detail = "stalled", (
+            "Guardian has accepted your scan but nothing is executing it. This is an "
+            "infrastructure problem on our side, not a problem with your target — your scan is "
+            "queued and will run when the scanner is available. It has not been lost, and no "
+            "result has been produced."
+        )
+    elif queued or running:
+        state, detail = "working", (
+            f"{running} scan(s) running and {queued} waiting. Scans are processed in order."
+        )
+    else:
+        state, detail = "idle", "Nothing is queued or running for you right now."
+
+    return {
+        "state": state, "detail": detail,
+        "queued": queued, "running": running,
+        "oldest_waiting_seconds": waiting_seconds,
+        "scanner": {"status": verdict.status, "detail": verdict.detail},
+    }
+
+
 @router.get("/{scan_id}", response_model=ScanOut)
 def get_scan(
     scan_id: uuid.UUID,
@@ -149,6 +200,66 @@ def get_scan(
     if scan is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
     return ScanOut.model_validate(scan, from_attributes=True)
+
+
+# What each engine-run status means to a customer. The wording is the product's promise: a run that
+# did not complete is never described as a clean result (WP-P0).
+ENGINE_STATE_MEANING = {
+    "completed": ("checked", "This engine ran and reported everything it found."),
+    "running": ("running", "This engine is still working."),
+    "queued": ("queued", "This engine has not started yet."),
+    "failed": ("not_checked", "This engine failed, so it found nothing and proved nothing. "
+                              "Anything it would have detected is unknown, not absent."),
+    "skipped": ("not_checked", "This engine did not run. Its part of the scan is unassessed."),
+    "deferred": ("not_checked", "This engine was held back by your scanning window or pause "
+                                "setting. It will run when the window reopens."),
+}
+
+
+@router.get("/{scan_id}/engines", response_model=list[dict])
+def scan_engines(
+    scan_id: uuid.UUID,
+    identity: Identity = Depends(get_current_identity),
+    db: Session = Depends(get_db),
+) -> list[dict]:
+    """Per-engine outcome for one scan (WP-P0).
+
+    The scan's own status says whether the run finished; it does not say which engines answered.
+    Without this a customer sees "completed, 0 findings" and reasonably concludes they are clean,
+    when three engines may have failed. Every engine run is returned with its status, the reason it
+    did not finish, and whether its tooling was degraded.
+    """
+    scan = _scoped_query(db, identity).filter(Scan.id == scan_id).first()
+    if scan is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
+
+    runs = db.execute(
+        select(ScanEngineRun).where(ScanEngineRun.scan_id == scan.id)
+        .order_by(ScanEngineRun.engine)
+    ).scalars()
+
+    out = []
+    for run in runs:
+        tools = run.tool_versions if isinstance(run.tool_versions, dict) else {}
+        degraded = bool(tools.get("degraded"))
+        state, meaning = ENGINE_STATE_MEANING.get(
+            run.status, ("not_checked", f"This engine is in state {run.status!r}."))
+        if state == "checked" and degraded:
+            missing = ", ".join(tools.get("missing") or []) or "a tool"
+            state = "inconclusive"
+            meaning = (f"This engine ran without {missing}, so it was looking with reduced "
+                       f"coverage. Treat an empty result from it as unknown, not clean.")
+        out.append({
+            "engine": run.engine,
+            "status": run.status,
+            "customer_state": state,
+            "meaning": meaning,
+            "error": run.error,
+            "degraded": degraded,
+            "missing": list(tools.get("missing") or []),
+            "started_at": run.created_at.isoformat() if run.created_at else None,
+        })
+    return out
 
 
 @router.post("/{scan_id}/analyze", status_code=202)

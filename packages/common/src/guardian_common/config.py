@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     # Per-tenant ceilings (WP-G2). Platform defaults; a tenant may lower or raise them within the
     # hard ceiling via `tenants.settings["quota"]`. 0 disables that limit entirely, which is a
     # deliberate operational choice and not the effect of leaving a value unset.
+    # Whether a stranger may create an organization (WP-P0 sign-up). On a managed deployment an
+    # operator provisions tenants and this is turned off; the endpoint then refuses rather than
+    # quietly existing.
+    self_serve_signup: bool = True
+
     tenant_rate_limit_per_minute: int = 600
     tenant_concurrent_scans: int = 10
     tenant_max_page_size: int = 200

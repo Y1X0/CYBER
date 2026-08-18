@@ -217,10 +217,39 @@ class ChatResponse(BaseModel):
 
 # ── Dashboard ──
 class DashboardResponse(BaseModel):
+    """The dashboard payload (WP-P0).
+
+    The original four fields are unchanged so existing clients keep working; everything added has a
+    default, and every value is computed from a query rather than estimated.
+    """
+
     security_score: int
     severity_counts: dict
     total_findings: int
     recent_scans: list[ScanOut]
+
+    # Open findings are the actionable number. Total includes resolved and accepted work, which is
+    # the right figure for a trend and the wrong one for "what needs attention".
+    open_severity_counts: dict = Field(default_factory=dict)
+    open_findings: int = 0
+
+    assets_total: int = 0
+    assets_by_exposure: dict = Field(default_factory=dict)
+
+    scans_by_status: dict = Field(default_factory=dict)
+    scans_active: int = 0
+    scans_completed: int = 0
+    last_successful_scan_at: str | None = None
+    # failed / skipped / deferred engine runs. Shown next to the finding counts because these are
+    # exactly the states that must never be read as "clean".
+    engine_runs_unresolved: dict = Field(default_factory=dict)
+
+    remediation_by_status: dict = Field(default_factory=dict)
+    remediation_overdue: int = 0
+
+    risk_trend: list[dict] = Field(default_factory=list)
+    exposure_trend: list[dict] = Field(default_factory=list)
+    trend_days: int = 0
 
 
 # ── Attack-graph read-only analysis (Phase 6D) ──

@@ -86,3 +86,86 @@ code { background: #12141c; padding: 2px 5px; border-radius: 4px; }
 .compliance .control-findings { margin: 4px 0 0; padding-left: 16px; font-size: 12px; }
 .compliance .sev.critical, .compliance .sev.high { color: #ff6b6b; }
 .compliance .err { color: #ff6b6b; }
+
+/* ── productization (WP-P0) ─────────────────────────────────────────────────────────────────── */
+.brand { cursor: pointer; }
+.header-right { display: flex; gap: 12px; align-items: center; }
+
+nav.tabs { display: flex; flex-wrap: wrap; gap: 4px; margin: 12px 0; }
+.tab { background: #eee; border: 1px solid #ddd; padding: 6px 12px; cursor: pointer;
+       border-radius: 4px; }
+.tab.on { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+
+main { display: flex; flex-direction: column; gap: 16px; }
+
+.panel { border: 1px solid #e2e2e2; border-radius: 6px; padding: 16px; background: #fff; }
+.panel-head { display: flex; justify-content: space-between; align-items: center;
+              gap: 12px; margin-bottom: 12px; }
+.panel-head h3 { margin: 0; font-size: 15px; }
+.panel-actions { display: flex; gap: 8px; }
+
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+.stat { border: 1px solid #e2e2e2; border-radius: 6px; padding: 12px; background: #fff; }
+.stat-value { font-size: 26px; font-weight: 700; }
+.stat-label { font-size: 12px; color: #666; }
+.stat-hint { font-size: 11px; color: #999; margin-top: 4px; }
+.stat-bad .stat-value { color: #b00020; }
+.stat-warn .stat-value { color: #d9534f; }
+
+/* States are visually distinct on purpose: a customer must never mistake a failure for an
+   empty result, and colour is the fastest way to carry that. */
+.state { border-radius: 6px; padding: 16px; margin: 12px 0; }
+.state h4 { margin: 0 0 6px; }
+.state-empty { background: #f7f7f7; border: 1px dashed #ccc; }
+.state-error { background: #fdf2f2; border: 1px solid #d9534f; }
+.state-blocked { background: #fff8e6; border: 1px solid #f0ad4e; }
+.state-loading { color: #666; padding: 16px; }
+
+.notice { background: #fff8e6; border-left: 4px solid #f0ad4e; padding: 10px 12px; margin: 12px 0; }
+
+.pill { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px;
+        font-weight: 600; text-transform: uppercase; letter-spacing: .3px; }
+.pill-ok { background: #e6f4ea; color: #1e7e34; }
+.pill-wait { background: #e8f0fe; color: #1a56b0; }
+.pill-warn { background: #fff4e5; color: #a35c00; }
+.pill-bad { background: #fdecea; color: #b00020; }
+.pill-muted { background: #eee; color: #666; }
+
+.err { color: #b00020; }
+.warn-text { color: #a35c00; }
+.muted { color: #666; font-size: 13px; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+        word-break: break-all; }
+
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 8px 0; }
+.kv dt { color: #666; font-size: 13px; }
+.kv dd { margin: 0; font-size: 13px; }
+
+.inline-form { display: flex; flex-direction: column; gap: 8px; margin: 12px 0;
+               padding: 12px; background: #fafafa; border: 1px solid #eee; border-radius: 6px; }
+.inline-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.inline-form small { color: #777; font-size: 11px; }
+.inline-form input, .inline-form select, .inline-form textarea {
+  padding: 6px 8px; border: 1px solid #ccc; border-radius: 4px; font: inherit; }
+.check { flex-direction: row !important; align-items: center; gap: 6px; }
+
+.filters { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 12px; }
+.filters label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: #666; }
+
+.record { border-top: 1px solid #eee; padding: 12px 0; }
+.record-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.instructions { background: #f7f7f7; padding: 10px; border-radius: 4px; margin-top: 8px; }
+
+.row-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.popover { border: 1px solid #ccc; border-radius: 6px; padding: 10px; background: #fff;
+           display: flex; flex-direction: column; gap: 4px; min-width: 240px; }
+button.link { background: none; border: none; color: #1a56b0; cursor: pointer; padding: 0;
+              text-decoration: underline; font: inherit; }
+
+.bars { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.bar-row { display: grid; grid-template-columns: 90px 1fr 40px; gap: 8px; align-items: center;
+           font-size: 12px; }
+.bar-track { background: #eee; border-radius: 3px; height: 12px; overflow: hidden; }
+.bar-fill { display: block; height: 100%; }
+.bar-value { text-align: right; }

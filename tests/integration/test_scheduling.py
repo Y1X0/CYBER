@@ -65,9 +65,14 @@ def test_due_scan_schedule_creates_a_queued_scan(_no_real_publish):
 
     tid, cid, aid = _tenant_with_asset()
     with session_scope() as db:
-        upsert_schedule(db, tenant_id=tid, kind="scan", target_id=uuid.UUID(aid),
-                        customer_id=uuid.UUID(cid), interval_seconds=3600,
-                        settings={"engines": ["secrets"]})
+        schedule = upsert_schedule(db, tenant_id=tid, kind="scan", target_id=uuid.UUID(aid),
+                                   customer_id=uuid.UUID(cid), interval_seconds=3600,
+                                   settings={"engines": ["secrets"]})
+        # Backdated so this schedule is the oldest due one. The sweep takes the oldest 200 first,
+        # and on a database that has accumulated schedules from previous runs a brand-new one sorts
+        # last and falls outside the batch — which made this test fail for a reason that had
+        # nothing to do with the behaviour it checks.
+        schedule.next_run_at = dt.datetime.now(dt.UTC) - dt.timedelta(days=3650)
 
     result = sweep_schedules()
     assert result["enqueued"] >= 1

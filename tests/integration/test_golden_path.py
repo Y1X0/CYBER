@@ -2,8 +2,11 @@
 
 Every other test in this repository proves a component. This one proves the *product*: a single
 deterministic run of the whole journey a paying customer takes, in order, using the API they would
-use — no direct database writes except the tenant bootstrap, which has no API and is itself a
-recorded gap.
+use.
+
+The journey starts where a customer starts: `POST /auth/signup`. Nothing in it writes to the
+database except the asset's inline content, which stands in for a git clone and keeps this test off
+the network.
 
 Where an external dependency makes a step impossible here, the step is marked `UNVERIFIED` in the
 report this test prints and the assertion is limited to what was actually observed. Nothing is
@@ -24,7 +27,6 @@ Gated by GUARDIAN_RUN_DB_TESTS=1.
 
 from __future__ import annotations
 
-import datetime as dt
 import json
 import os
 import uuid
@@ -44,34 +46,26 @@ def journey():
     """The whole journey, run once. Each test below asserts one stage of the same run."""
     from fastapi.testclient import TestClient
     from guardian_api.main import app
-    from guardian_common.config import get_settings
-    from guardian_common.security import create_access_token
-    from guardian_db.models import Tenant, TenantMembership, User
-    from guardian_db.session import session_scope
+    from guardian_api.ratelimit import login_limiter
 
     slug = f"gp-{uuid.uuid4().hex[:10]}"
     domain = f"{slug}.example.com"
     state: dict = {"slug": slug, "domain": domain, "unverified": []}
 
-    # ── 1. tenant + owner ────────────────────────────────────────────────────────────────────────
-    # Infrastructure bootstrap. There is no signup or tenant-creation API — a recorded product gap,
-    # not something this test papers over.
-    with session_scope() as db:
-        tenant = Tenant(name=slug, slug=slug, mode="hybrid")
-        db.add(tenant)
-        db.flush()
-        user = User(email=f"{slug}@example.invalid", name="Owner", status="active")
-        db.add(user)
-        db.flush()
-        db.add(TenantMembership(user_id=user.id, tenant_id=tenant.id, role="owner"))
-        db.flush()
-        state["tenant"], state["user"] = tenant.id, user.id
-
-    settings = get_settings()
-    token = create_access_token(subject=str(state["user"]), secret=settings.jwt_secret,
-                                algorithm=settings.jwt_algorithm)
-    hdr = {"Authorization": f"Bearer {token}"}
     client = TestClient(app)
+
+    # ── 1. sign up ───────────────────────────────────────────────────────────────────────────────
+    # The front door, through the same API a customer uses. Sign-up shares the login rate limiter,
+    # so the window is cleared first; `test_product_seams.py` proves the limit itself still applies.
+    login_limiter().reset()
+    state["signup_resp"] = client.post("/api/v1/auth/signup", json={
+        "organization": f"Golden Path {slug}", "company": "Production estate",
+        "name": "Owner", "email": f"{slug}@example.com",
+        "password": "a-long-enough-password",
+    })
+    signup = state["signup_resp"].json()
+    state["tenant"] = uuid.UUID(signup["tenant_id"]) if signup.get("tenant_id") else None
+    hdr = {"Authorization": f"Bearer {signup['access_token']}"}
     state["client"], state["hdr"] = client, hdr
 
     # ── 2. identity ──────────────────────────────────────────────────────────────────────────────
@@ -105,25 +99,28 @@ def journey():
     # The scannable artefact. In production this is a git clone; inline content is the supported
     # config for an artefact supplied directly, and keeps this test off the network.
     from guardian_db.models import Asset
+    from guardian_db.session import session_scope
     with session_scope() as db:
         db.get(Asset, uuid.UUID(state["asset"])).config = {
             "inline_content": f'AWS_SECRET = "{SECRET}"\n'}
 
     # ── 6. authorization ─────────────────────────────────────────────────────────────────────────
-    # No API creates an Authorization; the only programmatic path is a passing ownership check,
-    # which cannot happen here. Recorded as a gap and written directly so the journey continues.
-    from guardian_db.models import Authorization
-    with session_scope() as db:
-        now = dt.datetime.now(dt.UTC)
-        db.add(Authorization(
-            tenant_id=state["tenant"], customer_id=uuid.UUID(state["customer"]),
-            asset_id=uuid.UUID(state["asset"]), scope="pilot",
-            authorized_targets=[{"type": "domain", "value": domain}],
-            method="ownership_verified", authorized_by=state["user"],
-            valid_from=now - dt.timedelta(days=1), valid_until=now + dt.timedelta(days=30)))
-    state["unverified"].append(
-        "authorization RECORDED VIA API — no route creates an Authorization; only a passing "
-        "ownership check does")
+    # `written_consent`, because that is what this customer can honestly give: they handed over the
+    # artifact. It authorizes the artifact plane and no network activity at all, which is exactly
+    # what a `secrets` scan of a repository needs.
+    state["authorization_resp"] = client.post("/api/v1/authorizations", headers=hdr, json={
+        "customer_id": state["customer"], "asset_id": state["asset"],
+        "method": "written_consent", "scope": "pilot", "domains": [domain],
+        "reference": "Pilot engagement letter",
+    })
+    state["authorization"] = state["authorization_resp"].json()
+
+    # The refusal that matters, on the same endpoint: active testing of a domain nobody proved they
+    # own. Asserted rather than assumed, because this is the gate that stops us scanning strangers.
+    state["active_refusal_resp"] = client.post("/api/v1/authorizations", headers=hdr, json={
+        "customer_id": state["customer"], "method": "active_recon",
+        "scope": "would need proof", "domains": [domain],
+    })
 
     # ── 7. webhook endpoint, registered before the scan so it can receive it ─────────────────────
     state["webhook_resp"] = client.post(
@@ -195,9 +192,16 @@ def journey():
 
 
 # ── the journey, stage by stage ───────────────────────────────────────────────────────────────────
+def test_00_a_customer_signs_themselves_up(journey):
+    """The first step of the journey, and the one that did not exist before productization."""
+    assert journey["signup_resp"].status_code == 201, journey["signup_resp"].text
+    body = journey["signup_resp"].json()
+    assert body["access_token"] and body["tenant_id"] and body["customer_id"]
+
+
 def test_01_the_owner_can_authenticate(journey):
     assert journey["me"].status_code == 200
-    assert journey["me"].json()["email"].endswith("@example.invalid")
+    assert journey["me"].json()["email"].endswith("@example.com")
 
 
 def test_02_a_customer_is_created_through_the_api(journey):
@@ -221,6 +225,25 @@ def test_04_an_unpublished_challenge_does_not_verify(journey):
 
 def test_05_an_asset_is_onboarded_through_the_api(journey):
     assert journey["asset_resp"].status_code == 201, journey["asset_resp"].text
+
+
+def test_05b_consent_is_recorded_through_the_api_and_grants_only_the_artifact_plane(journey):
+    """The gap this phase closed: an authorization a customer can create, that grants exactly one
+    plane. Recording it must never be mistaken for proving control of a host."""
+    assert journey["authorization_resp"].status_code == 201, journey["authorization_resp"].text
+    row = journey["authorization_resp"].json()
+    assert row["permits_artifact"] is True
+    assert row["permits_network"] is False
+    assert row["state"] == "active"
+    assert row["authorized_by"].endswith("@example.com")
+
+
+def test_05c_active_testing_is_refused_without_a_verified_domain(journey):
+    """The same endpoint, asked for the dangerous thing. It says no and says which domain."""
+    assert journey["active_refusal_resp"].status_code == 409, journey["active_refusal_resp"].text
+    detail = journey["active_refusal_resp"].json()["detail"]
+    assert journey["domain"] in detail
+    assert "proof of control" in detail
 
 
 def test_06_discovery_is_accepted(journey):
@@ -331,9 +354,13 @@ def test_18_the_delivery_was_attempted_and_retried(journey):
 def test_19_what_this_run_could_not_verify_is_stated(journey):
     """The list is the point. A golden path that quietly simulates its blocked steps is worse than
     no golden path, because it reports readiness nobody has."""
-    assert len(journey["unverified"]) == 4
+    assert len(journey["unverified"]) == 3
     joined = " ".join(journey["unverified"])
     assert "BLOCKED_EXTERNAL" in joined
     assert "ownership verification PASSING" in joined
     assert "webhook 2xx ROUND TRIP" in joined
+    # The two bootstrap gaps this journey used to carry are gone: it now signs up and records its
+    # own authorization through the API, with no database write except the asset's inline content.
+    assert not any("no signup" in u or "no route creates an Authorization" in u
+                   for u in journey["unverified"])
     print("\n".join(["", "UNVERIFIED in this run:", *[f"  - {u}" for u in journey["unverified"]]]))

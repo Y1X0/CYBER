@@ -8,6 +8,7 @@ from guardian_api.routes import (
     apikeys,
     assets,
     auth,
+    authorizations,
     chat,
     compliance,
     customers,
@@ -36,6 +37,7 @@ v1.include_router(apikeys.router, prefix="/api-keys", tags=["api-keys"])
 v1.include_router(customers.router, prefix="/customers", tags=["customers"])
 v1.include_router(assets.router, prefix="/assets", tags=["assets"])
 v1.include_router(verifications.router, prefix="/verifications", tags=["ownership"])
+v1.include_router(authorizations.router, prefix="/authorizations", tags=["authorization"])
 v1.include_router(scans.router, prefix="/scans", tags=["scans"])
 v1.include_router(discovery.router, prefix="/discovery", tags=["discovery"])
 v1.include_router(graph.router, prefix="/graph", tags=["graph"])
