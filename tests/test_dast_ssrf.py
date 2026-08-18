@@ -119,8 +119,10 @@ class _SpyClient:
         return False
 
     def get(self, url, headers=None):  # noqa: ANN001
+        # `text` is part of the stand-in now: the engine reads the response body since WP-D2,
+        # because an injection check has nothing to decide on without it.
         return types.SimpleNamespace(headers={}, cookies=types.SimpleNamespace(jar=[]),
-                                     url=url, status_code=200)
+                                     url=url, status_code=200, text="<html><body>hi</body></html>")
 
 
 def test_engine_pins_and_does_not_follow_redirects(monkeypatch):
@@ -141,12 +143,19 @@ def test_engine_pins_and_does_not_follow_redirects(monkeypatch):
 
 
 def test_engine_fails_closed_when_pin_blocks(monkeypatch):
+    """Fail closed means *fail*, not fall silent.
+
+    This used to assert an empty list. An empty list is what the orchestrator records as a clean
+    engine run, so a target the pin refused was reported to the customer exactly like a target with
+    nothing wrong. Since WP-D2 the engine raises, the run is marked failed, and WP-E2 treats a
+    failed engine as `not_checked` rather than as evidence anything was resolved."""
     class _BlockingClient(_SpyClient):
         def get(self, url, headers=None):  # noqa: ANN001
             raise PermissionError("egress denied: resolves to internal address")
 
     monkeypatch.setattr("httpx.Client", _BlockingClient)
-    assert list(DastEngine().run(_ctx("http://intranet.example/"))) == []   # no findings, no leak
+    with pytest.raises(dast_engine.DastScanError, match="could not be reached"):
+        list(DastEngine().run(_ctx("http://intranet.example/")))
 
 
 def test_non_http_scheme_is_ignored(monkeypatch):
