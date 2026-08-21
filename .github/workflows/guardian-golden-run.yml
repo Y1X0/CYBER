@@ -140,7 +140,7 @@ jobs:
         run: |
           python3 - <<'PY'
           import os
-          from urllib.parse import urlsplit
+          from urllib.parse import quote, unquote, urlsplit
 
           # At module scope on purpose: a missing driver means the install step is broken, and that
           # should surface as a traceback rather than be reported as an unreachable dependency.
@@ -150,14 +150,42 @@ jobs:
           NAMES = ("GUARDIAN_DATABASE_URL", "GUARDIAN_APP_DATABASE_URL", "GUARDIAN_REDIS_URL")
           urls = {name: os.environ.get(name, "").strip() for name in NAMES}
 
-          # Actions masks whole secret values, not substrings, so a password lifted out of a URL and
-          # echoed inside a driver's error message would appear in the log in clear. Scrub them.
-          secrets = {p for p in (urlsplit(u).password for u in urls.values() if u) if p}
+          # This repository is public, so this job's logs and artifacts are public. Two independent
+          # layers keep a credential out of them, because one blocklist is not something to bet a
+          # production database password on.
+          #
+          # Layer 1, `::add-mask::`: Actions redacts these values in ALL subsequent console output
+          # from this job, including the later step that cats `worker.log`. It is the layer that
+          # catches what the scrub below does not think of.
+          #
+          # Layer 2, `safe()`: scrubbed before printing. Both layers cover the whole URL and not
+          # just the password, and cover the password in all three forms it can appear in — as
+          # written in the secret, percent-decoded, and re-encoded. SQLAlchemy decodes before
+          # handing the DSN to psycopg, so the driver can echo a form the raw secret never contained.
+          def _forms(url: str) -> set:
+              if not url:
+                  return set()
+              found = {url}
+              raw = urlsplit(url).password
+              if raw:
+                  found |= {raw, unquote(raw), quote(unquote(raw), safe="")}
+                  found.add(url.replace(raw, unquote(raw)))
+              return {f for f in found if f}
+
+          secrets = set()
+          for url in urls.values():
+              secrets |= _forms(url)
+          # Longest first, so a full URL is replaced before the password nested inside it.
+          secrets = sorted(secrets, key=len, reverse=True)
+          for secret in secrets:
+              print(f"::add-mask::{secret}")
 
           def safe(text: str) -> str:
               text = str(text)
               for secret in secrets:
                   text = text.replace(secret, "***")
+              if any(secret in text for secret in secrets):
+                  return "<withheld: the message still contained a credential after scrubbing>"
               return text[:300]
 
           def where(url: str) -> str:
