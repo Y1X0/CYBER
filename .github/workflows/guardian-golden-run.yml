@@ -125,20 +125,94 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .
 
-      - name: Check the worker has what it needs
+      # Reachability, not just presence. A runner's IP is not stable, and the database is not in the
+      # Render workspace, so an IP allowlist on either dependency is plausible and invisible from
+      # here. Without this probe the worker starts, answers a Celery ping (Redis is reachable), picks
+      # the scan up, and then hangs on the first query — and the golden run scores that as "the
+      # worker took the scan and never finished", which is indistinguishable from A1. That is a
+      # burned dispatch run that returns the same open question. Five seconds of connecting up front
+      # turns it into a named failure.
+      - name: Check the worker can reach what it needs
         env:
           GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
+          GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
           GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
         run: |
-          missing=""
-          [ -n "$GUARDIAN_DATABASE_URL" ] || missing="$missing GUARDIAN_DATABASE_URL"
-          [ -n "$GUARDIAN_REDIS_URL" ] || missing="$missing GUARDIAN_REDIS_URL"
-          if [ -n "$missing" ]; then
-            echo "::error::missing repository secret(s):$missing — the worker cannot reach the" \
-                 "deployment's database and broker without them"
-            exit 1
-          fi
-          echo "database and broker URLs are present"
+          python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          # At module scope on purpose: a missing driver means the install step is broken, and that
+          # should surface as a traceback rather than be reported as an unreachable dependency.
+          import redis
+          from sqlalchemy import create_engine, text
+
+          NAMES = ("GUARDIAN_DATABASE_URL", "GUARDIAN_APP_DATABASE_URL", "GUARDIAN_REDIS_URL")
+          urls = {name: os.environ.get(name, "").strip() for name in NAMES}
+
+          # Actions masks whole secret values, not substrings, so a password lifted out of a URL and
+          # echoed inside a driver's error message would appear in the log in clear. Scrub them.
+          secrets = {p for p in (urlsplit(u).password for u in urls.values() if u) if p}
+
+          def safe(text: str) -> str:
+              text = str(text)
+              for secret in secrets:
+                  text = text.replace(secret, "***")
+              return text[:300]
+
+          def where(url: str) -> str:
+              parts = urlsplit(url)
+              return f"{parts.hostname or '?'}:{parts.port or '?'}"
+
+          missing = [name for name, url in urls.items() if not url]
+          if missing:
+              # GUARDIAN_APP_DATABASE_URL was absent from this check until now: unset, the worker
+              # starts fine and fails on the first RLS-scoped query, mid-scan.
+              print(f"::error::missing repository secret(s): {' '.join(missing)} — the worker "
+                    "cannot reach the deployment's database and broker without them. This is a "
+                    "missing secret, NOT the A1 worker blocker, and nothing has been scored.")
+              raise SystemExit(1)
+
+          failures = []
+
+          for name in ("GUARDIAN_DATABASE_URL", "GUARDIAN_APP_DATABASE_URL"):
+              url = urls[name]
+              try:
+                  # SELECT 1 touches no table, so this measures reachability and credentials only —
+                  # it cannot be perturbed by RLS or by an unset tenant GUC.
+                  engine = create_engine(url, connect_args={"connect_timeout": 5})
+                  with engine.connect() as conn:
+                      conn.execute(text("SELECT 1")).scalar_one()
+                  engine.dispose()
+                  print(f"{name}: reachable ({where(url)})")
+              except Exception as exc:
+                  failures.append(f"{name} at {where(url)} — {type(exc).__name__}: {safe(exc)}")
+
+          try:
+              # Raw, not normalised: redis-py verifies a `rediss://` server certificate by default
+              # and needs no `ssl_cert_reqs`. Probing with the untouched secret keeps this a
+              # statement about the network rather than about the code it is meant to de-risk.
+              client = redis.from_url(urls["GUARDIAN_REDIS_URL"],
+                                      socket_connect_timeout=5, socket_timeout=5)
+              if not client.ping():
+                  raise RuntimeError("PING returned falsey")
+              print(f"GUARDIAN_REDIS_URL: reachable ({where(urls['GUARDIAN_REDIS_URL'])})")
+          except Exception as exc:
+              failures.append(f"GUARDIAN_REDIS_URL at {where(urls['GUARDIAN_REDIS_URL'])} — "
+                              f"{type(exc).__name__}: {safe(exc)}")
+
+          if failures:
+              for failure in failures:
+                  print(f"::error::unreachable dependency: {failure}")
+              print("::error::The worker cannot reach the dependency named above from this runner. "
+                    "A GitHub-hosted runner's IP is not stable, so an IP allowlist on that host is "
+                    "the first thing to check. This is a connectivity failure, NOT the A1 worker "
+                    "blocker, and nothing has been scored — no worker was started and no scan was "
+                    "enqueued.")
+              raise SystemExit(1)
+
+          print("\nall three dependencies answered — the worker can reach the database and broker")
+          PY
 
       # The command is `docker-compose.prod.yml`'s `worker-default`, narrowed to one process as the
       # runbook specifies. Nothing about the worker is special here except that it is temporary.
