@@ -133,6 +133,37 @@ def _report() -> int:
     return 1 if failed else 0
 
 
+def wake(base: str, budget: int) -> tuple[bool, str]:
+    """Poll `/health` until the API answers, or the budget runs out.
+
+    A free-tier deployment sleeps when idle and takes the better part of a minute to come back,
+    answering 502 or refusing the connection while it does. Without this the first request of the
+    journey is the sign-up, and a cold start would be reported as a sign-up failure — or, worse,
+    a later timeout would be read as the worker never picking the scan up. Those are opposite
+    conclusions: one is an API that was asleep, the other is A1.
+
+    Deliberately outside the scored stages. Waking a deployment is not a stage of the journey, and a
+    run that never gets past this has verified nothing rather than failed something.
+    """
+    health = base.rstrip("/") + "/health"
+    deadline = time.time() + budget
+    attempts = 0
+    last = "no response"
+    while time.time() < deadline:
+        attempts += 1
+        try:
+            with urllib.request.urlopen(health, timeout=20) as response:  # noqa: S310 - scheme pinned
+                if response.status == 200:
+                    return True, f"answered on attempt {attempts}"
+                last = f"HTTP {response.status}"
+        except urllib.error.HTTPError as exc:
+            last = f"HTTP {exc.code}"
+        except Exception as exc:  # noqa: BLE001 - refused, reset, DNS: all mean "not awake yet"
+            last = f"{type(exc).__name__}: {exc}"[:90]
+        time.sleep(5)
+    return False, f"{attempts} attempt(s), last: {last}"
+
+
 def make_target(directory: str) -> None:
     import os
 
@@ -148,6 +179,15 @@ def make_target(directory: str) -> None:
 def run(args) -> int:  # noqa: C901 - one linear journey; splitting it hides the order
     api = Api(args.api)
     slug = uuid.uuid4().hex[:8]
+
+    # ── 0. wake the deployment ───────────────────────────────────────────────────────────────────
+    awake, detail = wake(args.api, args.warmup)
+    if not awake:
+        die(f"the API did not answer GET /health within {args.warmup}s ({detail}).\n"
+            "   This is the API being asleep or unreachable — it is NOT the A1 worker\n"
+            "   blocker, and nothing has been scored. Check the deployment is up, then\n"
+            "   run this again.")
+    print(f"API awake — {detail}\n", flush=True)
 
     # ── 1. sign up ───────────────────────────────────────────────────────────────────────────────
     if args.email and args.password:
@@ -412,6 +452,9 @@ def main() -> int:
                              "engines have anything to read; the ones that do not say so.")
     parser.add_argument("--timeout", type=int, default=900,
                         help="seconds to wait for the deployed worker (default 900)")
+    parser.add_argument("--warmup", type=int, default=180,
+                        help="seconds to wait for the API to answer /health before starting. A "
+                             "free-tier deployment sleeps when idle and takes ~50s to wake.")
     parser.add_argument("--make-target", metavar="DIR",
                         help="write the vulnerable target files and exit")
     args = parser.parse_args()

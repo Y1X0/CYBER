@@ -9,13 +9,17 @@ from __future__ import annotations
 from functools import lru_cache
 
 from celery import Celery
-from guardian_common.config import get_settings
+from guardian_common.config import celery_redis_url, get_settings
 
 
 @lru_cache
 def _client() -> Celery:
     settings = get_settings()
-    app = Celery("guardian-api", broker=settings.redis_url, backend=settings.redis_url)
+    # Same normalisation as the worker. The API only publishes, so it never touches the result
+    # backend and would survive an un-normalised URL — which is exactly how this stayed invisible
+    # until a worker first tried to start.
+    broker = celery_redis_url(settings.redis_url)
+    app = Celery("guardian-api", broker=broker, backend=broker)
     # Publish to the queue the workers actually consume (`default`). Celery's built-in default queue
     # is `celery`, which no worker consumes — so API-published run_scan/analyze_scan/run_discovery
     # would strand there and never execute. Mirrors task_default_queue on the worker's celery_app.

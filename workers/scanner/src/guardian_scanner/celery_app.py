@@ -6,7 +6,7 @@ import os
 
 from celery import Celery
 from celery.signals import worker_init, worker_process_init
-from guardian_common.config import get_settings
+from guardian_common.config import celery_redis_url, get_settings
 
 settings = get_settings()
 
@@ -44,10 +44,14 @@ def _tool_worker_child_init(**_kwargs) -> None:  # noqa: ANN003
     raw = os.environ.get(_TOOL_CONCURRENCY_ENV)
     uid_nft.set_worker_concurrency(int(raw) if raw and raw.lstrip("-").isdigit() else None)
 
+# Normalised, not used raw: a `rediss://` URL without `ssl_cert_reqs` makes Celery raise at
+# construction, so the worker dies at startup before it can consume anything.
+_broker_url = celery_redis_url(settings.redis_url)
+
 celery_app = Celery(
     "guardian",
-    broker=settings.redis_url,
-    backend=settings.redis_url,
+    broker=_broker_url,
+    backend=_broker_url,
     include=[
         "guardian_scanner.tasks",
         "guardian_scanner.feeds",

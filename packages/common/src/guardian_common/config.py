@@ -16,6 +16,10 @@ _DEV_ENCRYPTION_SENTINEL = "dev-only-encryption-key-change-me"
 _DEV_SEAL_SENTINEL = "dev-only-broker-seal-key-change-me"
 _DEFAULT_BOOTSTRAP_PASSWORD = "ChangeMe123!"  # noqa: S105 - dev bootstrap default only
 _LOCAL_ENVS = {"local", "dev", "development", "test", "ci"}
+# Celery's Redis backend demands this parameter on a `rediss://` URL and raises without it.
+# `required` is the setting that actually verifies the server certificate.
+_CELERY_TLS_PARAM = "ssl_cert_reqs"
+_CELERY_TLS_REQUIRED = "required"
 # libpq/psycopg establishes an encrypted connection ONLY for these sslmodes; disable/allow/prefer
 # either skip TLS or silently fall back to plaintext, so they are NOT accepted in production (P1-C).
 _TLS_SSLMODES = {"require", "verify-ca", "verify-full"}
@@ -38,6 +42,42 @@ def _redis_is_authenticated(url: str) -> bool:
     from urllib.parse import urlsplit
 
     return bool(urlsplit(url).password)
+
+
+def celery_redis_url(url: str) -> str:
+    """The broker/result-backend URL in the form Celery requires.
+
+    Celery refuses to construct a Redis result backend for a ``rediss://`` URL that does not carry
+    ``ssl_cert_reqs``, and raises at construction — before any network call. The effect is
+    asymmetric and that is what makes it dangerous: the API only ever publishes, so it never touches
+    the result backend and keeps working, while every worker dies at startup. A deployment can look
+    healthy and be unable to execute a single scan.
+
+    Normalising here rather than in the environment means a correct-but-incomplete secret cannot
+    take the workers down, wherever it is set. It does not lower the bar: ``required`` is the
+    verifying setting, and the production validator's own TLS and AUTH checks read
+    ``settings.redis_url``, which this never modifies.
+
+    A URL that already states its own ``ssl_cert_reqs`` is returned untouched — the operator made
+    that choice, and quietly rewriting it would hide a misconfiguration instead of surfacing it. So
+    is anything that is not ``rediss://``, and so is a URL that will not parse, which Celery should
+    report rather than this function swallow.
+    """
+    from urllib.parse import parse_qsl, urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    if parts.scheme != "rediss":
+        return url
+    if _CELERY_TLS_PARAM in {key for key, _ in parse_qsl(parts.query, keep_blank_values=True)}:
+        return url
+    # Appended as text rather than re-encoding the parsed query, so an existing parameter is
+    # returned byte-for-byte as the operator wrote it.
+    separator = "&" if parts.query else ""
+    return urlunsplit(parts._replace(
+        query=f"{parts.query}{separator}{_CELERY_TLS_PARAM}={_CELERY_TLS_REQUIRED}"))
 
 
 class Settings(BaseSettings):
