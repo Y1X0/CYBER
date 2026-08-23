@@ -1,0 +1,244 @@
+# Guardian burst worker — unblocks BLOCKER-1 (A1) without a paid host.
+#
+# Render refuses `type=background_worker` on the free tier with HTTP 402, so no long-lived consumer
+# exists and every scan created through the API stays `queued` forever. This runs the ALREADY BUILT
+# and licence-gated scanner image (A2, LIVE_VERIFIED) as a short-lived consumer on a schedule: the
+# queue is drained in bursts instead of continuously.
+#
+# What this is NOT: it is not a replacement for a real worker host. Latency is bounded by the cron
+# interval, not by the queue. It exists so the artifact plane can be proven end to end in production
+# while a permanent host is chosen.
+#
+# The image's own CMD is already `celery ... worker --queues default --concurrency 1`, so nothing is
+# rebuilt here and no scan logic is duplicated in CI. `timeout` ends the burst; SIGTERM lets Celery
+# finish the task in flight rather than stranding it, which is what `task_acks_late` assumes.
+name: Guardian Burst Worker
+
+on:
+  schedule:
+    # Every 30 minutes. GitHub delays scheduled runs under load, so treat this as an upper bound on
+    # how often a burst starts, never as a guarantee of when.
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long the burst consumes the queue (max 300)."
+        type: string
+        required: false
+        default: "25"
+      beat:
+        description: "Also run the embedded scheduler (sweep_schedules, webhook retries, feeds)."
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+# Two bursts consuming the same queue would double-deliver nothing (Redis hands each message to one
+# consumer) but would double the DB connections and the tool-plane concurrency assumption. Queue the
+# next run instead of cancelling it, so a long burst never silently skips a scheduled one.
+concurrency:
+  group: guardian-burst-worker
+  cancel-in-progress: false
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    environment: production
+    # Job ceiling sits above the burst length so `timeout` is what stops the container — a job killed
+    # by the runner skips the graceful shutdown and stalls whatever task was mid-flight.
+    timeout-minutes: 310
+
+    steps:
+      - name: Resolve burst length
+        id: cfg
+        env:
+          RAW: ${{ inputs.minutes || '25' }}
+        run: |
+          # A scheduled run supplies no inputs, so this defaults rather than failing. Clamped
+          # because the job ceiling is fixed: a burst longer than the runner allows is a burst that
+          # ends by being killed.
+          mins="${RAW//[^0-9]/}"
+          [ -n "$mins" ] || mins=25
+          [ "$mins" -ge 1 ] || mins=1
+          if [ "$mins" -gt 300 ]; then mins=300; fi
+          echo "minutes=$mins" >> "$GITHUB_OUTPUT"
+          echo "Burst length: ${mins} minute(s)"
+
+      - name: Log in to GHCR
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      # Pinned by digest, not by tag: this is the exact artifact step 8 of run 32039299600 executed
+      # each tool inside. A floating tag would let the thing that runs in production drift away from
+      # the thing that was verified.
+      - name: Pull the verified scanner image
+        id: image
+        run: |
+          IMAGE="ghcr.io/y1x0/cyber-scanner@sha256:80037347e22ee4574bc9ebfe5a557cfb0399d178049cf57a0c20be81102e61ac"
+          echo "ref=$IMAGE" >> "$GITHUB_OUTPUT"
+          docker pull "$IMAGE"
+
+      # A missing setting must stop the run here. Started anyway, Celery connects to a broker URL of
+      # "" and the burst reports success having consumed nothing — the failure that looks like an
+      # empty queue.
+      - name: Check required settings are present
+        env:
+          GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
+          GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_JWT_SECRET: ${{ secrets.GUARDIAN_JWT_SECRET }}
+          GUARDIAN_ENCRYPTION_KEY: ${{ secrets.GUARDIAN_ENCRYPTION_KEY }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+        run: |
+          missing=""
+          for k in GUARDIAN_DATABASE_URL GUARDIAN_APP_DATABASE_URL GUARDIAN_REDIS_URL \
+                   GUARDIAN_JWT_SECRET GUARDIAN_ENCRYPTION_KEY GUARDIAN_BROKER_SEAL_KEY; do
+            [ -n "${!k}" ] || missing="$missing $k"
+          done
+          if [ -n "$missing" ]; then
+            echo "##[error]missing required settings:$missing"
+            echo "Set them under the 'production' environment in repository settings."
+            exit 1
+          fi
+          echo "All required settings present (values not shown)."
+
+      # Why this exists here and not in the image: the digest pinned above was built at `a959396`
+      # (17 Aug 2026). The normalisation that makes a `rediss://` URL acceptable to Celery landed in
+      # `0317a86` (21 Aug 2026), four days later, so `celery_redis_url` does not exist inside this
+      # image. Its `celery_app` still hands `settings.redis_url` to the result backend raw, and
+      # Celery raises on a `rediss://` URL carrying no `ssl_cert_reqs` — at construction, before any
+      # network call. Unpatched, the worker dies at startup and the burst consumes nothing.
+      #
+      # Same contract as the function in the repository, deliberately: a URL that is not `rediss://`
+      # passes through, and so does one that already states its own `ssl_cert_reqs` — the operator
+      # chose that, and overwriting it would hide a misconfiguration instead of surfacing it. The
+      # parameter is appended as text rather than the query re-encoded, so an existing query is
+      # returned byte-for-byte as written.
+      #
+      # This step is redundant the moment the image is rebuilt from a commit that contains
+      # `celery_redis_url` — delete it then, rather than leaving two copies of one rule to drift.
+      - name: Normalise the broker URL for the pinned image
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from urllib.parse import parse_qsl, urlsplit, urlunsplit
+
+          raw = os.environ["GUARDIAN_REDIS_URL"]
+
+          def normalise(url: str) -> str:
+              try:
+                  parts = urlsplit(url)
+              except ValueError:
+                  return url
+              if parts.scheme != "rediss":
+                  return url
+              if "ssl_cert_reqs" in {k for k, _ in parse_qsl(parts.query, keep_blank_values=True)}:
+                  return url
+              separator = "&" if parts.query else ""
+              return urlunsplit(
+                  parts._replace(query=f"{parts.query}{separator}ssl_cert_reqs=required"))
+
+          fixed = normalise(raw)
+          # Derived from a secret but no longer equal to it, so Actions will not mask it on its own.
+          # Mask it before anything else can emit it, then hand it to later steps through the
+          # environment — never a step output, and never printed. Only the verdict is logged.
+          print(f"::add-mask::{fixed}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
+              handle.write(f"GUARDIAN_REDIS_URL={fixed}\n")
+          print("ssl_cert_reqs appended" if fixed != raw else
+                "left unchanged (not rediss://, or already carries ssl_cert_reqs)")
+          PY
+
+      # `GUARDIAN_REDIS_URL` is deliberately absent from this step's `env:` — a step-level value
+      # would override the normalised one the step above exported. Same in the two steps below.
+      - name: Report queue depth before the burst
+        continue-on-error: true
+        run: |
+          # Read-only and allowed to fail: this is an observation, and losing the observation is not
+          # a reason to skip the work.
+          cat > /tmp/qdepth.py <<'PY'
+          import os, redis
+          # Uses the already-normalised URL from the environment rather than importing
+          # `celery_redis_url` from the image, which was built before that function existed.
+          r = redis.from_url(os.environ["GUARDIAN_REDIS_URL"])
+          for q in ("default", "recon", "tools"):
+              print(f"  {q:<8} {r.llen(q)} pending")
+          PY
+          sed -i 's/^          //' /tmp/qdepth.py
+          docker run --rm -e GUARDIAN_REDIS_URL \
+            -v /tmp/qdepth.py:/tmp/qdepth.py:ro \
+            "${{ steps.image.outputs.ref }}" \
+            python /tmp/qdepth.py || echo "  (queue depth unavailable)"
+
+      - name: Consume the default queue
+        env:
+          GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
+          GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
+          GUARDIAN_JWT_SECRET: ${{ secrets.GUARDIAN_JWT_SECRET }}
+          GUARDIAN_ENCRYPTION_KEY: ${{ secrets.GUARDIAN_ENCRYPTION_KEY }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+          BEAT: ${{ inputs.beat == true && '--beat' || '' }}
+        run: |
+          set -o pipefail
+          SECONDS_LIMIT=$(( ${{ steps.cfg.outputs.minutes }} * 60 ))
+
+          # --pool=solo, not prefork: the tool plane's uid_nft guard fails closed unless it can prove
+          # a single allocator, and a single-process pool proves it by construction. Concurrency 1
+          # for the same reason it is 1 on the provisioned worker — isolation, not throughput.
+          #
+          # --without-gossip/--without-mingle: both are peer coordination for a fleet. There is no
+          # fleet, and mingle in particular blocks startup waiting for peers that never answer,
+          # which on a 25-minute burst is time taken directly out of the work.
+          #
+          # SIGTERM (timeout's default) is Celery's graceful stop: it finishes the current task and
+          # then exits. SIGKILL would drop it mid-flight, and with task_acks_late that means a
+          # redelivery and a duplicate half-run rather than a clean resume.
+          set +e
+          timeout --signal=TERM --kill-after=120s "${SECONDS_LIMIT}s" \
+            docker run --rm \
+              -e GUARDIAN_ENV=production \
+              -e GUARDIAN_DATABASE_URL -e GUARDIAN_APP_DATABASE_URL -e GUARDIAN_REDIS_URL \
+              -e GUARDIAN_JWT_SECRET -e GUARDIAN_ENCRYPTION_KEY -e GUARDIAN_BROKER_SEAL_KEY \
+              -e CELERY_CONCURRENCY=1 \
+              "${{ steps.image.outputs.ref }}" \
+              celery -A guardian_scanner.celery_app.celery_app worker \
+                --queues default \
+                --pool=solo \
+                --concurrency 1 \
+                --without-gossip --without-mingle \
+                --loglevel INFO \
+                $BEAT
+          rc=$?
+          set -e
+
+          # 124 is `timeout` reporting that it ended the burst on schedule. That is this workflow
+          # working, so it must not be reported as a failed run — otherwise every successful burst
+          # sends a failure notification and the real failures stop being read.
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ] || [ "$rc" -eq 0 ]; then
+            echo "Burst ended cleanly (exit ${rc})."
+          else
+            echo "##[error]worker exited ${rc} before the burst window closed"
+            exit "$rc"
+          fi
+
+      - name: Report queue depth after the burst
+        if: always()
+        continue-on-error: true
+        run: |
+          cat > /tmp/qdepth.py <<'PY'
+          import os, redis
+          # Uses the already-normalised URL from the environment rather than importing
+          # `celery_redis_url` from the image, which was built before that function existed.
+          r = redis.from_url(os.environ["GUARDIAN_REDIS_URL"])
+          for q in ("default", "recon", "tools"):
+              print(f"  {q:<8} {r.llen(q)} pending")
+          PY
+          sed -i 's/^          //' /tmp/qdepth.py
+          docker run --rm -e GUARDIAN_REDIS_URL \
+            -v /tmp/qdepth.py:/tmp/qdepth.py:ro \
+            "${{ steps.image.outputs.ref }}" \
+            python /tmp/qdepth.py || echo "  (queue depth unavailable)"

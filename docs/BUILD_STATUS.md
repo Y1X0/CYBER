@@ -44,7 +44,7 @@ pip-audit. The last four steps had never executed on this branch before.
 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
-| A1 | Worker fleet — artifact plane | `BLOCKED_EXTERNAL` | `9017610` | — | Image builds and pushes; provisioning is refused by the platform. See BLOCKER-1. |
+| A1 | Worker fleet — artifact plane | `BLOCKED_EXTERNAL` | `9017610` | — | Image builds and pushes; provisioning is refused by the platform. Mitigated, not resolved, by `.github/workflows/guardian-burst-worker.yml` — a scheduled burst consumer that drains the queue every 30 minutes. Latency is bounded by the cron interval, not by the queue, and the status stays `BLOCKED_EXTERNAL` because a burst is not a host. See BLOCKER-1. |
 | A1b | Worker fleet — network plane | `BLOCKED_EXTERNAL` | — | — | Only `nmap_provider` and `nmap_service_provider` set `external_binary=True` and are forced onto `uid_nft`. That plane alone needs `CAP_NET_ADMIN`. |
 | A2 | Scanner runtime image | `LIVE_VERIFIED` | `a959396` | 28 (`test_tool_licenses`) + 8 (`test_engine_health`) | Built and pushed: `ghcr.io/y1x0/cyber-scanner@sha256:80037347e22ee4574bc9ebfe5a557cfb0399d178049cf57a0c20be81102e61ac`. Step 8 of run 32039299600 executed each tool inside the image; licence gate passed first. Release asset URLs are resolved from the GitHub API on the runner, not written from memory. |
 | A3 | Scheduler + notifications | `TESTED` | `96b73a6` | 10 (`test_scheduling`) | `schedules` table + migration `0012`, RLS live-verified (`rls_enabled=true`, `policy=tenant_isolation roles=guardian_app`). Sweep claims the slot before dispatch; a six-hour outage produces one run, not six. Beat entries `sweep-schedules` (300s) and `sync-vulnerability-feeds` (86400s). Cannot reach `DEPLOYED` while A1 is blocked — beat needs a worker. |
@@ -163,6 +163,52 @@ service — is refused deliberately. It would put unbounded scan work on the req
 so a customer's scan would degrade the API for every other tenant, and Render's free web service
 sleeps on idle, which silently stops the queue. Hiding a capacity limitation inside the API tier is
 worse than an honest blocker.
+
+**Interim mitigation — `.github/workflows/guardian-burst-worker.yml`.** The verified scanner image
+(A2) is run as a short-lived consumer on a `*/30 * * * *` schedule, draining the `default` queue in
+bursts of up to 25 minutes. Nothing is rebuilt: the image is pinned by digest and its own `CMD` is
+already the worker command. `timeout --signal=TERM` ends each burst so Celery finishes the task in
+flight rather than stranding it, which is what `task_acks_late` assumes. It exists so the artifact
+plane can be exercised against the real deployment while a permanent host is chosen.
+
+Its limits, none of which are incidental:
+
+* **Latency is the cron interval, not the queue.** A scan enqueued one minute after a burst ends
+  waits for the next one. GitHub also delays scheduled runs under load, so 30 minutes is an upper
+  bound on how often a burst *starts*, never a guarantee of when. No customer-facing latency
+  commitment can be made on top of this, and it cannot carry a scheduled-scan product (A3) whose
+  whole value is running when it said it would.
+* **It is plausibly outside the GitHub Actions terms.** Actions is for building, testing, deploying
+  and publishing the project the repository belongs to. Draining a production queue for real
+  customers is a service, and running a service on Actions is the kind of use the terms exclude —
+  regardless of whether the repository is public and the minutes are free. The exposure is not a
+  bill; it is that the account can be restricted, which would take CI down with it. This is a
+  deliberate, time-boxed acceptance of that risk to prove the plane end to end, and it is a reason
+  to move quickly rather than to settle in.
+* **It is not a host, and must not be allowed to become one.** No scheduled workflow drains the
+  network plane (A1b), which needs `CAP_NET_ADMIN`; a hosted runner is not that either. Bursts leave
+  the queue-health signal ambiguous by design — the queue is *expected* to be non-empty between
+  bursts, so depth alone stops distinguishing "waiting for the next burst" from "nothing is
+  consuming". Removing this file is part of the definition of done for BLOCKER-1.
+
+**The pinned image predates the broker-URL fix, and the workflow compensates.** The digest was built
+at `a959396` (17 Aug 2026); `celery_redis_url` landed in `0317a86` (21 Aug 2026), so that function
+does not exist inside the image. Its `celery_app` hands `settings.redis_url` to the result backend
+raw, and Celery raises on a `rediss://` URL carrying no `ssl_cert_reqs` at construction, before any
+network call — unpatched, the worker would die at startup and the burst would consume nothing.
+
+The workflow therefore normalises the URL itself, in a dedicated step, to the same contract as the
+repository function: only a `rediss://` URL that does not already state `ssl_cert_reqs` is touched,
+the parameter is appended as text rather than the query re-encoded, and a URL that already carries
+the operator's own choice passes through untouched. The result is `::add-mask::`ed before use, since
+it is derived from a secret but no longer equal to it and Actions will not mask it on its own, and
+it is handed on through the environment rather than a step output. The queue-depth steps read that
+value directly instead of importing from the image. No repository secret needs changing.
+
+This is compensation, not a fix, and it is the second copy of a rule that already exists in the
+code. **When the image is rebuilt from a commit containing `celery_redis_url`, delete the
+`Normalise the broker URL for the pinned image` step** rather than leaving two copies to drift
+apart.
 
 **Operator action:** any container host that will run a long-lived process — a Render paid worker,
 a Fly.io Machine, a single VPS, or a laptop running `celery -A guardian_scanner worker`. Nothing in
