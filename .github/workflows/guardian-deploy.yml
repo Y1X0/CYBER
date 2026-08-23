@@ -59,7 +59,7 @@ jobs:
           GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
         run: |
           python3 - <<'PY'
-          import json, os, sys, urllib.error, urllib.request
+          import json, os, sys, time, urllib.error, urllib.request
 
           API = "https://api.render.com/v1"
           key = (os.environ.get("RENDER_API_KEY") or "").strip()
@@ -151,4 +151,49 @@ jobs:
           url = (detail.get("serviceDetails") or {}).get("url") or "(pending)"
           print(f"  public url    : {url}")
           print("\nNo secret value was printed. The image digest was passed through unchanged.")
+
+          # ---- the deploy must actually happen ---------------------------------------------------
+          # Updating imagePath changes the service's CONFIGURATION. It does not roll anything out:
+          # this service's autoDeployTrigger is `commit`, which never fires for an image-backed
+          # service, so on 23 Aug this workflow exited 0 in two seconds with the config pointing at
+          # a new digest while the old container kept serving. A deploy step that cannot report
+          # "nothing was deployed" is not a deploy step. ADR-027.
+          prior = {d["deploy"]["id"] for d in call("GET", f"/services/{sid}/deploys?limit=20")}
+          created = call("POST", f"/services/{sid}/deploys", {})
+          did = (created.get("deploy") or created)["id"]
+          print(f"\n  deploy        : {did} {'(new)' if did not in prior else '(existing)'}")
+
+          # Poll to a terminal state. `live` is the only success; everything else that ends is a
+          # failure this step must own rather than hand to whoever runs the golden run next.
+          TERMINAL_OK = {"live"}
+          TERMINAL_BAD = {"build_failed", "update_failed", "canceled", "deactivated",
+                          "pre_deploy_failed"}
+          deadline = time.time() + 900
+          last = ""
+          while time.time() < deadline:
+              dep = call("GET", f"/services/{sid}/deploys/{did}")
+              dep = dep.get("deploy") or dep
+              status = dep.get("status", "")
+              if status != last:
+                  print(f"  status        : {status}")
+                  last = status
+              if status in TERMINAL_OK:
+                  served = ((dep.get("image") or {}).get("sha")
+                            or (dep.get("image") or {}).get("ref") or "")
+                  if image.rsplit("@", 1)[-1] not in served:
+                      print(f"::error::deploy {did} went live serving {served!r}, which is not the "
+                            f"digest this workflow pinned")
+                      raise SystemExit(1)
+                  print("\n  the pinned digest is live and serving")
+                  raise SystemExit(0)
+              if status in TERMINAL_BAD:
+                  print(f"::error::deploy {did} ended in {status!r} — the service is NOT running the "
+                        "pinned digest")
+                  raise SystemExit(1)
+              time.sleep(10)
+
+          print(f"::error::deploy {did} did not reach a terminal state within 900s (last: "
+                f"{last!r}). The service may still be serving the previous image — check Render "
+                "before treating this deployment as done.")
+          raise SystemExit(1)
           PY

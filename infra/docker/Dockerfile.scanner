@@ -92,7 +92,17 @@ ENV PYTHONUNBUFFERED=1 \
 
 # git: repository assets are cloned WITH history, because a secret deleted in a later commit is
 # still readable and the working tree alone shows nothing (WP-D5).
+#
+# `upgrade` before `install`, in the same layer as `update`: the base is a floating tag, so it
+# carries whatever its packages were when IT was built, and nothing here refreshed them. The API
+# image had exactly this gap and it took a blocked release to surface it — Trivy stopped the push on
+# four util-linux CVEs (CVE-2026-53612/53613/53614/53615) that Debian had already fixed and we had
+# simply never pulled. This image runs customers' scans, so it is the worse place to carry known,
+# already-fixed vulnerabilities. A blanket upgrade rather than a named list: the release gate is
+# `--ignore-unfixed`, so it only ever asks for fixes that exist, and a named list goes stale in
+# silence — the next base CVE blocks a release instead of being picked up. See ADR-027.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 

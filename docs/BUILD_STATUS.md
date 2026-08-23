@@ -342,9 +342,20 @@ migrations held under execution, not just under inspection. RLS policies rose 34
 tables arrived with tenant isolation already enabled rather than exposed. The drill also leaves a
 verified backup taken *after* the migration, not only before it.
 
-One thing found on the way and left open: `guardian-cutover.yml` offers `verify` in its `step` input
-and **implements no such step**. Selecting it runs nothing and reports success. The post-migration
-check above deliberately used the backup drill instead.
+One thing found on the way: `guardian-cutover.yml` offered `verify` in its `step` input and
+**implemented no such step** — selecting it ran nothing and reported success, so the post-migration
+check above deliberately used the backup drill instead. That was the fourth step in one day found
+reporting success without having established anything, which is no longer treated as four separate
+defects. **[ADR-027](adr/0027-verification-steps-must-fail.md)** states the rule they all violate: a
+verification step must have a reachable failure path, or it is a ritual rather than a check. All four
+are now closed under it:
+
+| Was | Now |
+|---|---|
+| `guardian-cutover.yml` `step=verify` — no implementation | reads `alembic current` from the database, compares it to the image's `alembic heads`, and asserts the tables 0012–0019 create actually exist |
+| `guardian-deploy.yml` — updated `imagePath` and exited 0 without rolling out | creates the deploy, polls it to a terminal state, and fails unless it reaches `live` *serving the pinned digest* |
+| `infra/docker/Dockerfile.scanner` — no `apt-get upgrade`, so base CVEs with published fixes accumulate | upgrades in the same layer as `update`, the fix the API image already needed |
+| `tools/guardian_preflight.py` docstring — named a digest that had stopped being production | derives the digest from `guardian-deploy.yml`, which is the pin that ships |
 
 `current` is not a guess. The backup drill,
 [32623765134](https://github.com/Y1X0/CYBER/actions/runs/32623765134), read it from the production

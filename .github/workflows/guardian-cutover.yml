@@ -89,6 +89,85 @@ jobs:
             -e GUARDIAN_BROKER_SEAL_KEY -e GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD \
             "$IMAGE" alembic upgrade head
 
+      # `verify` was an option in the `step` input with no step behind it: selecting it ran nothing
+      # and reported success — a named option that answers the question it is asked without looking.
+      # ADR-027. It now reads the schema back out of the database and fails when the answer is wrong.
+      #
+      # It deliberately does not trust the migrate step's exit code. On 23 Aug the migrate step
+      # would have exited 0 against an image whose migration files stopped at 0011, having moved
+      # nothing; and its own output is invisible because `alembic.ini` gives `logger_alembic` an
+      # empty `handlers`, so INFO records propagate to a root logger at WARNING and are dropped.
+      # `alembic current` is compared to `alembic heads` — two independent readings, one from the
+      # database, one from the image.
+      - name: Verify (schema is at head)
+        if: inputs.step == 'verify'
+        env:
+          GUARDIAN_ENV: production
+          GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
+          GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
+          GUARDIAN_APP_DB_PASSWORD: ${{ secrets.GUARDIAN_APP_DB_PASSWORD }}
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_JWT_SECRET: ${{ secrets.GUARDIAN_JWT_SECRET }}
+          GUARDIAN_ENCRYPTION_KEY: ${{ secrets.GUARDIAN_ENCRYPTION_KEY }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+          GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          printf 'precedence ::ffff:0:0/96  100\n' > "$RUNNER_TEMP/gai.conf"
+          docker run --rm -v "$RUNNER_TEMP/gai.conf:/etc/gai.conf:ro" -w /app \
+            -e GUARDIAN_ENV -e GUARDIAN_DATABASE_URL -e GUARDIAN_APP_DATABASE_URL \
+            -e GUARDIAN_APP_DB_PASSWORD \
+            -e GUARDIAN_REDIS_URL -e GUARDIAN_JWT_SECRET -e GUARDIAN_ENCRYPTION_KEY \
+            -e GUARDIAN_BROKER_SEAL_KEY -e GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD \
+            "$IMAGE" python - <<'PY'
+          import sys
+          from alembic.config import Config
+          from alembic.script import ScriptDirectory
+          from sqlalchemy import create_engine, text
+          from guardian_common.config import get_settings
+
+          # The head this image believes in.
+          script = ScriptDirectory.from_config(Config("alembic.ini"))
+          heads = set(script.get_heads())
+
+          # The revision the database is actually stamped with. A missing alembic_version table is a
+          # real answer — an unmigrated database — not an error to be swallowed.
+          engine = create_engine(get_settings().database_url, connect_args={"connect_timeout": 10})
+          with engine.connect() as conn:
+              rows = conn.execute(
+                  text("select version_num from alembic_version")).scalars().all()
+              current = set(rows)
+              present = {
+                  name for (name,) in conn.execute(text(
+                      "select tablename from pg_tables where schemaname = 'public'")).all()}
+          engine.dispose()
+
+          print(f"  image heads     : {sorted(heads) or '(none)'}")
+          print(f"  database current: {sorted(current) or '(none — never migrated)'}")
+          print(f"  public tables   : {len(present)}")
+
+          problems = []
+          if not current:
+              problems.append("the database carries no alembic_version row")
+          elif current != heads:
+              behind = sorted(heads - current)
+              problems.append(f"database is not at head — expected {sorted(heads)}, found "
+                              f"{sorted(current)}; missing {behind}")
+
+          # Spot-check that the migrations produced tables rather than only a version bump. These
+          # are the ones the journey actually touches first, and the ones whose absence produced the
+          # 500 that started this: `domain_verifications` is created by 0017.
+          for table in ("domain_verifications", "schedules", "feed_state", "webhook_endpoints"):
+              if table not in present:
+                  problems.append(f"expected table {table!r} is absent")
+
+          if problems:
+              for problem in problems:
+                  print(f"::error::{problem}")
+              sys.exit(1)
+          print("\nschema is at head and the expected tables exist")
+          PY
+
       - name: Seed
         if: inputs.step == 'seed'
         env:

@@ -5,11 +5,17 @@ Runs every LIVE VERIFY check for A1-A5 (PostgreSQL) and B1-B2 (Redis) against th
 services and prints a PASS/BLOCK table. Reads connection strings from the environment only;
 never prints a password, key, or token (DSNs are redacted in all output).
 
-RUN IT INSIDE THE PINNED IMAGE — that also proves the digest is pullable (section D):
+RUN IT INSIDE THE PINNED IMAGE — that also proves the digest is pullable (section D). Take the
+digest from `env.IMAGE` in `.github/workflows/guardian-deploy.yml`, which is the one the production
+service is pinned to; do not copy the example below, which will go stale the next time the image is
+rebuilt. An earlier version of this docstring named a digest that stopped being production and would
+have had an operator verify the wrong image (ADR-027):
 
+  IMAGE=$(grep -oE 'ghcr\.io/y1x0/cyber@sha256:[0-9a-f]{64}' \
+            .github/workflows/guardian-deploy.yml)
   docker run --rm --env-file .env.production \
     -v "$PWD/guardian_preflight.py:/tmp/pf.py:ro" \
-    ghcr.io/y1x0/cyber@sha256:69ba91a23d63c220034a64229d192597c931fb52ea3b7a5470106b9ce54ddc46 \
+    "$IMAGE" \
     python /tmp/pf.py
 
 Exit code 0 = every check PASS. Non-zero = at least one BLOCK (the count of blocks).
