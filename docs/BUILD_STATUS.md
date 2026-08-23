@@ -192,12 +192,68 @@ Two things that were previously assumptions are now facts:
   allowlist blocks a hosted runner.
 
 The run still ended `failure` and **scored no stages**: its liveness gate was a Celery `inspect ping`
-that never answered, so the journey was skipped. `inspect` travels the remote-control channel
-(pidbox, a Redis pub/sub fanout), a different path from task delivery — a worker can consume while
-remote control is unavailable. The gate was therefore stricter than what it guarded and discarded a
-run without measuring what the run existed to measure. It now gates on the worker's own `ready.`
-line and reports the ping as a warning. Whether the product completes a scan end to end remains
-unmeasured — not failed, unmeasured.
+that appeared never to answer, so the journey was skipped. The gate was stricter than what it
+guarded — `inspect` travels the remote-control channel (pidbox, a Redis pub/sub fanout), a different
+path from task delivery, and a worker can consume while remote control is unavailable — so it
+discarded a run without measuring what the run existed to measure. It now gates on the worker's own
+`ready.` line and reports the ping as a warning.
+
+**Correction — the first diagnosis of that gate was incomplete.** It read "remote control did not
+answer", and inferred that pidbox was probably unavailable over Render Key Value. It was not. In run
+32622327310 the same command answered on the first attempt:
+
+```
+->  celery@runnervm76f27: OK
+        pong
+1 node online.
+```
+
+The real cause was a shell bug in the gate itself:
+
+```bash
+set -uo pipefail
+... inspect ping ... 2>/dev/null | grep -q pong
+```
+
+`grep -q` exits the moment it matches, closing the pipe; `celery` is then killed by `SIGPIPE` and
+exits non-zero; `pipefail` takes the pipeline's status from that failure — so the `if` reported
+failure **even though `pong` had already been printed**. `2>/dev/null` disposed of the broken-pipe
+evidence. Reduced to a harness, with the same shell options:
+
+```
+WITH pipefail    -> treated as FAILURE (but pong WAS printed)
+WITHOUT pipefail -> treated as SUCCESS
+```
+
+The architectural point stands and is what unstuck the run: a gate must be weaker than what follows
+it. But the failure it was hiding was `pipefail` semantics, not infrastructure, and the record said
+infrastructure. Every other workflow was audited for the same pattern — a pipe into an early-exiting
+reader under `pipefail`. There are no other instances; two pipes into `grep -q`/`head -1` exist
+(`release.yml`, `guardian-deploy-worker.yml`) but neither step sets `pipefail`, and the surviving
+`pipefail` pipelines all feed `tee`, which reads to EOF and cannot exit early.
+
+**Current blocker: the deployed API image predates the endpoints the journey uses.** With the gate
+fixed, run [32622327310](https://github.com/Y1X0/CYBER/actions/runs/32622327310) reached the journey
+for the first time and stopped at its first request:
+
+```
+API awake — answered on attempt 2
+!! STOPPING: signup returned 404: {'detail': 'Not Found'}
+```
+
+Confirmed from both ends — the runner's 404, and Render's own access log for the service:
+`2026-08-23T06:13:50 POST /api/v1/auth/signup 404 Not Found`. The path is not the problem: the tool
+requests `{base}/api/v1` + `/auth/signup`, and the API mounts `v1 = APIRouter(prefix="/api/v1")` →
+`prefix="/auth"` → `@router.post("/signup")`. The dates are the problem — `guardian-api` was
+deployed **17 Aug 04:28**, and `POST /signup` arrived in `1fe2fe5` on **18 Aug 18:25**, 38 hours
+later. The running image simply does not contain the route.
+
+Note also that the warm-up added in `0317a86` did its job here: the API was asleep and answered on
+the second `/health` poll, so a ~50s cold start was not scored as a failed sign-up.
+
+Whether the product completes a scan end to end is still **unmeasured — not failed, unmeasured**.
+Redeploying the API from the current head is what unblocks the measurement; nothing in this repo's
+code is known to be wrong.
 
 **Interim mitigation — `.github/workflows/guardian-burst-worker.yml`.** The verified scanner image
 (A2) is run as a short-lived consumer of the `default` queue, `workflow_dispatch` only, for as long
