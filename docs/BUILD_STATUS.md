@@ -255,6 +255,49 @@ Whether the product completes a scan end to end is still **unmeasured — not fa
 Redeploying the API from the current head is what unblocks the measurement; nothing in this repo's
 code is known to be wrong.
 
+**Schema migration of 23 Aug 2026 — rollback point recorded before the fact.**
+
+The deployed API was rebuilt and is current, but the database schema was not. Run 32623456084 reached
+the journey and stopped at stage 3 with a 500 from `POST /api/v1/verifications`; Render's log names
+the cause exactly: `psycopg.errors.UndefinedTable: relation "domain_verifications" does not exist`.
+The INSERT itself was well formed — tenant_id, a high-entropy token, `dns_txt`, a one-year expiry —
+so the application code is right and only the schema beneath it is behind.
+
+```
+rollback point       2026-08-23T06:49:35Z
+alembic_version      0011_web_checks_catalog        (verified, not inferred — see below)
+pending              0012 … 0019  (eight migrations)
+restore mechanism    Neon point-in-time recovery to just before the migrate step
+```
+
+`current` is not a guess. The backup drill,
+[32623765134](https://github.com/Y1X0/CYBER/actions/runs/32623765134), read it from the production
+database and reported `alembic_version=0011_web_checks_catalog`, matching what the last successful
+cutover (run 19, 17 Aug 01:12, commit `681832a5`) could have applied — that commit's migration
+directory ends at `0011`. Everything from `0012` on was written on 18 Aug, after it.
+
+That drill is also why this is safe to attempt: 7 checks, 0 BLOCK. It dumped production, restored it
+into a throwaway PostgreSQL and compared — 44 tables, 60 rows, every count matching, and the dump
+carries the RLS objects (34 policies, 34 ROW SECURITY, 51 ACLs), so a restore does not silently come
+back without tenant isolation. Sixty rows across forty-four tables is a seeded database, not
+customer data, which is the other half of why the risk is small.
+
+All eight pending upgrades are **purely additive**: no `DROP`, no `ALTER COLUMN`, no `UPDATE` or
+`DELETE` against existing data anywhere in an `upgrade()` path. What they contain is `CREATE TABLE`,
+`CREATE INDEX`, `ENABLE ROW LEVEL SECURITY` on the table the same migration just created, `GRANT` to
+`guardian_app`, and one `CREATE OR REPLACE FUNCTION` in 0019. Every `drop_*` in these files lives in
+`downgrade()`. The worst credible outcome is a partial application, not data loss.
+
+**`guardian-cutover.yml` had to be re-pinned first, and this is not a formality.** It runs
+`alembic upgrade head` *inside the pinned image*, and it was pinned to the 17 Aug digest — an image
+whose migration directory also stops at `0011`. Run unchanged it would have found head `0011`,
+reported "up to date", and **exited successfully having migrated nothing**: a green tick over an
+unchanged schema, and the golden run would have failed again at exactly the same place.
+
+Caveat carried forward: the drill proves the data is restorable, not that Neon's retention window is
+long enough. The window itself was confirmed by the operator in the Neon console, outside this
+record.
+
 **Interim mitigation — `.github/workflows/guardian-burst-worker.yml`.** The verified scanner image
 (A2) is run as a short-lived consumer of the `default` queue, `workflow_dispatch` only, for as long
 as the operator asks (default 25 minutes). Nothing is rebuilt: the image is pinned by digest and its
