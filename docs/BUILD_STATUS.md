@@ -44,7 +44,7 @@ pip-audit. The last four steps had never executed on this branch before.
 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
-| A1 | Worker fleet — artifact plane | `BLOCKED_EXTERNAL` | `9017610` | — | Image builds and pushes; provisioning is refused by the platform. A worker started against the production broker and reached `ready.` in run 32621666688 (23 Aug 2026), so the code path is live-verified and what is missing is a host, not a fix. Partially mitigated by `.github/workflows/guardian-burst-worker.yml`, an operator-triggered one-shot drain of the `default` queue. It is not scheduled and must not be: nothing consumes the queue unless a human runs it, so the status stays `BLOCKED_EXTERNAL`. See BLOCKER-1. |
+| A1 | Worker fleet — artifact plane | `LIVE_VERIFIED` | `52f806b` | — | A worker consumed real work from the production broker and drove a customer journey end to end: run [32624227051](https://github.com/Y1X0/CYBER/actions/runs/32624227051), 23 Aug 2026 — **21 PASS · 0 FAIL · 1 UNVERIFIED**. `run_scan` completed in 5.7s against the deployed API's queue, then the retest scan, `enrich_graph`, reconcile, correlation and service→CVE all executed on the same worker. **The worker was ephemeral and was stopped when the job ended.** What remains is a long-lived host to run it — an operational gap, not a defect: nothing in the artifact plane is known to be unimplemented or wrong. Until that host exists, a scan runs only while an operator is running one (`guardian-burst-worker.yml`, dispatch-only, never scheduled). See BLOCKER-1. |
 | A1b | Worker fleet — network plane | `BLOCKED_EXTERNAL` | — | — | Only `nmap_provider` and `nmap_service_provider` set `external_binary=True` and are forced onto `uid_nft`. That plane alone needs `CAP_NET_ADMIN`. |
 | A2 | Scanner runtime image | `LIVE_VERIFIED` | `a959396` | 28 (`test_tool_licenses`) + 8 (`test_engine_health`) | Built and pushed: `ghcr.io/y1x0/cyber-scanner@sha256:80037347e22ee4574bc9ebfe5a557cfb0399d178049cf57a0c20be81102e61ac`. Step 8 of run 32039299600 executed each tool inside the image; licence gate passed first. Release asset URLs are resolved from the GitHub API on the runner, not written from memory. |
 | A3 | Scheduler + notifications | `TESTED` | `96b73a6` | 10 (`test_scheduling`) | `schedules` table + migration `0012`, RLS live-verified (`rls_enabled=true`, `policy=tenant_isolation roles=guardian_app`). Sweep claims the slot before dispatch; a six-hour outage produces one run, not six. Beat entries `sweep-schedules` (300s) and `sync-vulnerability-feeds` (86400s). Cannot reach `DEPLOYED` while A1 is blocked — beat needs a worker. |
@@ -251,9 +251,58 @@ later. The running image simply does not contain the route.
 Note also that the warm-up added in `0317a86` did its job here: the API was asleep and answered on
 the second `/health` poll, so a ~50s cold start was not scored as a failed sign-up.
 
-Whether the product completes a scan end to end is still **unmeasured — not failed, unmeasured**.
-Redeploying the API from the current head is what unblocks the measurement; nothing in this repo's
-code is known to be wrong.
+Whether the product completes a scan end to end was, at that point, **unmeasured — not failed,
+unmeasured**. Redeploying the API was the next step, and the schema turned out to be a step behind
+that. Both were cleared the same day; the measurement itself is recorded below, and it passed.
+
+**The journey ran end to end on 23 Aug 2026 — 21 PASS, 0 FAIL, 1 UNVERIFIED.** Run
+[32624227051](https://github.com/Y1X0/CYBER/actions/runs/32624227051), against the deployed API with
+a temporary worker attached, is the first execution in which every known blocker was clear at once.
+
+| | Stage | | | Stage | |
+|---|---|---|---|---|---|
+| 1 | signup | PASS | 12 | evidence | PASS |
+| 2 | organization | PASS | 13 | deterministic risk | PASS |
+| 3a | ownership challenge | PASS | 13b | evidence redaction at the boundary | PASS |
+| 3b | ownership refused without the record | PASS | 14 | report | PASS |
+| 3c | network authz refused without proof | PASS | 15 | remediation | PASS |
+| 4 | asset | PASS | 16 | retest executed by the deployed worker | PASS |
+| 4b | authorization recorded | PASS | 17 | webhook delivery | UNVERIFIED |
+| 5 | scan accepted | PASS | 19 | scan completed | PASS |
+| 6 | queued | PASS | 20 | no false-clean state | PASS |
+| 7 | the deployed worker consumed the task | PASS | | | |
+| 8 | terminal state | PASS | | | |
+| 10 | engine outcomes | PASS | | | |
+| 11 | findings | PASS | | | |
+
+The corroborating evidence is the worker's own log in that job — the execution, not the tool's
+opinion of it:
+
+```
+06:57:17  check_domain_verification  → ownership_not_proven  (the TXT record was not found)
+06:57:19  run_scan                   → completed in 5.73s
+                                       critical=3 high=1 low=1 total=5
+                                       verification: checked=5 not_checked=0 inconclusive=0
+06:57:26  graph_enriched             → finding_nodes=5 exposes_edges=5
+06:57:27  run_scan  (the retest)     → completed in 2.93s
+                                       verification: checked=5 not_checked=4 still_present=1
+```
+
+`not_checked=4` on the retest is the line that matters most. The three-state outcome held in
+production: four findings were **not examined**, and were therefore not judged resolved, instead of
+being closed silently. That is the false-clean property the design exists to protect, confirmed live
+by stage 20 rather than by a unit test. Stages 3b and 3c are the same principle on the authorization
+side — ownership was *refused* without a published TXT record, and network authorization was
+*refused* without proof of control. The refusals work, not only the acceptances.
+
+Stage 17 is UNVERIFIED, not failed: the run was dispatched without a `webhook_url`, so there was no
+receiver to prove the 2xx round trip. Re-running with one closes it.
+
+**What this does and does not say.** A design-partner customer can use Guardian today and receive a
+real security report — provided an operator runs a worker for the duration. The worker in this run
+was ephemeral and was stopped with the job. A1 is therefore `LIVE_VERIFIED` for the code path and
+BLOCKER-1 remains open as an operational gap: what is missing is a host, and nothing else that is
+known.
 
 **Schema migration of 23 Aug 2026 — rollback point recorded before the fact.**
 
@@ -265,10 +314,37 @@ so the application code is right and only the schema beneath it is behind.
 
 ```
 rollback point       2026-08-23T06:49:35Z
-alembic_version      0011_web_checks_catalog        (verified, not inferred — see below)
-pending              0012 … 0019  (eight migrations)
-restore mechanism    Neon point-in-time recovery to just before the migrate step
+alembic_version      0011_web_checks_catalog  →  0019_apikey_auth_lookup   APPLIED 06:54:30Z
+pending              none
+restore mechanism    Neon point-in-time recovery to just before 06:54:15Z
 ```
+
+**Applied and verified.** Run
+[32624125200](https://github.com/Y1X0/CYBER/actions/runs/32624125200) ran `alembic upgrade head`
+inside the re-pinned image, 06:54:15Z → 06:54:30Z. It printed nothing, which is a logging
+configuration rather than a no-op — `alembic.ini` gives `logger_alembic` `level = INFO` with an empty
+`handlers`, so its records propagate to a root logger set to `WARNING` and are filtered. Silence from
+a step that changes production is not evidence, so the result was confirmed independently by
+re-running the backup drill,
+[32624194272](https://github.com/Y1X0/CYBER/actions/runs/32624194272), which reads the value straight
+out of the database:
+
+| | before | after |
+|---|---|---|
+| `alembic_version` | `0011_web_checks_catalog` | **`0019_apikey_auth_lookup`** |
+| tables | 44 | **53** |
+| rows | 60 | **60** |
+| RLS policies | 34 | **41** |
+| dump size | 158,557 B | 196,262 B |
+
+Row count unchanged at 60 across nine new tables: the "purely additive" reading of those eight
+migrations held under execution, not just under inspection. RLS policies rose 34 → 41, so the new
+tables arrived with tenant isolation already enabled rather than exposed. The drill also leaves a
+verified backup taken *after* the migration, not only before it.
+
+One thing found on the way and left open: `guardian-cutover.yml` offers `verify` in its `step` input
+and **implements no such step**. Selecting it runs nothing and reports success. The post-migration
+check above deliberately used the backup drill instead.
 
 `current` is not a guess. The backup drill,
 [32623765134](https://github.com/Y1X0/CYBER/actions/runs/32623765134), read it from the production
