@@ -44,7 +44,7 @@ pip-audit. The last four steps had never executed on this branch before.
 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
-| A1 | Worker fleet — artifact plane | `BLOCKED_EXTERNAL` | `9017610` | — | Image builds and pushes; provisioning is refused by the platform. Mitigated, not resolved, by `.github/workflows/guardian-burst-worker.yml` — a scheduled burst consumer that drains the queue every 30 minutes. Latency is bounded by the cron interval, not by the queue, and the status stays `BLOCKED_EXTERNAL` because a burst is not a host. See BLOCKER-1. |
+| A1 | Worker fleet — artifact plane | `BLOCKED_EXTERNAL` | `9017610` | — | Image builds and pushes; provisioning is refused by the platform. Partially mitigated by `.github/workflows/guardian-burst-worker.yml`, an operator-triggered one-shot drain of the `default` queue. It is not scheduled and must not be: nothing consumes the queue unless a human runs it, so the status stays `BLOCKED_EXTERNAL`. See BLOCKER-1. |
 | A1b | Worker fleet — network plane | `BLOCKED_EXTERNAL` | — | — | Only `nmap_provider` and `nmap_service_provider` set `external_binary=True` and are forced onto `uid_nft`. That plane alone needs `CAP_NET_ADMIN`. |
 | A2 | Scanner runtime image | `LIVE_VERIFIED` | `a959396` | 28 (`test_tool_licenses`) + 8 (`test_engine_health`) | Built and pushed: `ghcr.io/y1x0/cyber-scanner@sha256:80037347e22ee4574bc9ebfe5a557cfb0399d178049cf57a0c20be81102e61ac`. Step 8 of run 32039299600 executed each tool inside the image; licence gate passed first. Release asset URLs are resolved from the GitHub API on the runner, not written from memory. |
 | A3 | Scheduler + notifications | `TESTED` | `96b73a6` | 10 (`test_scheduling`) | `schedules` table + migration `0012`, RLS live-verified (`rls_enabled=true`, `policy=tenant_isolation roles=guardian_app`). Sweep claims the slot before dispatch; a six-hour outage produces one run, not six. Beat entries `sweep-schedules` (300s) and `sync-vulnerability-feeds` (86400s). Cannot reach `DEPLOYED` while A1 is blocked — beat needs a worker. |
@@ -165,31 +165,36 @@ sleeps on idle, which silently stops the queue. Hiding a capacity limitation ins
 worse than an honest blocker.
 
 **Interim mitigation — `.github/workflows/guardian-burst-worker.yml`.** The verified scanner image
-(A2) is run as a short-lived consumer on a `*/30 * * * *` schedule, draining the `default` queue in
-bursts of up to 25 minutes. Nothing is rebuilt: the image is pinned by digest and its own `CMD` is
-already the worker command. `timeout --signal=TERM` ends each burst so Celery finishes the task in
-flight rather than stranding it, which is what `task_acks_late` assumes. It exists so the artifact
-plane can be exercised against the real deployment while a permanent host is chosen.
+(A2) is run as a short-lived consumer of the `default` queue, `workflow_dispatch` only, for as long
+as the operator asks (default 25 minutes). Nothing is rebuilt: the image is pinned by digest and its
+own `CMD` is already the worker command. `timeout --signal=TERM` ends the burst so Celery finishes
+the task in flight rather than stranding it, which is what `task_acks_late` assumes. It exists so a
+queue can be drained deliberately while a permanent host is chosen.
+
+**It is deliberately not scheduled, and a schedule must never be added.** A `*/30 * * * *` cron was
+briefly committed here and removed in the same session. `guardian-golden-run.yml` already states the
+rule, and it binds this file too: keeping a queue drained for real customers is a service, a service
+does not belong in CI, and the fix is a host, not a cron. Two things made it worse than a style
+violation. This repository's default branch is the working branch, and `schedule:` fires from the
+default branch — so the cron was live from the moment it was pushed, consuming a production queue
+unattended with nobody reading the result. And running a service on Actions is the kind of use its
+terms exclude regardless of the repository being public and the minutes free; the exposure is not a
+bill but the account being restricted, which would take CI down with it.
 
 Its limits, none of which are incidental:
 
-* **Latency is the cron interval, not the queue.** A scan enqueued one minute after a burst ends
-  waits for the next one. GitHub also delays scheduled runs under load, so 30 minutes is an upper
-  bound on how often a burst *starts*, never a guarantee of when. No customer-facing latency
-  commitment can be made on top of this, and it cannot carry a scheduled-scan product (A3) whose
-  whole value is running when it said it would.
-* **It is plausibly outside the GitHub Actions terms.** Actions is for building, testing, deploying
-  and publishing the project the repository belongs to. Draining a production queue for real
-  customers is a service, and running a service on Actions is the kind of use the terms exclude —
-  regardless of whether the repository is public and the minutes are free. The exposure is not a
-  bill; it is that the account can be restricted, which would take CI down with it. This is a
-  deliberate, time-boxed acceptance of that risk to prove the plane end to end, and it is a reason
-  to move quickly rather than to settle in.
-* **It is not a host, and must not be allowed to become one.** No scheduled workflow drains the
-  network plane (A1b), which needs `CAP_NET_ADMIN`; a hosted runner is not that either. Bursts leave
-  the queue-health signal ambiguous by design — the queue is *expected* to be non-empty between
-  bursts, so depth alone stops distinguishing "waiting for the next burst" from "nothing is
-  consuming". Removing this file is part of the definition of done for BLOCKER-1.
+* **Nothing is consumed unless a human runs it.** There is no latency property here at all — a scan
+  sits `queued` until someone triggers a drain. That is honest rather than unfortunate: it keeps the
+  gap visible instead of hiding it behind a cron. It cannot carry a scheduled-scan product (A3),
+  whose whole value is running when it said it would.
+* **It is not a host, and must not be allowed to become one.** It does not touch the network plane
+  (A1b), which needs `CAP_NET_ADMIN`; a hosted runner is not that either. It also leaves the
+  queue-health signal ambiguous while unrun — depth alone stops distinguishing "no drain has been
+  triggered" from "nothing is consuming". Removing this file is part of the definition of done for
+  BLOCKER-1.
+* **It answers a narrower question than it looks like it does.** A drain reports queue depth before
+  and after. Whether the product actually works end to end is what `guardian-golden-run.yml`
+  answers, with a pass/fail criterion per stage.
 
 **The pinned image predates the broker-URL fix, and the workflow compensates.** The digest was built
 at `a959396` (17 Aug 2026); `celery_redis_url` landed in `0317a86` (21 Aug 2026), so that function

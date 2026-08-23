@@ -1,13 +1,20 @@
-# Guardian burst worker — unblocks BLOCKER-1 (A1) without a paid host.
+# Guardian burst worker — an operator-triggered, one-shot drain of the `default` queue.
 #
 # Render refuses `type=background_worker` on the free tier with HTTP 402, so no long-lived consumer
-# exists and every scan created through the API stays `queued` forever. This runs the ALREADY BUILT
-# and licence-gated scanner image (A2, LIVE_VERIFIED) as a short-lived consumer on a schedule: the
-# queue is drained in bursts instead of continuously.
+# exists and a scan created through the API stays `queued` until something consumes it. This runs
+# the ALREADY BUILT and licence-gated scanner image (A2, LIVE_VERIFIED) as a short-lived consumer,
+# once, when an operator asks for it.
 #
-# What this is NOT: it is not a replacement for a real worker host. Latency is bounded by the cron
-# interval, not by the queue. It exists so the artifact plane can be proven end to end in production
-# while a permanent host is chosen.
+# WHAT THIS IS NOT. It is not a worker host and it is not a service. It does NOT close BLOCKER-1 —
+# that is closed by a host. It is a manual tool for draining a queue on purpose while a permanent
+# host is chosen, and every scan it executes was waiting for a human to run this.
+#
+# NEVER ADD A SCHEDULE TO THIS FILE. `workflow_dispatch` only — never `schedule`, never `push`.
+# `guardian-golden-run.yml` states the rule this file is bound by too: keeping a queue drained for
+# real customers is a service, a service does not belong in CI, and the fix is a host, not a cron.
+# A `*/30 * * * *` schedule was briefly committed here and removed; it turned a manual tool into an
+# unattended background service, which is precisely the thing the rule forbids. Beyond the terms
+# question, a cron on the default branch starts consuming a production queue with nobody watching.
 #
 # The image's own CMD is already `celery ... worker --queues default --concurrency 1`, so nothing is
 # rebuilt here and no scan logic is duplicated in CI. `timeout` ends the burst; SIGTERM lets Celery
@@ -15,10 +22,6 @@
 name: Guardian Burst Worker
 
 on:
-  schedule:
-    # Every 30 minutes. GitHub delays scheduled runs under load, so treat this as an upper bound on
-    # how often a burst starts, never as a guarantee of when.
-    - cron: "*/30 * * * *"
   workflow_dispatch:
     inputs:
       minutes:
@@ -38,7 +41,8 @@ permissions:
 
 # Two bursts consuming the same queue would double-deliver nothing (Redis hands each message to one
 # consumer) but would double the DB connections and the tool-plane concurrency assumption. Queue the
-# next run instead of cancelling it, so a long burst never silently skips a scheduled one.
+# next run instead of cancelling it, so an operator who triggers twice gets two drains in sequence
+# rather than the first one killed halfway through a scan.
 concurrency:
   group: guardian-burst-worker
   cancel-in-progress: false
@@ -57,9 +61,9 @@ jobs:
         env:
           RAW: ${{ inputs.minutes || '25' }}
         run: |
-          # A scheduled run supplies no inputs, so this defaults rather than failing. Clamped
-          # because the job ceiling is fixed: a burst longer than the runner allows is a burst that
-          # ends by being killed.
+          # Defaults rather than failing on an empty or non-numeric input. Clamped because the job
+          # ceiling is fixed: a burst longer than the runner allows is a burst that ends by being
+          # killed.
           mins="${RAW//[^0-9]/}"
           [ -n "$mins" ] || mins=25
           [ "$mins" -ge 1 ] || mins=1
