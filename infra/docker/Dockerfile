@@ -9,7 +9,19 @@ ENV PYTHONUNBUFFERED=1 \
 # nftables (P1-ε): the uid_nft execution backend builds a per-run kernel egress allowlist with `nft`;
 # without the binary an external-binary run fails closed (never runs unconfined), so it MUST ship in
 # the image that runs worker-tools.
+# `upgrade` before `install`, and in the same layer as `update`: the base image is a floating tag, so
+# it carries whatever its packages were at ITS build time, and nothing here ever refreshed them.
+# Without this the release gate blocks on base-image CVEs that Debian has already fixed and we simply
+# never pulled — as it did for CVE-2026-53612/53613/53614/53615 in util-linux (mount TOCTOU, a
+# nosuid/noexec bypass via LIBMOUNT_FORCE_MOUNT2, and an integer overflow in libblkid), all fixed in
+# util-linux 2.41-5 and shipping in the same Debian 13 the base already tracks.
+#
+# A blanket upgrade rather than a named list on purpose: the gate is `--ignore-unfixed`, so it only
+# ever demands fixes that exist, and a named list goes stale silently — the next base CVE blocks a
+# release instead of being picked up. This costs nothing in reproducibility that was not already
+# spent by a floating base tag and an unpinned `apt-get update`.
 RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends git curl nftables \
     && rm -rf /var/lib/apt/lists/*
 
