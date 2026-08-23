@@ -33,7 +33,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/y1x0/cyber@sha256:69ba91a23d63c220034a64229d192597c931fb52ea3b7a5470106b9ce54ddc46
+  IMAGE: ghcr.io/y1x0/cyber@sha256:e20492422302af51a0237efcaadac64e5d1269214a65929b1f080878b056f075
   SERVICE_NAME: guardian-api
   REGION: ohio
   HEALTH_PATH: /health/ready
