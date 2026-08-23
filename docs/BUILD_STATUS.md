@@ -44,7 +44,7 @@ pip-audit. The last four steps had never executed on this branch before.
 
 | WP | Title | Status | Commit | Tests | Evidence |
 |----|-------|--------|--------|-------|----------|
-| A1 | Worker fleet — artifact plane | `BLOCKED_EXTERNAL` | `9017610` | — | Image builds and pushes; provisioning is refused by the platform. Partially mitigated by `.github/workflows/guardian-burst-worker.yml`, an operator-triggered one-shot drain of the `default` queue. It is not scheduled and must not be: nothing consumes the queue unless a human runs it, so the status stays `BLOCKED_EXTERNAL`. See BLOCKER-1. |
+| A1 | Worker fleet — artifact plane | `BLOCKED_EXTERNAL` | `9017610` | — | Image builds and pushes; provisioning is refused by the platform. A worker started against the production broker and reached `ready.` in run 32621666688 (23 Aug 2026), so the code path is live-verified and what is missing is a host, not a fix. Partially mitigated by `.github/workflows/guardian-burst-worker.yml`, an operator-triggered one-shot drain of the `default` queue. It is not scheduled and must not be: nothing consumes the queue unless a human runs it, so the status stays `BLOCKED_EXTERNAL`. See BLOCKER-1. |
 | A1b | Worker fleet — network plane | `BLOCKED_EXTERNAL` | — | — | Only `nmap_provider` and `nmap_service_provider` set `external_binary=True` and are forced onto `uid_nft`. That plane alone needs `CAP_NET_ADMIN`. |
 | A2 | Scanner runtime image | `LIVE_VERIFIED` | `a959396` | 28 (`test_tool_licenses`) + 8 (`test_engine_health`) | Built and pushed: `ghcr.io/y1x0/cyber-scanner@sha256:80037347e22ee4574bc9ebfe5a557cfb0399d178049cf57a0c20be81102e61ac`. Step 8 of run 32039299600 executed each tool inside the image; licence gate passed first. Release asset URLs are resolved from the GitHub API on the runner, not written from memory. |
 | A3 | Scheduler + notifications | `TESTED` | `96b73a6` | 10 (`test_scheduling`) | `schedules` table + migration `0012`, RLS live-verified (`rls_enabled=true`, `policy=tenant_isolation roles=guardian_app`). Sweep claims the slot before dispatch; a six-hour outage produces one run, not six. Beat entries `sweep-schedules` (300s) and `sync-vulnerability-feeds` (86400s). Cannot reach `DEPLOYED` while A1 is blocked — beat needs a worker. |
@@ -163,6 +163,41 @@ service — is refused deliberately. It would put unbounded scan work on the req
 so a customer's scan would degrade the API for every other tenant, and Render's free web service
 sleeps on idle, which silently stops the queue. Hiding a capacity limitation inside the API tier is
 worse than an honest blocker.
+
+**Live-verified on 23 Aug 2026 — the code half of this blocker is closed.** Run
+[32621666688](https://github.com/Y1X0/CYBER/actions/runs/32621666688) started a worker against the
+real production broker and it came up. From its `worker.log`, verbatim:
+
+```
+ -------------- celery@runnervm76f27 v5.6.3 (recovery)
+ - ** ---------- .> transport:   ***ohio-keyvalue.render.com:6379//
+ - ** ---------- .> results:     ***ohio-keyvalue.render.com:6379/
+ -------------- [queues] .> default   exchange=default(direct) key=default
+[05:58:11: INFO/MainProcess] Connected to ***ohio-keyvalue.render.com:6379//
+[05:58:16: INFO/MainProcess] celery@runnervm76f27 ready.
+```
+
+Two things that were previously assumptions are now facts:
+
+* **`celery_redis_url` works against Render Key Value.** Constructing a Redis *result backend* is
+  where Celery raises on a `rediss://` URL with no `ssl_cert_reqs`, at construction and before any
+  network call — the asymmetry that let the API stay green while every worker died. The banner shows
+  a constructed backend and a connected transport, so the normalisation in `0317a86` is verified in
+  production rather than only in unit tests. **What remains of BLOCKER-1 is a host, not a defect.**
+* **The database is reachable from an arbitrary runner.** The connectivity probe opened `SELECT 1`
+  on both DSNs and pinged the broker before the worker started:
+  `GUARDIAN_DATABASE_URL` and `GUARDIAN_APP_DATABASE_URL` → `ep-crimson-haze-axj6kfh8-pooler.c-4.us-east-2.aws.neon.tech`,
+  `GUARDIAN_REDIS_URL` → `ohio-keyvalue.render.com:6379`. The database is on Neon, not in the Render
+  workspace, so its allowlist could not be read from the Render side; the probe settles it — no IP
+  allowlist blocks a hosted runner.
+
+The run still ended `failure` and **scored no stages**: its liveness gate was a Celery `inspect ping`
+that never answered, so the journey was skipped. `inspect` travels the remote-control channel
+(pidbox, a Redis pub/sub fanout), a different path from task delivery — a worker can consume while
+remote control is unavailable. The gate was therefore stricter than what it guarded and discarded a
+run without measuring what the run existed to measure. It now gates on the worker's own `ready.`
+line and reports the ping as a warning. Whether the product completes a scan end to end remains
+unmeasured — not failed, unmeasured.
 
 **Interim mitigation — `.github/workflows/guardian-burst-worker.yml`.** The verified scanner image
 (A2) is run as a short-lived consumer of the `default` queue, `workflow_dispatch` only, for as long

@@ -266,9 +266,22 @@ jobs:
           echo $! > worker.pid
           echo "worker pid $(cat worker.pid)"
 
-      # Liveness is the compose healthcheck for `worker-default`: a Celery ping answered over the
-      # broker. A live process is not the same as a worker that reached Redis and is consuming, and
-      # only the second one makes the golden run meaningful.
+      # The gate is the worker's own readiness line, and `inspect ping` is advisory. That split is
+      # deliberate, and run 32621666688 is why.
+      #
+      # In that run the worker connected to the production broker and logged `ready.` — it was
+      # consuming — and the run was still thrown away, because the gate was a Celery `inspect ping`
+      # that never answered. `inspect` travels the remote-control channel (pidbox, a Redis pub/sub
+      # fanout), which is a different path from the one that delivers tasks. A worker can consume
+      # perfectly while remote control is unavailable, so the gate was testing something other than
+      # the thing it was guarding — and being stricter than what it guards, it burned a run without
+      # measuring what the run existed to measure.
+      #
+      # `Connected to`, the `[queues] .> default` banner and `ready.` are the direct evidence that
+      # this worker reached the broker and is consuming. That is what gates. A failed ping is worth
+      # knowing — it means remote control and any tooling built on it will not work — so it is
+      # reported as a warning, with stderr intact. `2>/dev/null` was on that command before: a
+      # diagnostic step that discards the diagnosis.
       - name: Verify the worker is alive and consuming
         env:
           GUARDIAN_ENV: ${{ inputs.guardian_env }}
@@ -281,22 +294,64 @@ jobs:
           GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
         run: |
           set -uo pipefail
-          for attempt in $(seq 1 20); do
-            if ! kill -0 "$(cat worker.pid)" 2>/dev/null; then
-              echo "::error::the worker process exited before it answered a ping"
-              echo "----- worker.log -----"; cat worker.log
+          pid="$(cat worker.pid)"
+          ready=0
+          # 2s x 45 = 90s. A worker that has not reached `ready.` by then is not slow, it is stuck.
+          for attempt in $(seq 1 45); do
+            # A dead process is terminal — there is nothing to wait for, so do not spend the budget
+            # discovering that. This is the failure that must be fast and loud.
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "::error::the worker process exited before it became ready — see worker.log below"
+              echo "----- worker.log (full) -----"; cat worker.log
               exit 1
             fi
-            if celery -A guardian_scanner.celery_app.celery_app inspect ping \
-                 -d "celery@$(hostname)" --timeout 5 2>/dev/null | grep -q pong; then
-              echo "worker answered pong on attempt $attempt — it is consuming from the broker"
-              exit 0
+            if grep -q 'ready\.' worker.log; then
+              echo "worker reported ready on attempt $attempt — connected to the broker and consuming"
+              ready=1
+              break
             fi
-            sleep 3
+            sleep 2
           done
-          echo "::error::the worker never answered a Celery ping — it did not reach the broker"
-          echo "----- worker.log -----"; cat worker.log
-          exit 1
+          if [ "$ready" -ne 1 ]; then
+            echo "::error::the worker never reported ready — it did not reach the broker"
+            echo "----- worker.log (full) -----"; cat worker.log
+            exit 1
+          fi
+
+          echo
+          echo "--- remote control (advisory — NOT a gate) ---"
+          # stderr kept: when this fails, the reason is the whole point.
+          if celery -A guardian_scanner.celery_app.celery_app inspect ping \
+               -d "celery@$(hostname)" --timeout 5; then
+            echo "remote control answered — inspect/control commands work against this worker"
+          else
+            echo "::warning::remote control (Celery inspect ping) did not answer. The worker is" \
+                 "consuming regardless -- 'ready.' is in worker.log -- so this does not stop the" \
+                 "run. It does mean pidbox-based tooling will not work against this broker; the" \
+                 "stderr above is the reason. See run 32621666688."
+          fi
+
+      # A secondary signal, deliberately not a gate. The journey's own stage results are the verdict;
+      # depth before and after says whether work actually moved through the broker, which is the one
+      # thing a stalled run and a slow run look identical without. Allowed to fail: losing an
+      # observation is not a reason to skip the verification it was observing.
+      #
+      # `celery_redis_url` is imported from the installed source — this workflow runs the repository
+      # under test, not a pinned image, so that IS the normalised value and duplicating the rule here
+      # would only let the copy drift.
+      - name: Queue depth before the journey
+        continue-on-error: true
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+        run: |
+          python3 - <<'PY'
+          import os, redis
+          from guardian_common.config import celery_redis_url
+          client = redis.from_url(celery_redis_url(os.environ["GUARDIAN_REDIS_URL"]),
+                                  socket_connect_timeout=5, socket_timeout=5)
+          for queue in ("default", "recon", "tools"):
+              print(f"  {queue:<8} {client.llen(queue)} pending")
+          PY
 
       - name: Run the golden run against the deployed API
         env:
@@ -317,6 +372,24 @@ jobs:
           fi
           [ -n "$WEBHOOK_URL" ] && args+=(--webhook "$WEBHOOK_URL")
           python tools/production_golden_run.py "${args[@]}" | tee golden-run.txt
+
+      # `always()`: the depth after a FAILED journey is the more informative of the two. A queue that
+      # is still holding the scan says the worker never took it; a drained queue with a failed
+      # journey says it was taken and something later went wrong. Those need different fixes.
+      - name: Queue depth after the journey
+        if: always()
+        continue-on-error: true
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+        run: |
+          python3 - <<'PY'
+          import os, redis
+          from guardian_common.config import celery_redis_url
+          client = redis.from_url(celery_redis_url(os.environ["GUARDIAN_REDIS_URL"]),
+                                  socket_connect_timeout=5, socket_timeout=5)
+          for queue in ("default", "recon", "tools"):
+              print(f"  {queue:<8} {client.llen(queue)} pending")
+          PY
 
       - name: Summarise the result
         if: always()
