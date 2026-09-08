@@ -95,8 +95,21 @@ if [ ! -L /usr/sbin/dpkg-preconfigure ]; then
 fi
 # The `postgresql` metapackage pulls in more cluster machinery than is wanted here; the versioned
 # server package is the narrower dependency.
-PGPKG="$(apt-cache search '^postgresql-1[5-9]$' | awk '{print $1}' | sort -V | tail -1)"
-[ -n "$PGPKG" ] || PGPKG=postgresql
+#
+# This asks about five named packages rather than searching. `apt-cache search` reads the whole
+# package-description index and regex-matches every entry; under proot, where each read crosses the
+# syscall-translation boundary, that scan takes minutes and looks exactly like a hang. `apt-cache
+# show` is a keyed lookup and answers immediately. Highest version first so the loop stops at the
+# newest available.
+#
+# No pipe into `grep -q` here, deliberately: grep exits at the first match, the writer takes SIGPIPE,
+# and `pipefail` then adopts that as the command's failure — a green check reported as a red one.
+# That exact shape cost us a wrongly-diagnosed golden-run gate; a direct exit status has no race.
+PGPKG=postgresql
+for _v in 19 18 17 16 15; do
+  if apt-cache show "postgresql-$_v" >/dev/null 2>&1; then PGPKG="postgresql-$_v"; break; fi
+done
+echo "  server package: $PGPKG"
 apt-get install -y -qq --no-install-recommends \
     python3 python3-venv python3-dev build-essential \
     "$PGPKG" redis-server git curl ca-certificates
