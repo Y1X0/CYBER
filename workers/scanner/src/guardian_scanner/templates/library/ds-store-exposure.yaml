@@ -1,16 +1,29 @@
 id: ds-store-exposure
 info:
-  name: Exposed .DS_Store
+  name: Exposed OS metadata file (.DS_Store, Thumbs.db, desktop.ini)
   author: guardian
   severity: low
   description: |
-    A macOS directory index is served. It lists filenames that are not linked from anywhere,
-    which is how unlisted backups and admin pages get found.
-  remediation: Remove the file and exclude it from deployments.
+    A file the operating system writes into a folder for its own use is being served. None of them
+    is a secret in itself; what they carry is a list of FILENAMES that were in the directory,
+    including ones no page links to. That is how unlisted backups, old admin pages and forgotten
+    upload directories are found.
+
+    The id is unchanged from when this covered `.DS_Store` alone: extending it keeps one finding per
+    host rather than three of the same observation, and the reported path names which file was
+    actually served.
+  remediation: |
+    Remove the files and exclude them from deployment — add them to `.gitignore` and to the build's
+    exclusion list. Blocking the three filenames at the web server closes the class rather than the
+    instance.
   classification:
     cwe-id: CWE-548
   tags: exposure,misconfig
 http:
+  # Three files, OR semantics with stop-at-first. Each is matched on its own binary or textual
+  # signature rather than on a 200 at the path: hosts that answer 200 for everything are the
+  # dominant false positive for filename probes, and a signature is what separates the file from a
+  # soft 404 wearing its name.
   - method: GET
     path:
       - "{{BaseURL}}/.DS_Store"
@@ -23,3 +36,30 @@ http:
         part: body
         regex:
           - '^\x00\x00\x00\x01Bud1'
+  - method: GET
+    path:
+      - "{{BaseURL}}/Thumbs.db"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      # OLE2 compound-document magic — the container format Thumbs.db uses. Anchored at byte zero.
+      - type: regex
+        part: body
+        regex:
+          - '^\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'
+  - method: GET
+    path:
+      - "{{BaseURL}}/desktop.ini"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      # desktop.ini is INI text, so it needs a section name Windows actually writes. Requiring one
+      # keeps an arbitrary INI file at that path from being reported as OS metadata.
+      - type: regex
+        part: body
+        regex:
+          - '(?im)^\s*\[(\.ShellClassInfo|LocalizedFileNames|ViewState)\]'

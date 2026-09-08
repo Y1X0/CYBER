@@ -496,3 +496,101 @@ def test_batch2_every_signal_template_states_it_is_not_a_vulnerability():
                            "server-version-disclosure", "clickjacking-protection-missing"}:
             text = template.description.upper()
             assert "NOT A" in text and "MANUAL STEP" in text, template.id
+
+
+# ── batch 3: exposed services, and the safety constraints around probing them ─────────────────────
+#
+# These are the templates that could be written into exfiltration tools by accident. A heap dump is
+# live process memory; an actuator env listing is the application's secrets; a Kubernetes API server
+# will enumerate a cluster. The tests below assert the restraints, not just the detections, because
+# a detection that works while reading too much is still wrong.
+def test_batch3_heapdump_is_probed_with_head_and_never_downloaded():
+    """A GET here would pull hundreds of megabytes of live memory — credentials, sessions, customer
+    data — onto the scanner. That is Guardian exfiltrating the thing it exists to warn about.
+
+    `max-size` is accepted by the validator and never enforced, so there is no ceiling to fall back
+    on. HEAD is the constraint, and this test is what keeps it from being 'simplified' later.
+    """
+    loaded, _ = load_directory(library_path())
+    for template in loaded:
+        for request in template.requests:
+            if "heapdump" in request.path or "threaddump" in request.path:
+                assert request.method == "HEAD", (template.id, request.path, request.method)
+
+
+def test_batch3_actuator_env_fires_on_the_actuator_envelope_only():
+    """`propertySources` is the actuator's own wrapper. Any other JSON at that path is not an env
+    dump, and reporting it would be reporting a URL."""
+    real = '{"activeProfiles":["prod"],"propertySources":[{"name":"systemEnvironment"}]}'
+    other = '{"status":"UP","components":{"db":{"status":"UP"}}}'
+    assert _run("spring-actuator-exposure", _headers_only(body=real))
+    assert _run("spring-actuator-exposure", _headers_only(body=other)) == []
+
+
+def test_batch3_actuator_evidence_is_redacted():
+    """A match on /env means the scanner just read the application's configuration. None of it may
+    reach the finding — the `env` tag makes the loader mark the template automatically."""
+    loaded, _ = load_directory(library_path())
+    template = next(t for t in loaded if t.id == "spring-actuator-exposure")
+    assert template.redact_evidence is True
+    body = '{"propertySources":[{"name":"systemEnvironment","properties":{"DB_PASSWORD":"hunter2"}}]}'
+    detections = _run("spring-actuator-exposure", _headers_only(body=body))
+    assert detections
+    assert detections[0].snippet == "<redacted>"
+    assert "hunter2" not in detections[0].snippet
+
+
+def test_batch3_observability_console_reports_only_an_answered_request():
+    """401 is the correct answer and must produce nothing. No credential is ever submitted, so the
+    only thing that distinguishes the two cases is the status the server chose."""
+    org = '{"id":1,"name":"Main Org."}'
+    assert _run("observability-console-unauthenticated", _headers_only(body=org))
+    assert _run("observability-console-unauthenticated",
+                _headers_only(status=401, body='{"message":"Unauthorized"}')) == []
+    assert _run("observability-console-unauthenticated",
+                _headers_only(status=403, body="forbidden")) == []
+
+
+def test_batch3_kubernetes_needs_the_discovery_document_not_a_mention():
+    """A page that documents APIResourceList is not an API server.
+
+    Both the kind and the groupVersion are required, because Kubernetes client fixtures and
+    tutorials contain the kind string and are frequently served from ordinary web roots.
+    """
+    real = '{"kind":"APIResourceList","groupVersion":"v1","resources":[{"name":"pods"}]}'
+    prose = '<html><body>The API returns a "kind":"APIResourceList" document</body></html>'
+    assert _run("kubernetes-api-anonymous", _headers_only(body=real))
+    assert _run("kubernetes-api-anonymous", _headers_only(body=prose)) == []
+
+
+def test_batch3_graphql_is_info_and_says_it_does_not_check_introspection():
+    """It is named for what it establishes. Reporting a weaker check under a stronger name — calling
+    endpoint discovery an introspection finding — is the failure this template is written to avoid.
+    """
+    loaded, _ = load_directory(library_path())
+    template = next(t for t in loaded if t.id == "graphql-endpoint-detected")
+    assert template.severity.value == "info"
+    assert "DOES NOT CHECK" in template.description.upper()
+    assert "introspection" in template.description.lower()
+
+    err = '{"errors":[{"message":"Must provide query string."}]}'
+    assert _run("graphql-endpoint-detected", _headers_only(status=400, body=err))
+    assert _run("graphql-endpoint-detected",
+                _headers_only(status=404, body="<html>not found</html>")) == []
+
+
+def test_batch3_os_metadata_matches_signatures_not_filenames():
+    """Thumbs.db is OLE2, desktop.ini is INI with a Windows section name. An arbitrary file wearing
+    the name is not the artefact."""
+    ole = "\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1rest of the compound file"
+    assert _run("ds-store-exposure", _headers_only(body=ole))
+    assert _run("ds-store-exposure", _headers_only(body="[.ShellClassInfo]\nIconResource=x\n"))
+    assert _run("ds-store-exposure",
+                _headers_only(body="[SomeUnrelatedSection]\nkey=value\n")) == []
+
+
+def test_batch3_no_template_writes_or_follows_a_response():
+    """The library-wide invariant, asserted after every batch rather than assumed to have held."""
+    loaded, _ = load_directory(library_path())
+    assert {r.method for t in loaded for r in t.requests} <= {"GET", "HEAD"}
+    assert all("?" not in r.path and ".." not in r.path for t in loaded for r in t.requests)

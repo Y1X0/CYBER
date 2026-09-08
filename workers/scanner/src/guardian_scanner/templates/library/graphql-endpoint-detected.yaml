@@ -1,0 +1,67 @@
+id: graphql-endpoint-detected
+info:
+  name: GraphQL endpoint present
+  author: guardian
+  severity: info
+  description: |
+    A GraphQL endpoint answers at this path. This is a MAP ENTRY, NOT A FINDING: an exposed GraphQL
+    API is entirely normal, and nothing here says the schema, the resolvers or the authorisation
+    around them are wrong.
+
+    WHAT THIS DELIBERATELY DOES NOT CHECK: whether introspection is open. That is the question worth
+    asking — an open `__schema` query hands an attacker every type, field and mutation, which turns
+    black-box testing into reading the manual. Guardian cannot ask it. Introspection needs either a
+    POST carrying a query body, or a GET with the query in the query string; the template validator
+    permits only GET and HEAD, and a path may not contain `?`. Both routes are closed, by design
+    rather than by oversight.
+
+    Rather than report a weaker check under a stronger name, this template is named for what it
+    actually establishes. Its value is direction: it tells the human reviewer where to point a
+    manual test.
+
+    MANUAL STEP: send `{"query":"{__schema{types{name}}}"}` to this endpoint. A type list in the
+    response means introspection is open — decide then whether that is intended for this API.
+  remediation: |
+    Nothing to remediate on this finding alone. When reviewing the endpoint: disable introspection
+    in production unless the API is deliberately public, cap query depth and complexity, and confirm
+    authorisation is enforced per resolver rather than only at the endpoint.
+  classification:
+    cwe-id: CWE-200
+  tags: discovery,graphql,info
+http:
+  # A GraphQL server given a GET with no query answers with its own error rather than a 404. Those
+  # exact phrases are the signal — they prove a GraphQL runtime is behind the path, which the path
+  # alone never does. Any status is accepted because 400 is the usual and correct answer here.
+  #
+  # A generic `"errors"` key was tried first and removed: every JSON API in existence returns one,
+  # so it made this fire on any endpoint that happened to 400. Pairing it with a required "graphql"
+  # word did not save it either — `Must provide query string.` contains neither, so the two
+  # conditions could not both hold on the very response this template exists to recognise. The test
+  # caught that contradiction before it shipped.
+  - method: GET
+    path:
+      - "{{BaseURL}}/graphql"
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Must provide query string"
+          - "Must provide an operation"
+          - "GraphQL query must"
+          - "GRAPHQL_VALIDATION_FAILED"
+          - "graphiql"
+        condition: or
+        case-insensitive: true
+  - method: GET
+    path:
+      - "{{BaseURL}}/graphiql"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - "graphiql"
+        case-insensitive: true

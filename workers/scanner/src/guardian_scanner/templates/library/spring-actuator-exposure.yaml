@@ -2,15 +2,69 @@ id: spring-actuator-exposure
 info:
   name: Exposed Spring Boot actuator
   author: guardian
-  severity: medium
+  severity: high
   description: |
-    The actuator endpoint is reachable unauthenticated. Depending on which endpoints are enabled it
-    exposes configuration, environment variables, heap dumps or thread dumps.
-  remediation: Put actuator behind authentication and expose only health/info.
+    A Spring Boot actuator endpoint answers unauthenticated. Depending on which endpoints are
+    enabled that is configuration, environment variables, a heap dump or thread dumps — `/env` in
+    particular lists every property the application was started with, which is where database
+    passwords and API keys live.
+
+    SEVERITY NOTE — this template reports three cases under one rating. `/actuator` alone is a
+    discovery finding and would be medium on its own; `/actuator/env` and `/actuator/heapdump` are
+    direct credential exposure and are high. Extending one template rather than splitting keeps a
+    host to a single finding, at the cost of rating a bare `/actuator` above what it deserves. The
+    reported path says which case it is. If that over-rating matters more than the deduplication,
+    the fix is to split this into two templates.
+
+    THE HEAP DUMP IS PROBED WITH HEAD, AND THAT IS A SAFETY DECISION, NOT A PREFERENCE. A heap dump
+    is the process's live memory — hundreds of megabytes containing credentials, session tokens and
+    customer data in the clear. `GET` would download all of it onto the scanner, which is Guardian
+    exfiltrating exactly what it is meant to warn about; the template validator also accepts
+    `max-size` without enforcing it, so there is no ceiling to fall back on. `HEAD` establishes that
+    the endpoint exists and is served, from the status and headers alone, without moving the bytes.
+
+    Evidence for this template is redacted in full — the `env` tag makes the loader mark it
+    automatically — so a match records that configuration was exposed without copying it into the
+    report.
+  remediation: |
+    Set `management.endpoints.web.exposure.include=health,info` and put the management port behind
+    authentication or a private network. Then rotate anything `/env` would have shown: it was
+    readable for as long as the endpoint was.
   classification:
     cwe-id: CWE-200
-  tags: exposure,springboot
+    cvss-score: 7.5
+  tags: exposure,springboot,env,secret
 http:
+  # Sensitive endpoints first: requests are OR with stop-at-first, so a host exposing `/env` is
+  # reported against that path rather than against the generic index.
+  - method: GET
+    path:
+      - "{{BaseURL}}/actuator/env"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      # `propertySources` is the actuator's own envelope. Matching it rather than any property name
+      # keeps an unrelated JSON document at this path from being reported as an env dump.
+      - type: word
+        part: body
+        words:
+          - '"propertySources"'
+  - method: HEAD
+    path:
+      - "{{BaseURL}}/actuator/heapdump"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      # Served-as-a-download is the signal, read from the headers a HEAD returns. A 200 with an HTML
+      # content type is a catch-all route, not a heap dump.
+      - type: regex
+        part: header
+        regex:
+          - '(?i)^content-(type|disposition):.*(octet-stream|heapdump)'
   - method: GET
     path:
       - "{{BaseURL}}/actuator"

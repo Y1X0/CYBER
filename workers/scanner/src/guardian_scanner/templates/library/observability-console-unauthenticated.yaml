@@ -1,0 +1,63 @@
+id: observability-console-unauthenticated
+info:
+  name: Grafana or Kibana answers an authenticated API without credentials
+  author: guardian
+  severity: high
+  description: |
+    An endpoint that these products serve ONLY to an authenticated caller answered an anonymous
+    request. That means dashboards, saved searches and the data behind them are readable by anyone
+    who can reach the host — and in Grafana's case the datasource list often names internal database
+    hosts and their usernames.
+
+    NO CREDENTIAL IS SUBMITTED BY THIS CHECK. It sends an ordinary GET with no Authorization header
+    and no cookie, and reads the status code. A 401 or 403 is the correct answer and produces
+    nothing; only a 200 with the product's own payload is reported. Submitting a password — even a
+    default one — would be an authentication attempt, which is a different act from detection and
+    not something a scan may do on a customer's behalf.
+
+    The paths are chosen for that reason. Grafana's `/api/health` and Kibana's `/api/status` answer
+    anonymously even on a correctly secured instance, so they prove nothing; `/api/org` and
+    `/api/spaces/space` are gated, so a 200 from them is the signal.
+  remediation: |
+    Grafana: set `[auth.anonymous] enabled = false` and put the instance behind SSO or a VPN.
+    Kibana: enable Elasticsearch security and require authentication. For both, treat any credential
+    stored in a datasource or connector as exposed and rotate it.
+  classification:
+    cwe-id: CWE-306
+    cvss-score: 7.5
+  tags: exposure,grafana,kibana,observability
+http:
+  # Grafana. `/api/org` returns the current organisation to an authenticated caller and 401 to
+  # everyone else — so a 200 carrying the org object means anonymous access is enabled.
+  - method: GET
+    path:
+      - "{{BaseURL}}/api/org"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: regex
+        part: body
+        regex:
+          - '"name"\s*:\s*".*?"'
+      - type: word
+        part: body
+        words:
+          - '"id"'
+  # Kibana. `/api/spaces/space` is gated behind security; an unsecured instance returns the space
+  # list. The `_reserved`/`disabledFeatures` keys are Kibana's own and do not appear elsewhere.
+  - method: GET
+    path:
+      - "{{BaseURL}}/api/spaces/space"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - '"disabledFeatures"'
+          - '"_reserved"'
+        condition: or

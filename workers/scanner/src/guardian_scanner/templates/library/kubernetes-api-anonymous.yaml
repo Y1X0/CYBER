@@ -1,0 +1,52 @@
+id: kubernetes-api-anonymous
+info:
+  name: Kubernetes API server answers anonymously
+  author: guardian
+  severity: high
+  description: |
+    The Kubernetes API server returned its resource list to an unauthenticated request. Discovery
+    alone tells an attacker the cluster version and which resources exist; where anonymous access
+    extends past discovery it reaches secrets, service accounts and pod exec, which is cluster
+    takeover rather than information disclosure.
+
+    THIS CHECK ONLY PROVES DISCOVERY IS ANONYMOUS. It requests `/api/v1` and reads the resource
+    catalogue — it does not enumerate resources, does not read secrets, and does not attempt to
+    escalate. Whether anonymous access goes further is exactly the question a human should answer
+    next, and it is not a question a scanner should answer by trying.
+
+    MANUAL STEP TO CONFIRM THE BLAST RADIUS: from an unauthenticated context run
+    `kubectl auth can-i --list`. If it returns more than the discovery verbs, this is critical
+    rather than high.
+
+    `/version` is deliberately not probed: many correctly secured clusters answer it anonymously by
+    design, so a match there would say nothing about authentication.
+  remediation: |
+    Set `--anonymous-auth=false` on the API server, or ensure the `system:anonymous` user and the
+    `system:unauthenticated` group hold no role bindings beyond discovery. The API server should not
+    be reachable from the public internet at all — put it behind a private endpoint or an allowlist.
+  classification:
+    cwe-id: CWE-306
+    cvss-score: 8.2
+  tags: exposure,kubernetes,api,misconfig
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/api/v1"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      # `APIResourceList` with `groupVersion: v1` is the API server's own discovery document. Both
+      # are required: the kind string alone appears in Kubernetes client fixtures and documentation
+      # that a web server might be hosting.
+      - type: word
+        part: body
+        words:
+          - '"kind":"APIResourceList"'
+          - '"kind": "APIResourceList"'
+        condition: or
+      - type: regex
+        part: body
+        regex:
+          - '"groupVersion"\s*:\s*"v1"'
