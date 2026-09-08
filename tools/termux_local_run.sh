@@ -76,14 +76,30 @@ say "packages"
 export DEBIAN_FRONTEND=noninteractive
 export DEBCONF_FRONTEND=noninteractive
 apt-get update -qq
-# postgresql's postinst tries to create and start a cluster through systemd, which does not exist
-# in proot, so it hangs. RUNLEVEL=1 plus a policy-rc.d that refuses service starts makes the
-# package install and stop there; the cluster is created and started by hand below, where a
-# failure is visible.
+# Two separate things hang a postgres install under proot, and both need disarming.
+#
+# 1. `dpkg-preconfigure` runs debconf BEFORE unpacking. postgresql's config script calls
+#    `pg_lsclusters`, which does not exist yet at that point, and the frontend then waits on input
+#    that never comes. Setting DEBIAN_FRONTEND is not enough and neither is
+#    `-o Dpkg::Pre-Install-Pkgs::=` — the script is invoked by a different path. Diverting the
+#    binary to /bin/true is what actually stops it.
+# 2. The postinst then tries to create and START a cluster through systemd, which proot does not
+#    have. A policy-rc.d returning 101 makes invoke-rc.d refuse, and the install continues. Seeing
+#    "policy-rc.d denied execution of start" in the output is this working, not failing.
+#
+# The cluster is created and started by hand below, where a failure is visible.
 printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d
-RUNLEVEL=1 apt-get install -y -qq --no-install-recommends \
+if [ ! -L /usr/sbin/dpkg-preconfigure ]; then
+  dpkg-divert --local --rename --add /usr/sbin/dpkg-preconfigure >/dev/null
+  ln -sf /bin/true /usr/sbin/dpkg-preconfigure
+fi
+# The `postgresql` metapackage pulls in more cluster machinery than is wanted here; the versioned
+# server package is the narrower dependency.
+PGPKG="$(apt-cache search '^postgresql-1[5-9]$' | awk '{print $1}' | sort -V | tail -1)"
+[ -n "$PGPKG" ] || PGPKG=postgresql
+apt-get install -y -qq --no-install-recommends \
     python3 python3-venv python3-dev build-essential \
-    postgresql redis-server git curl ca-certificates
+    "$PGPKG" redis-server git curl ca-certificates
 
 say "security tools (optional — engines report not_checked without them)"
 # Installed best-effort. A missing tool is a correct `not_checked`, never a false "clean", so a
