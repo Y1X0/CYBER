@@ -386,3 +386,113 @@ def test_batch1_crossdomain_fires_on_the_wildcard_only():
                 '</cross-domain-policy>')
     assert run_template(template, host="h", port=443, fetch=serve(wildcard))
     assert run_template(template, host="h", port=443, fetch=serve(specific)) == []
+
+
+# ── batch 2: header and cookie configuration signals ──────────────────────────────────────────────
+#
+# These are signals, not vulnerabilities, and the risk they carry is to the REPORT rather than to the
+# customer: a check that fires on every host trains people to skim. So the negative tests here are
+# about restraint — each asserts that a correctly configured host stays silent, which is what keeps
+# the signal worth reading.
+def _headers_only(status: int = 200, headers: dict | None = None, body: str = "<html></html>"):
+    def fetch(_method, _path, _request_headers):
+        return Response(status=status, headers={k.lower(): v for k, v in (headers or {}).items()},
+                        body=body)
+    return fetch
+
+
+def _run(template_id: str, fetch):
+    loaded, _ = load_directory(library_path())
+    template = next(t for t in loaded if t.id == template_id)
+    return run_template(template, host="h", port=443, fetch=fetch)
+
+
+def test_batch2_cors_needs_both_headers_not_either():
+    """A wildcard alone is a normal public API. Credentials with a named origin is correct.
+
+    Only the pair is the signal, so either header on its own must stay silent.
+    """
+    both = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Credentials": "true"}
+    assert _run("cors-wildcard-with-credentials", _headers_only(headers=both))
+
+    assert _run("cors-wildcard-with-credentials",
+                _headers_only(headers={"Access-Control-Allow-Origin": "*"})) == []
+    assert _run("cors-wildcard-with-credentials", _headers_only(headers={
+        "Access-Control-Allow-Origin": "https://app.example.com",
+        "Access-Control-Allow-Credentials": "true"})) == []
+
+
+def test_batch2_cookie_fires_only_when_both_attributes_are_absent():
+    assert _run("insecure-cookie-attributes",
+                _headers_only(headers={"Set-Cookie": "sid=abc123; Path=/"}))
+
+    # Either attribute present is enough to stay silent — deliberately conservative.
+    for good in ("sid=abc123; Path=/; Secure", "sid=abc123; Path=/; HttpOnly",
+                 "sid=abc123; Secure; HttpOnly; SameSite=Lax"):
+        assert _run("insecure-cookie-attributes",
+                    _headers_only(headers={"Set-Cookie": good})) == [], good
+
+    # No cookie at all is not a cookie problem.
+    assert _run("insecure-cookie-attributes", _headers_only(headers={})) == []
+
+
+def test_batch2_cookie_named_secure_does_not_suppress_the_finding():
+    """`__Secure-sid` contains the word `secure`. Matching the bare word rather than the attribute
+    form would silently drop a real finding — a false negative, which is the worse direction."""
+    assert _run("insecure-cookie-attributes",
+                _headers_only(headers={"Set-Cookie": "__Secure-sid=abc123; Path=/"}))
+
+
+def test_batch2_version_disclosure_needs_a_version_not_a_product_name():
+    """`Server: nginx` names a product. `Server: nginx/1.24.0` is what a CVE lookup can use.
+
+    Without this distinction the template fires on essentially every HTTP response there is.
+    """
+    assert _run("server-version-disclosure", _headers_only(headers={"Server": "nginx/1.24.0"}))
+    assert _run("server-version-disclosure", _headers_only(headers={"X-Powered-By": "PHP/8.1.2"}))
+
+    for quiet in ("nginx", "cloudflare", "Apache"):
+        assert _run("server-version-disclosure",
+                    _headers_only(headers={"Server": quiet})) == [], quiet
+
+
+def test_batch2_version_disclosure_captures_the_version_as_an_attribute():
+    """The point of recording this at `info` is that the version feeds the vulnerability feed."""
+    detections = _run("server-version-disclosure",
+                      _headers_only(headers={"Server": "nginx/1.24.0"}))
+    assert detections[0].extracted.get("server") == ("nginx/1.24.0",)
+
+
+def test_batch2_clickjacking_fires_only_when_both_controls_are_absent():
+    assert _run("clickjacking-protection-missing", _headers_only(headers={}))
+
+    assert _run("clickjacking-protection-missing",
+                _headers_only(headers={"X-Frame-Options": "DENY"})) == []
+    assert _run("clickjacking-protection-missing", _headers_only(headers={
+        "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'"})) == []
+
+
+def test_batch2_signals_are_never_above_low():
+    """The report-flooding guard, asserted rather than trusted to review.
+
+    These are configuration signals. If one is ever raised to medium or higher it stops being
+    context beside the findings and becomes an item on someone's remediation list.
+    """
+    loaded, _ = load_directory(library_path())
+    signals = {"cors-wildcard-with-credentials", "insecure-cookie-attributes",
+               "server-version-disclosure", "clickjacking-protection-missing",
+               "missing-security-headers"}
+    for template in loaded:
+        if template.id in signals:
+            assert template.severity.value in {"info", "low"}, (template.id, template.severity)
+
+
+def test_batch2_every_signal_template_states_it_is_not_a_vulnerability():
+    """Each carries the caveat and the manual step in its own description, because the description
+    is what reaches the customer's report — a caveat that lives only in review does not travel."""
+    loaded, _ = load_directory(library_path())
+    for template in loaded:
+        if template.id in {"cors-wildcard-with-credentials", "insecure-cookie-attributes",
+                           "server-version-disclosure", "clickjacking-protection-missing"}:
+            text = template.description.upper()
+            assert "NOT A" in text and "MANUAL STEP" in text, template.id

@@ -1,0 +1,55 @@
+id: server-version-disclosure
+info:
+  name: Server software version disclosed in headers
+  author: guardian
+  severity: info
+  description: |
+    A response header names the server software AND its version — `Server: nginx/1.24.0`,
+    `X-Powered-By: PHP/8.1.2` or similar.
+
+    THIS IS A CONFIGURATION SIGNAL, NOT A VULNERABILITY. Hiding the version does not patch anything,
+    and an attacker can usually fingerprint the stack by behaviour regardless. It is recorded at
+    `info` for two concrete reasons: the version is the input a CVE lookup needs, so it is worth
+    capturing as an attribute of the host; and suppressing it is a single directive, which makes it
+    one of the cheapest reductions in automated-scanning noise a team can make.
+
+    EXPECT THIS ON MOST HOSTS. nginx and Apache emit the version by default, so this fires on a
+    large share of targets. It is `info` precisely so that it lands as context beside the findings
+    rather than as an item on the remediation list — if it is drowning a report, suppress the whole
+    template rather than fixing it host by host.
+
+    MANUAL STEP TO CONFIRM THAT IT MATTERS: take the disclosed version to the vulnerability feed. A
+    version behind on published CVEs turns this from housekeeping into a real finding, and that
+    lookup — not this template — is where the severity would come from.
+  remediation: |
+    nginx: `server_tokens off;`. Apache: `ServerTokens Prod` and `ServerSignature Off`. PHP:
+    `expose_php = Off`. Then keep patching, which is the part that actually matters.
+  classification:
+    cwe-id: CWE-200
+  tags: misconfig,headers,fingerprint
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      # A dotted version NUMBER is required, not merely the header. `Server: nginx` and
+      # `Server: cloudflare` are not disclosures — they name a product without saying which build,
+      # which is the whole difference between fingerprinting and a CVE lookup. Requiring `\d+\.\d+`
+      # is what keeps this from firing on essentially every HTTP response in existence.
+      - type: regex
+        part: header
+        regex:
+          - '(?im)^(server|x-powered-by|x-aspnet-version|x-generator):\s*\S*?\d+\.\d+'
+    extractors:
+      - type: kval
+        name: server
+        kval:
+          - server
+      - type: kval
+        name: powered_by
+        kval:
+          - x-powered-by

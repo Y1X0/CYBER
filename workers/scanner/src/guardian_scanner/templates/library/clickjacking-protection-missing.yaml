@@ -1,0 +1,52 @@
+id: clickjacking-protection-missing
+info:
+  name: No framing protection (X-Frame-Options and frame-ancestors both absent)
+  author: guardian
+  severity: low
+  description: |
+    The response carries neither `X-Frame-Options` nor a CSP `frame-ancestors` directive, so any
+    site may load this page in an iframe. Where the page has an authenticated action behind a click,
+    that is clickjacking: the victim's click lands on this application while they believe they are
+    using another.
+
+    THIS IS A CONFIGURATION SIGNAL, NOT A CONFIRMED VULNERABILITY. Framing is only a weakness if the
+    framed page does something worth hijacking. A static marketing page is framable and
+    uninteresting; an admin console with a one-click destructive action is not.
+
+    Distinct from `missing-security-headers`, which reports the absence of CSP as a whole and is
+    remediated by introducing a policy. This one is remediated by one directive and stays relevant
+    where a CSP already exists but omits `frame-ancestors`. Both will report on a host that sends no
+    CSP at all; they are separate because the fixes are separate.
+
+    MANUAL STEP TO CONFIRM: frame the page and look at what a click can reach. An authenticated
+    state-changing action reachable in the frame makes this a real finding.
+  remediation: |
+    Send `Content-Security-Policy: frame-ancestors 'none'` (or an explicit allowlist), and
+    `X-Frame-Options: DENY` alongside it for clients that predate CSP.
+  classification:
+    cwe-id: CWE-1021
+  tags: misconfig,headers,clickjacking
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      # Both controls must be absent. A host that sets either one has made the decision, and
+      # reporting it would be reporting a preference rather than a gap — `frame-ancestors` inside a
+      # CSP is the modern spelling and fully replaces the older header.
+      - type: word
+        part: header
+        words:
+          - "x-frame-options"
+        case-insensitive: true
+        negative: true
+      - type: word
+        part: header
+        words:
+          - "frame-ancestors"
+        case-insensitive: true
+        negative: true

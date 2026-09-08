@@ -1,0 +1,55 @@
+id: insecure-cookie-attributes
+info:
+  name: Cookie set without Secure or HttpOnly
+  author: guardian
+  severity: low
+  description: |
+    The response sets a cookie and the cookie carries neither `Secure` nor `HttpOnly`. Without
+    `Secure` it will be sent over plaintext HTTP if anything ever downgrades the connection; without
+    `HttpOnly` any script on the page can read it, which is what turns an XSS into a session
+    takeover rather than a defacement.
+
+    THIS IS A CONFIGURATION SIGNAL, NOT A CONFIRMED VULNERABILITY. Guardian does not know what the
+    cookie is for. A consent banner's preference cookie has no session value and legitimately needs
+    to be readable from script; a session identifier with these attributes missing is a genuine
+    weakness. The distinction is in what the cookie holds, which is not visible from the outside.
+
+    MANUAL STEP TO CONFIRM: identify the cookie's purpose. If it carries a session, an auth token or
+    anything that identifies the user, treat this as a real finding and set both attributes plus
+    `SameSite`.
+  remediation: |
+    Set `Secure; HttpOnly; SameSite=Lax` on session cookies, and narrow to `SameSite=Strict` where
+    no cross-site navigation needs the cookie.
+  classification:
+    cwe-id: CWE-1004
+  tags: misconfig,cookie,headers
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: regex
+        part: header
+        regex:
+          - '(?im)^set-cookie:'
+      # BOTH attributes must be absent before this fires. Requiring both is deliberately
+      # conservative: it under-reports a cookie that has one and not the other, and that direction
+      # is the right one to be wrong in for a signal this common.
+      #
+      # The attribute form is matched (`; secure`), not the bare word: "secure" appears in cookie
+      # NAMES — `__Secure-sid` is in the tests — and matching it there would silently suppress a
+      # real finding, which is the worse direction to be wrong in.
+      - type: regex
+        part: header
+        regex:
+          - '(?i);\s*secure\b'
+        negative: true
+      - type: regex
+        part: header
+        regex:
+          - '(?i);\s*httponly\b'
+        negative: true
