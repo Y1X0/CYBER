@@ -1,0 +1,53 @@
+id: database-admin-console-exposure
+info:
+  name: Database administration console reachable
+  author: guardian
+  severity: medium
+  description: |
+    phpMyAdmin or Adminer is reachable from this host. The console is a full database client behind
+    one password: it is a standing brute-force target, and both tools have a history of
+    pre-authentication remote code execution, so an unpatched instance is a direct route to the
+    data.
+
+    This reports a console that ANSWERS, not a console that let us in — no credential is submitted,
+    because that would be an authentication attempt rather than detection. Severity is medium for
+    that reason: the exposure is real and worth closing, but it is not evidence of access.
+  remediation: |
+    Put the console behind the VPN or an authenticating proxy, or remove it and administer the
+    database over a private network path. If it must stay, keep it patched and rate-limited.
+  classification:
+    cwe-id: CWE-284
+    cvss-score: 5.3
+  tags: exposure,database,console,misconfig
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/phpmyadmin/"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      # The login form's own field name, not the product name. "phpMyAdmin" appears in
+      # documentation, changelogs and hosting control panels; `pma_username` appears in the form
+      # that accepts a password.
+      - type: regex
+        part: body
+        regex:
+          - '(?i)name=["'']?pma_(username|password)'
+          - '(?i)phpmyadmin\.css\.php'
+        condition: or
+  - method: GET
+    path:
+      - "{{BaseURL}}/adminer.php"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      # Same principle: Adminer's login inputs are named auth[...]. Matching the bare word "Adminer"
+      # would fire on any page that links to it.
+      - type: regex
+        part: body
+        regex:
+          - '(?i)name=["'']?auth\[(server|username|password|db|driver)\]'

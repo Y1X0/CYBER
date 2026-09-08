@@ -1,0 +1,50 @@
+id: hg-bzr-metadata-exposure
+info:
+  name: Exposed Mercurial or Bazaar metadata
+  author: guardian
+  severity: medium
+  description: |
+    A Mercurial or Bazaar working copy is deployed under the document root. The metadata names the
+    upstream repository and, where the object store is also served, the full history is retrievable
+    — including files deleted in later commits, which is where credentials usually survive.
+    Companion to `svn-entries-exposure`, which covers Subversion; the three stay separate templates
+    so a finding names the version-control system actually present.
+  remediation: |
+    Block /.hg/ and /.bzr/ at the web server and stop deploying working-copy metadata — export or
+    build an artefact rather than checking out into the served directory.
+  classification:
+    cwe-id: CWE-527
+    cvss-score: 5.3
+  tags: exposure,mercurial,bazaar,vcs
+http:
+  # Two requests, OR semantics: the first that matches stops the template, so a host running either
+  # system produces one finding rather than two.
+  - method: GET
+    path:
+      - "{{BaseURL}}/.hg/hgrc"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      # An hgrc is INI. Requiring one of Mercurial's own section names is what separates a real
+      # config from a 200-for-everything host or a soft-404 HTML page, which is the dominant false
+      # positive for any dot-directory probe.
+      - type: regex
+        part: body
+        regex:
+          - '(?m)^\s*\[(paths|ui|extensions|web|hooks)\]'
+  - method: GET
+    path:
+      - "{{BaseURL}}/.bzr/branch-format"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      # branch-format holds a single fixed line, e.g. "Bazaar-NG meta directory, format 1". Anchored
+      # at the start so an HTML page that merely mentions Bazaar cannot satisfy it.
+      - type: regex
+        part: body
+        regex:
+          - '^Bazaar'

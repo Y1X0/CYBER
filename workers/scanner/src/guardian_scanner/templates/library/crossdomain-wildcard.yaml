@@ -1,0 +1,37 @@
+id: crossdomain-wildcard
+info:
+  name: crossdomain.xml allows every origin
+  author: guardian
+  severity: medium
+  description: |
+    The Flash/Silverlight cross-domain policy at /crossdomain.xml grants access to every domain.
+    A client honouring this policy will read authenticated responses from this host on behalf of any
+    site, which is a same-origin bypass for anything that still consumes it.
+
+    Modern browsers no longer run the plugins that read this file, so the practical reach is
+    narrower than it once was; what keeps it worth reporting is that the file is still honoured by
+    some SDKs and legacy clients, and that its presence with a wildcard is almost always an
+    unreviewed leftover rather than a decision.
+  remediation: |
+    Delete /crossdomain.xml unless a specific legacy client requires it. If it is required, replace
+    the wildcard with the exact domains that need access.
+  classification:
+    cwe-id: CWE-942
+    cvss-score: 5.3
+  tags: misconfig,cors,crossdomain
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/crossdomain.xml"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      # The wildcard is required in the match. A crossdomain.xml that names specific domains is a
+      # correctly configured policy and must not be reported — matching the filename alone would
+      # turn every deliberate policy into a finding.
+      - type: regex
+        part: body
+        regex:
+          - '(?i)<allow-access-from\s+domain\s*=\s*["'']\*["'']'

@@ -12,9 +12,45 @@ info:
     cvss-score: 7.5
   tags: exposure,backup,secret
 http:
+  # Three filenames, one finding. The requests are OR — the first that matches stops the template —
+  # so a host with several of these produces one finding rather than three of the same thing.
+  # Every one requires SQL in the body: a 200 at the path proves a file exists, not that it is a
+  # database, and soft-404 pages that return 200 for everything are the usual false positive.
   - method: GET
     path:
       - "{{BaseURL}}/backup.sql"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - "CREATE TABLE"
+          - "INSERT INTO"
+          - "MySQL dump"
+          - "PostgreSQL database dump"
+        condition: or
+  - method: GET
+    path:
+      - "{{BaseURL}}/dump.sql"
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: word
+        part: body
+        words:
+          - "CREATE TABLE"
+          - "INSERT INTO"
+          - "MySQL dump"
+          - "PostgreSQL database dump"
+        condition: or
+  - method: GET
+    path:
+      - "{{BaseURL}}/db.sql"
     matchers-condition: and
     matchers:
       - type: status

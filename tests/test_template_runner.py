@@ -172,6 +172,26 @@ class _Fixture(http.server.BaseHTTPRequestHandler):
         # perfectly ordinary page at the same path. A scanner that fires on the path alone is
         # reporting a URL, not a finding.
         "/phpinfo.php": (200, "<html><body>Nothing to see</body></html>", {}),
+
+        # ── batch 1 ──────────────────────────────────────────────────────────────────────────────
+        "/.hg/hgrc": (200, "[paths]\ndefault = https://hg.example.com/app\n", {}),
+        "/dump.sql": (200, "-- MySQL dump 10.13\nCREATE TABLE users (id int);\n", {}),
+        "/phpmyadmin/": (200, '<form><input name="pma_username" /></form>', {}),
+        "/.npmrc": (200, "//registry.npmjs.org/:_authToken=npm_liveTokenValue1234567890\n", {}),
+        "/crossdomain.xml": (
+            200,
+            '<?xml version="1.0"?><cross-domain-policy>'
+            '<allow-access-from domain="*" /></cross-domain-policy>',
+            {"Content-Type": "text/xml"}),
+
+        # Decoys: the path exists and returns 200, but the artefact is not the vulnerable one.
+        # Each of these is the false positive its template is written to avoid.
+        "/.bzr/branch-format": (200, "<html><body>Bazaar is a version control system</body></html>",
+                                {}),
+        "/db.sql": (200, "<html><body>File not found, sorry</body></html>", {}),
+        "/adminer.php": (200, "<html><body>We use Adminer to manage the database</body></html>",
+                         {}),
+        "/.pypirc": (200, "[distutils]\nindex-servers =\n    pypi\n", {}),
     }
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's interface
@@ -240,6 +260,11 @@ def test_the_library_detects_real_exposures_over_a_real_socket(fixture_server):
         "spring-actuator-exposure",
         "prometheus-metrics-exposure",
         "missing-security-headers",   # the fixture sends no CSP
+        "hg-bzr-metadata-exposure",
+        "backup-archive-exposure",     # via /dump.sql, which the template gained in batch 1
+        "database-admin-console-exposure",
+        "credential-file-exposure",
+        "crossdomain-wildcard",
     } <= fired
 
 
@@ -256,10 +281,108 @@ def test_absent_paths_produce_nothing(fixture_server):
     """Every 404 route must stay silent — otherwise a scan of an empty server produces findings."""
     loaded, _ = load_directory(library_path())
     fetch = _live_fetch(fixture_server)
+    # `backup-archive-exposure` left this set in batch 1: the fixture now serves a real dump at
+    # /dump.sql, so its paths are no longer all absent and it is asserted positively above instead.
     absent = [t for t in loaded
-              if t.id in {"backup-archive-exposure", "docker-compose-exposure",
+              if t.id in {"docker-compose-exposure",
                           "elasticsearch-open", "jenkins-unauthenticated",
                           "wordpress-debug-log", "svn-entries-exposure", "swagger-ui-exposure"}]
     assert absent
     for template in absent:
         assert run_template(template, host="127.0.0.1", port=fixture_server, fetch=fetch) == []
+
+
+# ── batch 1: one positive and one negative per template ───────────────────────────────────────────
+#
+# The negative half is the point. Every template here probes a path that plenty of hosts answer with
+# 200 — a soft-404, a documentation page, a config file with no secret in it — so "the path exists"
+# and "the finding is real" are different claims. Each decoy below is the specific false positive
+# its template was written to refuse, served at the very path the template asks for.
+def test_batch1_hg_metadata_fires_and_a_page_mentioning_bazaar_does_not(fixture_server):
+    """/.hg/hgrc is a real INI; /.bzr/branch-format is an HTML page that says the word Bazaar.
+
+    The template matches `^Bazaar` anchored at the start of the body, so prose cannot satisfy it.
+    Firing there would mean the check reads paths rather than content.
+    """
+    loaded, _ = load_directory(library_path())
+    template = next(t for t in loaded if t.id == "hg-bzr-metadata-exposure")
+    detections = run_template(template, host="127.0.0.1", port=fixture_server,
+                              fetch=_live_fetch(fixture_server), stop_at_first=False)
+    assert [d.path for d in detections] == ["/.hg/hgrc"]
+
+
+def test_batch1_sql_dump_fires_on_sql_and_not_on_a_soft_404(fixture_server):
+    """/dump.sql carries a real dump; /db.sql returns 200 with an HTML "not found" page.
+
+    Soft 404s are the dominant false positive for filename probes: the status says 200 and the body
+    says otherwise. The body is what decides.
+    """
+    loaded, _ = load_directory(library_path())
+    template = next(t for t in loaded if t.id == "backup-archive-exposure")
+    detections = run_template(template, host="127.0.0.1", port=fixture_server,
+                              fetch=_live_fetch(fixture_server), stop_at_first=False)
+    paths = [d.path for d in detections]
+    assert "/dump.sql" in paths
+    assert "/db.sql" not in paths
+
+
+def test_batch1_admin_console_fires_on_a_login_form_not_on_a_mention(fixture_server):
+    """/phpmyadmin/ serves the login input; /adminer.php merely names the product in prose.
+
+    Matching the product name would report every page that documents its own tooling.
+    """
+    loaded, _ = load_directory(library_path())
+    template = next(t for t in loaded if t.id == "database-admin-console-exposure")
+    detections = run_template(template, host="127.0.0.1", port=fixture_server,
+                              fetch=_live_fetch(fixture_server), stop_at_first=False)
+    paths = [d.path for d in detections]
+    assert "/phpmyadmin/" in paths
+    assert "/adminer.php" not in paths
+
+
+def test_batch1_credential_file_fires_on_a_token_not_on_bare_config(fixture_server):
+    """/.npmrc carries an _authToken; /.pypirc has an index-servers stanza and no password.
+
+    A dotfile without a credential in it is configuration, not a credential exposure.
+    """
+    loaded, _ = load_directory(library_path())
+    template = next(t for t in loaded if t.id == "credential-file-exposure")
+    detections = run_template(template, host="127.0.0.1", port=fixture_server,
+                              fetch=_live_fetch(fixture_server), stop_at_first=False)
+    paths = [d.path for d in detections]
+    assert "/.npmrc" in paths
+    assert "/.pypirc" not in paths
+
+
+def test_batch1_credential_evidence_is_redacted_in_full(fixture_server):
+    """The npm token is in the fixture body. It must not reach the finding."""
+    loaded, _ = load_directory(library_path())
+    template = next(t for t in loaded if t.id == "credential-file-exposure")
+    assert template.redact_evidence is True
+    detections = run_template(template, host="127.0.0.1", port=fixture_server,
+                              fetch=_live_fetch(fixture_server))
+    assert detections
+    for detection in detections:
+        assert detection.snippet == "<redacted>"
+        assert "npm_liveTokenValue" not in detection.snippet
+
+
+def test_batch1_crossdomain_fires_on_the_wildcard_only():
+    """A policy naming specific domains is correct configuration and must stay silent.
+
+    Served from memory rather than the fixture because the distinction is one attribute value, and
+    the two policies cannot both live at /crossdomain.xml.
+    """
+    loaded, _ = load_directory(library_path())
+    template = next(t for t in loaded if t.id == "crossdomain-wildcard")
+
+    def serve(body: str):
+        def fetch(_method, _path, _headers):
+            return Response(status=200, headers={"content-type": "text/xml"}, body=body)
+        return fetch
+
+    wildcard = '<cross-domain-policy><allow-access-from domain="*" /></cross-domain-policy>'
+    specific = ('<cross-domain-policy><allow-access-from domain="app.example.com" />'
+                '</cross-domain-policy>')
+    assert run_template(template, host="h", port=443, fetch=serve(wildcard))
+    assert run_template(template, host="h", port=443, fetch=serve(specific)) == []
