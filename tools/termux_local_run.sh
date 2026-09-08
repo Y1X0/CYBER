@@ -161,9 +161,16 @@ PGDATA=/var/lib/postgresql/guardian
 # The probe is a real query as the real role, not a port check. A port that accepts TCP proves
 # something is listening, not that this application can log in — and "I could not check" must
 # never be recorded as "it is fine".
+#
+# -w, </dev/null and PGCONNECT_TIMEOUT together are what stop this check hanging. psql writes its
+# password prompt to /dev/tty, not to stderr, so redirecting stderr hides the question while psql
+# waits on the answer forever. That is a check with no failure path, which is exactly what
+# ADR-027 forbids — and it is the third time this file has grown one. -w makes psql fail instead
+# of asking, </dev/null denies it a terminal to read from, and the timeout bounds the connect.
 PG_EXTERNAL=0
-if PGPASSWORD=guardian "$PGBIN/psql" -h 127.0.0.1 -U guardian -d guardian -tAc 'SELECT 1' \
-     >/dev/null 2>&1; then
+if PGPASSWORD=guardian PGCONNECT_TIMEOUT=5 \
+     "$PGBIN/psql" -w -h 127.0.0.1 -U guardian -d guardian -tAc 'SELECT 1' \
+     </dev/null >/dev/null 2>&1; then
   PG_EXTERNAL=1
   echo "  using the PostgreSQL already answering on 127.0.0.1:5432"
 fi
@@ -234,9 +241,10 @@ fi  # end of the locally-created cluster
 # reached precisely because logging in as `guardian` already worked — but it still has to prove
 # the migration can write, and that is a stronger claim than "the login succeeded". A role with
 # no CREATE right on the database would pass the probe above and fail on migration 0001.
-PGPASSWORD=guardian "$PGBIN/psql" -h 127.0.0.1 -U guardian -d guardian -tAc \
+PGPASSWORD=guardian PGCONNECT_TIMEOUT=5 "$PGBIN/psql" -w -h 127.0.0.1 -U guardian -d guardian -tAc \
   'CREATE TABLE IF NOT EXISTS guardian_local_preflight(x int); DROP TABLE guardian_local_preflight;' \
-  >/dev/null || fail "Connected to PostgreSQL as 'guardian' but could not create a table in it."
+  </dev/null >/dev/null \
+  || fail "Connected to PostgreSQL as 'guardian' but could not create a table in it."
 echo "  database ready"
 
 say "queue"
