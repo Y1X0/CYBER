@@ -145,6 +145,30 @@ say "database"
 PGBIN="/usr/lib/postgresql/$(ls /usr/lib/postgresql | sort -V | tail -1)/bin"
 PGDATA=/var/lib/postgresql/guardian
 [ -x "$PGBIN/pg_ctl" ] || fail "PostgreSQL did not install: $PGBIN/pg_ctl is missing."
+
+# ── reuse a server that is already listening, before trying to start one ──────────────────────
+# On Android this is the only path that works, and it is not a workaround for proot. PostgreSQL
+# needs one small System V shared-memory segment as a startup interlock — 56 bytes, not
+# configurable away — and Android blocks SysV IPC at the sandbox level, so `shmget` fails with
+# EIO. proot translates paths and permissions; it cannot supply a syscall the kernel refuses.
+# Installing an older PostgreSQL does not help: the failure is in the kernel, not the version.
+#
+# Termux's own `postgresql` package is built for Android and uses mmap shared memory instead, so
+# it starts where the Ubuntu build cannot. proot-distro does not create a network namespace, so a
+# process inside the container reaches that server on the same 127.0.0.1. Verified end to end:
+# psql from inside the container authenticates as `guardian` against the Termux server.
+#
+# The probe is a real query as the real role, not a port check. A port that accepts TCP proves
+# something is listening, not that this application can log in — and "I could not check" must
+# never be recorded as "it is fine".
+PG_EXTERNAL=0
+if PGPASSWORD=guardian "$PGBIN/psql" -h 127.0.0.1 -U guardian -d guardian -tAc 'SELECT 1' \
+     >/dev/null 2>&1; then
+  PG_EXTERNAL=1
+  echo "  using the PostgreSQL already answering on 127.0.0.1:5432"
+fi
+
+if [ "$PG_EXTERNAL" = 0 ]; then
 mkdir -p "$PGDATA"
 chown -R postgres:postgres "$PGDATA"
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
@@ -158,8 +182,31 @@ if [ ! -f "$PGDATA/PG_VERSION" ]; then
   #
   # Output goes to a log rather than /dev/null. Silencing it is what made this look like a hang.
   echo "  creating cluster (first run only)"
-  su postgres -c "$PGBIN/initdb -D $PGDATA -A trust --no-sync" > /tmp/initdb.log 2>&1 \
-    || { echo; tail -20 /tmp/initdb.log; fail "initdb failed — log above."; }
+  if ! su postgres -c "$PGBIN/initdb -D $PGDATA -A trust --no-sync" > /tmp/initdb.log 2>&1; then
+    echo; tail -20 /tmp/initdb.log; echo
+    # Name the one cause that has a different remedy from every other initdb failure, and name it
+    # only when the log actually says so rather than assuming it from the platform.
+    if grep -q shmget /tmp/initdb.log; then
+      cat <<'MSG'
+That is the Android sandbox refusing System V shared memory, which PostgreSQL requires for a
+56-byte startup interlock. No PostgreSQL version and no setting avoids it. Run the server from
+bare Termux instead, where the package is built against mmap shared memory, and leave Guardian
+here — proot shares Termux's loopback, so the two reach each other on 127.0.0.1.
+
+In a Termux shell, outside this container:
+
+    pkg install -y postgresql
+    initdb -D ~/pgdata -A trust
+    pg_ctl -D ~/pgdata -l ~/pg.log -o "-c listen_addresses=127.0.0.1" start
+    createuser -h 127.0.0.1 -s guardian
+    createdb -h 127.0.0.1 -O guardian guardian
+    psql -h 127.0.0.1 -d guardian -c "ALTER ROLE guardian WITH PASSWORD 'guardian';"
+
+Then re-run this script. It detects that server and skips creating its own.
+MSG
+    fi
+    fail "initdb failed."
+  fi
 fi
 # pg_ctl's own failure is tolerated here only because "already running" is a normal re-run outcome
 # that must not stop the script. Its output is kept, not discarded: if the server never comes up,
@@ -181,6 +228,15 @@ su postgres -c "$PGBIN/psql -h 127.0.0.1 -lqtA" | cut -d'|' -f1 | grep -qx guard
   || su postgres -c "$PGBIN/createdb -h 127.0.0.1 -O guardian guardian"
 su postgres -c "$PGBIN/psql -h 127.0.0.1 -c \"ALTER ROLE guardian WITH PASSWORD 'guardian';\"" \
   >/dev/null
+fi  # end of the locally-created cluster
+
+# One assertion for both paths. The external branch has no role or database to create — it was
+# reached precisely because logging in as `guardian` already worked — but it still has to prove
+# the migration can write, and that is a stronger claim than "the login succeeded". A role with
+# no CREATE right on the database would pass the probe above and fail on migration 0001.
+PGPASSWORD=guardian "$PGBIN/psql" -h 127.0.0.1 -U guardian -d guardian -tAc \
+  'CREATE TABLE IF NOT EXISTS guardian_local_preflight(x int); DROP TABLE guardian_local_preflight;' \
+  >/dev/null || fail "Connected to PostgreSQL as 'guardian' but could not create a table in it."
 echo "  database ready"
 
 say "queue"
