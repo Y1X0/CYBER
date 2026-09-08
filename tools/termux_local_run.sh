@@ -71,10 +71,19 @@ fi
 command -v apt-get >/dev/null || fail "This script expects a Debian/Ubuntu userland (apt-get)."
 
 say "packages"
+# noninteractive AND a null debconf frontend: proot has no dialog and the Readline fallback will
+# sit waiting for input that never comes, which is what a hang here looks like.
 export DEBIAN_FRONTEND=noninteractive
+export DEBCONF_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv python3-dev build-essential \
-                      postgresql redis-server git curl ca-certificates
+# postgresql's postinst tries to create and start a cluster through systemd, which does not exist
+# in proot, so it hangs. RUNLEVEL=1 plus a policy-rc.d that refuses service starts makes the
+# package install and stop there; the cluster is created and started by hand below, where a
+# failure is visible.
+printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d && chmod +x /usr/sbin/policy-rc.d
+RUNLEVEL=1 apt-get install -y -qq --no-install-recommends \
+    python3 python3-venv python3-dev build-essential \
+    postgresql redis-server git curl ca-certificates
 
 say "security tools (optional — engines report not_checked without them)"
 # Installed best-effort. A missing tool is a correct `not_checked`, never a false "clean", so a
@@ -99,16 +108,41 @@ else
 fi
 
 say "database"
-service postgresql start || pg_ctlcluster "$(ls /etc/postgresql | head -1)" main start || true
-sleep 3
-su - postgres -c "psql -c \"SELECT 1 FROM pg_roles WHERE rolname='guardian'\"" | grep -q 1 \
-  || su - postgres -c "createuser -s guardian"
-su - postgres -c "psql -lqt" | cut -d'|' -f1 | grep -qw guardian \
-  || su - postgres -c "createdb -O guardian guardian"
-su - postgres -c "psql -c \"ALTER ROLE guardian WITH PASSWORD 'guardian';\"" >/dev/null
+# Debian's cluster tooling (service / pg_ctlcluster) goes through systemd, so this drives pg_ctl
+# directly against a data directory we own. An earlier version ended these lines with `|| true`,
+# which swallowed the failure and left the migration to fail later with a confusing "connection
+# refused" — a step that cannot report its own failure, which is the thing ADR-027 forbids. It
+# now verifies with pg_isready and stops here, with the log, if the server is not actually up.
+PGBIN="/usr/lib/postgresql/$(ls /usr/lib/postgresql | sort -V | tail -1)/bin"
+PGDATA=/var/lib/postgresql/guardian
+[ -x "$PGBIN/pg_ctl" ] || fail "PostgreSQL did not install: $PGBIN/pg_ctl is missing."
+mkdir -p "$PGDATA" && chown -R postgres:postgres "$PGDATA" /var/log 2>/dev/null || true
+if [ ! -f "$PGDATA/PG_VERSION" ]; then
+  su postgres -c "$PGBIN/initdb -D $PGDATA -A trust" >/dev/null
+fi
+su postgres -c "$PGBIN/pg_ctl -D $PGDATA -l /tmp/pg.log -o '-c listen_addresses=127.0.0.1' start" \
+  >/dev/null 2>&1 || true
+for _ in $(seq 1 20); do
+  su postgres -c "$PGBIN/pg_isready -h 127.0.0.1" >/dev/null 2>&1 && break
+  sleep 1
+done
+su postgres -c "$PGBIN/pg_isready -h 127.0.0.1" >/dev/null 2>&1 \
+  || { echo; tail -20 /tmp/pg.log 2>/dev/null; fail "PostgreSQL did not start — log above."; }
+echo "  postgres up"
+
+su postgres -c "$PGBIN/psql -h 127.0.0.1 -tAc \"SELECT 1 FROM pg_roles WHERE rolname='guardian'\"" \
+  | grep -q 1 || su postgres -c "$PGBIN/createuser -h 127.0.0.1 -s guardian"
+su postgres -c "$PGBIN/psql -h 127.0.0.1 -lqtA" | cut -d'|' -f1 | grep -qx guardian \
+  || su postgres -c "$PGBIN/createdb -h 127.0.0.1 -O guardian guardian"
+su postgres -c "$PGBIN/psql -h 127.0.0.1 -c \"ALTER ROLE guardian WITH PASSWORD 'guardian';\"" \
+  >/dev/null
+echo "  database ready"
 
 say "queue"
-service redis-server start || redis-server --daemonize yes --port 6379 || true
+redis-server --daemonize yes --port 6379 --save '' >/dev/null 2>&1 || true
+for _ in $(seq 1 10); do redis-cli ping 2>/dev/null | grep -q PONG && break; sleep 1; done
+redis-cli ping 2>/dev/null | grep -q PONG || fail "Redis did not start."
+echo "  redis up"
 
 say "python environment"
 cd "$(dirname "$0")/.."
