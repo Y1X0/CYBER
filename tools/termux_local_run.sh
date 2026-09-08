@@ -145,18 +145,34 @@ say "database"
 PGBIN="/usr/lib/postgresql/$(ls /usr/lib/postgresql | sort -V | tail -1)/bin"
 PGDATA=/var/lib/postgresql/guardian
 [ -x "$PGBIN/pg_ctl" ] || fail "PostgreSQL did not install: $PGBIN/pg_ctl is missing."
-mkdir -p "$PGDATA" && chown -R postgres:postgres "$PGDATA" /var/log 2>/dev/null || true
+mkdir -p "$PGDATA"
+chown -R postgres:postgres "$PGDATA"
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
-  su postgres -c "$PGBIN/initdb -D $PGDATA -A trust" >/dev/null
+  # --no-sync, and the reason is proot rather than impatience. initdb ends by fsync'ing every file
+  # it just wrote; each fsync crosses proot's syscall-translation boundary onto phone storage, so
+  # that final step alone runs for many minutes with nothing on screen. What --no-sync gives up is
+  # durability of the *initial* cluster against a machine crash during initdb itself: if the phone
+  # died mid-run the cluster could be corrupt and would need recreating. For a throwaway local
+  # cluster that is the right trade; it would not be on a server, and this script only ever runs
+  # under GUARDIAN_ENV=local.
+  #
+  # Output goes to a log rather than /dev/null. Silencing it is what made this look like a hang.
+  echo "  creating cluster (first run only)"
+  su postgres -c "$PGBIN/initdb -D $PGDATA -A trust --no-sync" > /tmp/initdb.log 2>&1 \
+    || { echo; tail -20 /tmp/initdb.log; fail "initdb failed — log above."; }
 fi
+# pg_ctl's own failure is tolerated here only because "already running" is a normal re-run outcome
+# that must not stop the script. Its output is kept, not discarded: if the server never comes up,
+# the reason is often in what pg_ctl said rather than in the server log it never got to write.
 su postgres -c "$PGBIN/pg_ctl -D $PGDATA -l /tmp/pg.log -o '-c listen_addresses=127.0.0.1' start" \
-  >/dev/null 2>&1 || true
+  > /tmp/pgctl.log 2>&1 || true
 for _ in $(seq 1 20); do
   su postgres -c "$PGBIN/pg_isready -h 127.0.0.1" >/dev/null 2>&1 && break
   sleep 1
 done
 su postgres -c "$PGBIN/pg_isready -h 127.0.0.1" >/dev/null 2>&1 \
-  || { echo; tail -20 /tmp/pg.log 2>/dev/null; fail "PostgreSQL did not start — log above."; }
+  || { echo; tail -20 /tmp/pgctl.log 2>/dev/null; tail -20 /tmp/pg.log 2>/dev/null
+       fail "PostgreSQL did not start — logs above."; }
 echo "  postgres up"
 
 su postgres -c "$PGBIN/psql -h 127.0.0.1 -tAc \"SELECT 1 FROM pg_roles WHERE rolname='guardian'\"" \
