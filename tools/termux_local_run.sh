@@ -351,17 +351,37 @@ pkill -f 'guardian_api.main:app' 2>/dev/null || true
 celery -A guardian_scanner.celery_app.celery_app worker \
   --queues default --concurrency 1 --loglevel INFO > worker.log 2>&1 &
 uvicorn guardian_api.main:app --host 127.0.0.1 --port 8000 > api.log 2>&1 &
+API_PID=$!
 
-sleep 8
-if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+# A fixed `sleep 8` was declaring the API dead while it was still importing. On a phone CPU the
+# application graph takes far longer than that to load, and api.log was empty not because the
+# process failed but because it had not got as far as its first line.
+#
+# Polling alone would only trade a false failure for a long wait on a process that really is dead,
+# so each round also checks the process is still alive. That is the difference between "not ready
+# yet" and "gone", and they need different answers.
+echo "  waiting for the API to come up (up to 3 minutes on a phone)"
+api_up=0
+for _i in $(seq 1 60); do
+  if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then api_up=1; break; fi
+  if ! kill -0 "$API_PID" 2>/dev/null; then
+    echo; echo "The API process exited. Its log:"; echo
+    tail -30 api.log
+    fail "uvicorn died during startup — log above."
+  fi
+  sleep 3
+done
+
+if [ "$api_up" = 1 ]; then
   printf '\n\033[1;32mGuardian is running.\033[0m\n\n'
   printf '  Console   http://127.0.0.1:8000/docs\n'
   printf '  Login     admin@example.com / ChangeMe123!\n'
   printf '  Logs      tail -f api.log worker.log\n'
   printf '  Stop      pkill -f guardian_api.main ; pkill -f guardian_scanner\n\n'
+  printf 'Keep this session open. Both processes are children of this shell, so closing the\n'
+  printf 'container session stops them.\n\n'
 else
-  printf '\n\033[1;31mThe API did not answer /health.\033[0m The settings validator names the exact\n'
-  printf 'malformed value and declines to run half-configured, so the reason is in the log:\n\n'
-  printf '  tail -30 api.log\n\n'
+  printf '\n\033[1;31mThe API is alive but never answered /health in 3 minutes.\033[0m\n\n'
+  tail -30 api.log
   exit 1
 fi
