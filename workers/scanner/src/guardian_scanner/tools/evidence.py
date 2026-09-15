@@ -15,10 +15,14 @@ import hashlib
 import json
 import uuid
 
+from guardian_common.logging import get_logger
+from guardian_core.redaction import scrub as _value_scrub
 from guardian_core.tool import RawEvidence, evidence_to_wire
 from guardian_db.models import EvidenceItem
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+
+log = get_logger("guardian.tools.evidence")
 
 # Keys never persisted or hashed into evidence (defense in depth; a secret is not proof).
 _SENSITIVE_KEYS = ("secret", "credential", "password", "passwd", "token", "api_key",
@@ -35,11 +39,27 @@ def _scrub(value):  # noqa: ANN001, ANN201
     return value
 
 
-def _canonical(evidence: RawEvidence) -> str:
+def _canonical(evidence: RawEvidence) -> tuple[str, list[str]]:
+    """Return (canonical JSON, redaction hits).
+
+    Two passes, because they catch different failures. `_scrub` drops keys whose NAME is sensitive
+    (`password`, `token`, …) — the value never appears at all. But a provider can also place a
+    credential in a benignly-named field: gitleaks reports the secret VALUE in `Match`, which no
+    key-name check would catch, and the DB and UI read straight from this canonical content. So a
+    second, value-based pass (`guardian_core.redaction.scrub`) masks anything credential-SHAPED —
+    AWS keys, GitHub/Slack/Stripe tokens, JWTs, PEM private keys, `password=` assignments — wherever
+    it sits. The egress scrubber already did this before anything reached the model or a webhook;
+    this closes the same gap at persistence, so the raw value never lands in `evidence_items` or the
+    console in the first place.
+
+    A hit here is a provider defect (it tried to persist a raw credential), so the hits are returned
+    to be logged, never silently swallowed.
+    """
     wire = evidence_to_wire(evidence)
     wire["data"] = _scrub(wire.get("data") or {})
     wire["provenance"] = _scrub(wire.get("provenance") or {})
-    return json.dumps(wire, sort_keys=True, separators=(",", ":"))
+    redacted, hits = _value_scrub(wire)
+    return json.dumps(redacted, sort_keys=True, separators=(",", ":")), hits
 
 
 def _hash(prev_hash: str, canonical: str) -> str:
@@ -69,7 +89,13 @@ def persist_evidence_chain(
     prev = _latest_hash(session, tenant_id)
     ids: list[uuid.UUID] = []
     for e in sorted(evidences, key=_order_key):
-        canonical = _canonical(e)
+        canonical, hits = _canonical(e)
+        if hits:
+            # A credential value reached persistence in a non-sensitively-named field. It has been
+            # masked, so nothing leaks — but the provider should never have emitted it, so record
+            # the defect with the tool and target (never the value) for follow-up.
+            log.warning("evidence_credential_redacted_at_persist",
+                        tool=e.tool, target=e.target, kind=e.kind, patterns=sorted(set(hits)))
         digest = _hash(prev or "", canonical)
         item = EvidenceItem(
             tenant_id=tenant_id, finding_id=None, kind=e.kind[:30] or "tool",
