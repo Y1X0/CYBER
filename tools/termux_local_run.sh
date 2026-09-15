@@ -392,19 +392,38 @@ say "web interface"
 # product is usable through them; a missing web interface is a smaller, clearly-stated loss.
 WEB_UP=0
 cd apps/web
-if ! command -v npm >/dev/null 2>&1; then
-  echo "  installing node and npm"
+
+# The container's own node, by absolute path, and a PATH with Termux's bin removed. Termux's node
+# is on PATH in here and was the one that ran: it identifies its platform as `android`, so npm
+# resolved rollup's optional native dependency to @rollup/rollup-android-arm64, and Android's
+# linker then refused to dlopen that .node from a path outside the app's namespace:
+#
+#   dlopen failed: .../rollup.android-arm64.node ... is not accessible for the namespace "(default)"
+#
+# Ubuntu's node reports `linux` and gets rollup-linux-arm64-gnu, which loads normally. The two are
+# not interchangeable here, so the choice is made explicitly rather than left to PATH order.
+NODE_PATH_CLEAN=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+NPM_BIN=/usr/bin/npm
+if [ ! -x "$NPM_BIN" ] || [ ! -x /usr/bin/node ]; then
+  echo "  installing node and npm into the container"
   apt-get install -y -qq --no-install-recommends nodejs npm || true
 fi
-if ! command -v npm >/dev/null 2>&1; then
-  echo "  npm is not available — skipping the web interface, the API and worker are unaffected"
+if [ ! -x "$NPM_BIN" ] || [ ! -x /usr/bin/node ]; then
+  echo "  the container has no node — skipping the web interface, the API and worker are unaffected"
 else
-  echo "  node $(node -v), npm $(npm -v)"
+  echo "  node $(/usr/bin/node -v), npm $(env PATH=$NODE_PATH_CLEAN $NPM_BIN -v)"
+  # A tree installed by Termux's node holds android-only binaries that the container's node cannot
+  # load. Detect that specific state and clear it, rather than leaving a run to fail on dlopen.
+  if [ -d node_modules/@rollup/rollup-android-arm64 ]; then
+    echo "  clearing node_modules installed for the android platform"
+    rm -rf node_modules
+  fi
   echo "  installing web dependencies — slow on a phone, and it prints as it goes"
   # `npm install`, not `npm ci`: ci deletes node_modules and refetches everything on every run,
   # which on a phone is minutes thrown away for no gain on a local demo.
-  if npm install --no-audit --no-fund; then
-    npm run dev -- --host 127.0.0.1 --port 5173 > ../../web.log 2>&1 &
+  if env PATH="$NODE_PATH_CLEAN" "$NPM_BIN" install --no-audit --no-fund; then
+    env PATH="$NODE_PATH_CLEAN" "$NPM_BIN" run dev -- --host 127.0.0.1 --port 5173 \
+      > ../../web.log 2>&1 &
     WEB_PID=$!
     echo "  waiting for the dev server"
     for _i in $(seq 1 40); do
