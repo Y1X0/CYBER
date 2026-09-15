@@ -6,6 +6,17 @@
 // expired" or "the database is unreachable" — which is the single most dangerous thing security
 // software can do.
 
+// Where the control plane lives.
+//
+// Empty by default, which keeps every request same-origin — that is what the Vite dev server's
+// /api proxy expects locally, and what a deployment serving the SPA and the API from one host
+// expects too. It is only set when the two are on different hosts, as they are on Render's free
+// tier, where the SPA is a static site and the API is a web service.
+//
+// Build-time rather than runtime on purpose: a static site has no server to inject configuration,
+// and a value baked into the bundle cannot drift from the deployment that built it.
+const API_BASE: string = (import.meta.env.VITE_API_BASE ?? "").replace(/\/+$/, "");
+
 let token: string | null = localStorage.getItem("guardian_token");
 
 export function getToken(): string | null {
@@ -51,7 +62,8 @@ async function raw(path: string, opts: RequestInit = {}): Promise<Response> {
   if (token) headers.Authorization = `Bearer ${token}`;
   let resp: Response;
   try {
-    resp = await fetch(`/api/v1${path}`, { ...opts, headers: { ...headers, ...opts.headers } });
+    resp = await fetch(`${API_BASE}/api/v1${path}`,
+                       { ...opts, headers: { ...headers, ...opts.headers } });
   } catch (e) {
     // A network failure is a state the customer must see, not an empty list.
     throw new ApiError(0, `Could not reach Guardian: ${(e as Error).message}`);
@@ -413,7 +425,7 @@ export const api = {
   createReport: (scan_id: string, title: string) =>
     req<Report>("/reports", { method: "POST", body: JSON.stringify({ scan_id, title }) }),
   reportExportUrl: (id: string, format: string) =>
-    `/api/v1/reports/${id}/export?format=${format}`,
+    `${API_BASE}/api/v1/reports/${id}/export?format=${format}`,
   async downloadReport(id: string, format: string): Promise<Blob> {
     const resp = await raw(`/reports/${id}/export?format=${format}`);
     return resp.blob();
