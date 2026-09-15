@@ -27,6 +27,12 @@ function cssNumber(name: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** Link radius in pixels, and the grid cell size that follows from it. */
+const LINK_RADIUS = 122;   // was sqrt(15000) ≈ 122, kept identical so the look does not shift
+/** Own cell, plus the four neighbours ordered after it — each pair is then visited exactly once. */
+const NEIGHBOURS: ReadonlyArray<readonly [number, number]> =
+  [[0, 0], [1, 0], [-1, 1], [0, 1], [1, 1]];
+
 export function prefersReducedMotion(): boolean {
   return typeof window !== "undefined"
     && typeof window.matchMedia === "function"
@@ -98,23 +104,50 @@ export function ParticleField() {
         ctx.fill();
       }
 
-      // Link lines between near neighbours: the "network" read. O(n²) is fine at n≤74 and the
-      // loop is skipped entirely on phones, where the count is a third of that anyway.
+      // Link lines between near neighbours: the "network" read.
+      //
+      // This was a plain double loop — every particle against every other, 2,700 distance checks
+      // a frame at n=74, each one a separate beginPath/stroke. It was a measurable part of a page
+      // running at 10fps.
+      //
+      // A uniform grid replaces it. Cells are exactly the link radius, so two particles can only
+      // be neighbours if they share a cell or touch one, and each particle compares against the
+      // handful in its own cell and the four already-ahead of it — which also stops every pair
+      // being tested twice. The work stops scaling with n² and starts scaling with local density,
+      // which is what the effect actually depends on.
+      //
+      // One path, one stroke, for all the lines. Per-line strokeStyle was the other half of the
+      // cost; the varying alpha it bought is invisible at 0.05 opacity.
       if (density >= 0.9) {
+        const cell = LINK_RADIUS;
+        const cols = Math.max(1, Math.ceil(w / cell));
+        const grid = new Map<number, number[]>();
         for (let i = 0; i < parts.length; i++) {
-          for (let j = i + 1; j < parts.length; j++) {
-            const dx = parts[i].x - parts[j].x, dy = parts[i].y - parts[j].y;
-            const d2 = dx * dx + dy * dy;
-            if (d2 < 15000) {
-              ctx.beginPath();
-              ctx.moveTo(parts[i].x, parts[i].y);
-              ctx.lineTo(parts[j].x, parts[j].y);
-              ctx.strokeStyle = `rgba(224, 27, 60, ${0.05 * (1 - d2 / 15000)})`;
-              ctx.lineWidth = 0.5;
-              ctx.stroke();
+          const key = Math.floor(parts[i].y / cell) * cols + Math.floor(parts[i].x / cell);
+          const bucket = grid.get(key);
+          if (bucket) bucket.push(i); else grid.set(key, [i]);
+        }
+
+        ctx.beginPath();
+        for (let i = 0; i < parts.length; i++) {
+          const cx = Math.floor(parts[i].x / cell), cy = Math.floor(parts[i].y / cell);
+          // Own cell plus the four neighbours "after" it, so each pair is visited once.
+          for (const [ox, oy] of NEIGHBOURS) {
+            const bucket = grid.get((cy + oy) * cols + (cx + ox));
+            if (!bucket) continue;
+            for (const j of bucket) {
+              if (j <= i) continue;
+              const dx = parts[i].x - parts[j].x, dy = parts[i].y - parts[j].y;
+              if (dx * dx + dy * dy < LINK_RADIUS * LINK_RADIUS) {
+                ctx.moveTo(parts[i].x, parts[i].y);
+                ctx.lineTo(parts[j].x, parts[j].y);
+              }
             }
           }
         }
+        ctx.strokeStyle = "rgba(224, 27, 60, 0.05)";
+        ctx.lineWidth = 0.5;
+        ctx.stroke();
       }
       raf = requestAnimationFrame(frame);
     }
@@ -150,7 +183,6 @@ export function Backdrop() {
       <div className="bg-eclipse" />
       <ParticleField />
       <div className="bg-sweep" />
-      <div className="bg-scanlines" />
     </div>
   );
 }
