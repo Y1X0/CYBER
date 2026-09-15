@@ -4,7 +4,45 @@
 > لما نقول "ابدأ"، يكون كل قرار متّخذ مسبقاً. مبنية على الإطار الموجود فعلاً في المشروع، مش على
 > فراغ.
 
-Status: planning. Nothing here is built by this document. It is the map the build follows.
+Status: **Phase A in progress.** This document is the map; the section below records what the build
+has actually shipped against it, so "planned" and "built" never blur.
+
+---
+
+## Phase A — shipped (offline, L0, runs on the current free host)
+
+Every item below is merged on `claude/security-guardian-architecture-p1315d`, tested, and passing the
+licence gate. The invariant behind all of them: **a tool that did not run never renders as "clean".**
+An engine with a complete built-in detector is never "degraded"; an engine whose tool is its only
+detector reports `degraded` when the tool is absent, and `verification.engine_outcome` turns that
+silence into INCONCLUSIVE (never RESOLVED), so an unscanned asset can never resolve a real finding.
+
+| Capability | How it landed | Built-in fallback? | New domain? |
+|---|---|---|---|
+| **gitleaks** | additional backend in `SecretsEngine` | yes (patterns + entropy + git history) | no — widens secrets |
+| **checkov** | additional backend in `IacEngine` | yes (built-in IaC rules) | no — widens IaC |
+| **osv-scanner** | additional backend in `ScaEngine` | yes (built-in lockfile parser) | no — widens SCA ecosystems |
+| **modelscan** | new `ML_MODEL` engine | **no** — modelscan is the only detector, so it is `degraded` when absent | **yes** — malicious code in serialized ML models (pickle/PyTorch/TF/Keras/ONNX) |
+| **CI/CD security** | new `CICD` engine | yes (self-contained YAML analysis; never degraded) | **yes** — GitHub Actions script injection, poisoned `pull_request_target`, unpinned actions, `write-all` tokens, `curl\|bash`, public self-hosted runners |
+
+Two genuinely new detection domains (ML supply chain, CI/CD supply chain) plus three ecosystem
+widenings of existing engines. The three tool-backed engines each follow the same contract: additive,
+no-op when the binary is absent, failure logged and the scan continues, output bounded, secret values
+scrubbed before persistence, deterministic tests that mock `shutil.which`/`subprocess.run`.
+
+**Deliberately NOT added, and why:** further SCA/SAST/secret tool wraps (trivy fs, grype, bandit)
+would mostly re-report what gitleaks/osv/semgrep already find. Cross-engine duplicate findings are
+worse UX, not more coverage, so breadth now goes to *new domains*, not overlapping tools.
+
+**Biggest remaining value unlocks** (each a separate, deliberate decision — not started here):
+1. **Turn on the AI Analyst** — the seam is built and safe (writes only `ai_explanation`/`remediation`
+   on existing rows, guarded against prompt injection, deterministic offline stub). It needs only
+   `ANTHROPIC_API_KEY` at deploy. This is the "AI that helps find/explain vulns" the brief asked for.
+2. **Compliance mapping** — map existing findings to NIST 800-53 / CIS / PCI-DSS / ISO 27001 / SOC 2.
+   Pure enrichment over findings (no duplicate findings); the single highest-value feature for
+   government / university / enterprise procurement.
+3. **Active network layer (L2+)** — nmap/DAST/port scanning. Needs a second host with `CAP_NET_ADMIN`
+   and human authorization; tied to BLOCKER-1. A separate decision, not a free-host item.
 
 ---
 
