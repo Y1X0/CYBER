@@ -200,7 +200,7 @@ export function Bars({ series, colors }:
               className="bar-fill"
               style={{
                 width: `${(s.value / max) * 100}%`,
-                background: colors?.[s.key] ?? "#4a6fa5",
+                background: colors?.[s.key] ?? "var(--crimson-dim)",
               }}
             />
           </span>

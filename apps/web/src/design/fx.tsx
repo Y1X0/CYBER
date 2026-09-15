@@ -387,9 +387,17 @@ export function TargetingCursor() {
     let rx = x, ry = y;
     let raf = 0;
 
+    let revealed = false;
     const onMove = (e: PointerEvent) => {
+      if (!revealed) {
+        revealed = true;
+        ring.current?.classList.add("live");
+        dot.current?.classList.add("live");
+      }
       x = e.clientX; y = e.clientY;
-      if (dot.current) dot.current.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+      if (dot.current) {
+        dot.current.style.transform = `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%)`;
+      }
       const hot = (e.target as HTMLElement | null)?.closest(
         "button, a, input, select, textarea, [role='button'], .nav-item, .chain-card");
       ring.current?.classList.toggle("hot", !!hot);
@@ -398,7 +406,9 @@ export function TargetingCursor() {
     const frame = () => {
       rx += (x - rx) * 0.19;
       ry += (y - ry) * 0.19;
-      if (ring.current) ring.current.style.transform = `translate3d(${rx}px, ${ry}px, 0)`;
+      if (ring.current) {
+        ring.current.style.transform = `translate3d(${rx}px, ${ry}px, 0) translate(-50%, -50%)`;
+      }
       raf = requestAnimationFrame(frame);
     };
 
