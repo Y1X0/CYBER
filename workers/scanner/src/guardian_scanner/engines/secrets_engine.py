@@ -1,8 +1,10 @@
 """Reference engine: hardcoded-secret detection (SAST/secrets family).
 
-Self-contained (no external binary) so it works out of the box as the Phase 1 vertical-slice
-engine and in CI. It walks a workspace for text files and flags likely secrets via named patterns
-plus a Shannon-entropy heuristic for assignments to secret-looking identifiers.
+Self-contained by default (no external binary) so it works out of the box in CI and on any host. It
+walks a workspace for text files and flags likely secrets via named patterns plus a Shannon-entropy
+heuristic for assignments to secret-looking identifiers. When the **gitleaks** binary is present it
+is run as an ADDITIONAL backend (its maintained ruleset merged in, the same way SastEngine wraps
+semgrep) — additive, never a precondition, so the engine is complete with or without it.
 
 Evidence is ALWAYS redacted — the raw secret is never persisted (doc 06 §6).
 
@@ -15,10 +17,12 @@ external tool, so it adds no binary and no licence question.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import shutil
 import subprocess  # noqa: S404 - fixed argv, no shell, bounded
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -27,6 +31,19 @@ from guardian_core.enums import EngineKey, Severity
 from guardian_core.findings import RawFinding
 
 from guardian_scanner.engines.base import EngineHealth, ScanContext
+
+# gitleaks (MIT, APPROVED in docs/TOOL_LICENSES.md) is used as an ADDITIONAL detection backend when
+# the binary is present — thousands of maintained rules, merged rather than reimplemented, the
+# same way SastEngine wraps semgrep. It is additive, not a precondition: the built-in patterns,
+# entropy and history are a complete detector on their own, so the engine is never "degraded"
+# without gitleaks (unlike SAST, where the community ruleset is coverage the built-in genuinely
+# lacks). When gitleaks is present it finds more; when absent the built-in still fully checks.
+# Bounded so a huge repo degrades rather than hangs.
+_GITLEAKS_TIMEOUT = 300
+_GITLEAKS_MAX_FINDINGS = 1000
+# gitleaks reports a rule id but no severity. A private key is categorically worse than a generic
+# high-entropy hit, so it is raised; everything else a secret scanner emits is HIGH by nature.
+_GITLEAKS_CRITICAL_RULES = ("private-key", "rsa", "ssh", "pgp", "pkcs")
 
 # (name, compiled pattern, base severity)
 _PATTERNS: list[tuple[str, re.Pattern[str], Severity]] = [
@@ -139,7 +156,14 @@ class SecretsEngine:
         return asset_kind in {"repo", "container_image", "k8s_manifest"}
 
     def health(self) -> EngineHealth:
-        return EngineHealth(ok=True, detail="builtin, no external dependencies")
+        # Built-in detection is complete on its own, so the engine is never degraded — gitleaks
+        # only adds rules. The detail reports whether it augmented, so a scan stays legible after.
+        has_gitleaks = bool(shutil.which("gitleaks"))
+        return EngineHealth(
+            ok=True,
+            detail=("builtin patterns + entropy + git history"
+                    + (" + gitleaks ruleset" if has_gitleaks else " (gitleaks absent)")),
+        )
 
     def run(self, ctx: ScanContext) -> Iterable[RawFinding]:
         if ctx.inline_content is not None:
@@ -167,6 +191,91 @@ class SecretsEngine:
             rel = str(path.relative_to(root))
             yield from self._scan_text(rel, text)
         yield from self._scan_history(root, ctx)
+        yield from self._run_gitleaks_if_available(root)
+
+    def _run_gitleaks_if_available(self, root: Path) -> Iterable[RawFinding]:
+        """Wrap gitleaks when installed. No-op otherwise, so CI and the built-in path are unchanged.
+
+        gitleaks is invoked with `--redact`, so it masks the secret in its OWN output before we ever
+        read it — and we mask again with `_redact` and never carry the raw `Match` into a finding.
+        Two independent redactions on top of the persistence-layer value-scrub: a secret gitleaks
+        found must never become a secret Guardian stored.
+        """
+        exe = shutil.which("gitleaks")
+        if not exe:
+            return
+        has_git = (root / ".git").exists()
+        with tempfile.NamedTemporaryFile("r+", suffix=".json", delete=True) as report:
+            argv = [exe, "detect", "--source", str(root), "--report-format", "json",
+                    "--report-path", report.name, "--redact", "--no-banner", "--exit-code", "0"]
+            if not has_git:
+                argv.append("--no-git")   # a plain directory, not a repo — scan the tree
+            try:
+                subprocess.run(  # noqa: S603 - fixed argv, no shell, bounded
+                    argv, capture_output=True, timeout=_GITLEAKS_TIMEOUT, check=False)
+                report.seek(0)
+                data = json.loads(report.read() or "[]")
+            except (subprocess.SubprocessError, OSError, ValueError) as exc:
+                # gitleaks is installed but did not answer. The built-in detector still ran, so this
+                # is reduced coverage rather than a failed scan — but it must not be silent: fewer
+                # findings from a crashed tool looks exactly like a cleaner repository.
+                log.warning("secrets_gitleaks_failed", error=f"{type(exc).__name__}: {exc}"[:200])
+                return
+        if not isinstance(data, list):
+            log.warning("secrets_gitleaks_unexpected_output", kind=type(data).__name__)
+            return
+        emitted: set[tuple[str, str, int]] = set()
+        for item in data[:_GITLEAKS_MAX_FINDINGS]:
+            if not isinstance(item, dict):
+                continue
+            finding = self._gitleaks_finding(item)
+            if finding is None:
+                continue
+            dedup = (finding.location.get("rule", ""), finding.location.get("path", ""),
+                     int(finding.location.get("line") or 0))
+            if dedup in emitted:
+                continue
+            emitted.add(dedup)
+            yield finding
+
+    def _gitleaks_finding(self, item: dict) -> RawFinding | None:
+        rule = str(item.get("RuleID") or "").strip()
+        path = str(item.get("File") or "").strip()
+        if not rule or not path:
+            return None
+        line = item.get("StartLine")
+        commit = str(item.get("Commit") or "").strip()[:12]
+        # gitleaks with --redact already masked the value; mask again defensively and NEVER read the
+        # raw `Match`. The redacted `Secret` field is all that reaches evidence.
+        redacted = _redact(str(item.get("Secret") or ""))
+        low = rule.lower()
+        severity = (Severity.CRITICAL if any(k in low for k in _GITLEAKS_CRITICAL_RULES)
+                    else Severity.HIGH)
+        description = str(item.get("Description") or f"gitleaks rule {rule}").strip()[:400]
+        location = {"path": path, "line": line, "rule": rule}
+        if commit:
+            location["commit"] = commit
+            location["source"] = "gitleaks-history"
+            description = (f"{description} Found in commit {commit}; it remains retrievable from "
+                           "history even if later removed, so the credential must be rotated.")
+        else:
+            location["source"] = "gitleaks"
+        return RawFinding(
+            engine=EngineKey.SECRETS,
+            title=f"Hardcoded secret: {description[:80]}" if description else f"Secret: {rule}",
+            category="secret",
+            description=description,
+            base_severity=severity,
+            confidence="high",   # gitleaks rules are precise; above the built-in entropy guess
+            cwe_id="CWE-798",
+            owasp_ref="A07:2021",
+            location=location,
+            evidence={"match": redacted, "detector": "gitleaks", "rule": rule},
+            references={
+                "cwe": "https://cwe.mitre.org/data/definitions/798.html",
+                "gitleaks": f"https://github.com/gitleaks/gitleaks (rule: {rule})",
+            },
+        )
 
     def _scan_history(self, root: Path, ctx: ScanContext) -> Iterable[RawFinding]:
         """Scan lines ADDED by past commits.
