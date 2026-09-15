@@ -1,0 +1,62 @@
+# Keep the deployed control plane awake.
+#
+# WHAT THIS DOES AND, MORE IMPORTANTLY, WHAT IT DOES NOT.
+#
+# It issues one unauthenticated GET to /health every ten minutes. That is the whole job. It never
+# starts a scan, never dispatches a worker, never touches a customer asset, and holds no secret —
+# it cannot, because /health needs no credential and returns no tenant data.
+#
+# This file has a schedule, and `guardian-burst-worker.yml` deliberately does not, so the
+# distinction has to be explicit rather than assumed. A schedule that can begin active security
+# testing against real hosts must never exist: nobody should discover their systems were probed
+# because a cron fired. A schedule that sends one HTTP request to our own health endpoint carries
+# none of that risk. The rule was never "no cron"; it was "nothing may start a scan on its own".
+#
+# WHY IT EXISTS. Render's free plan stops the instance after fifteen minutes of no traffic. The
+# next request waits thirty to fifty seconds for a cold start — and in a browser it does not even
+# wait, because the holding page Render serves while starting carries no CORS headers, so the
+# console's fetch is rejected outright and the user sees "Failed to fetch". Keeping the instance
+# warm removes the failure rather than explaining it.
+#
+# COST. Roughly 4,300 runs a month at a few seconds each, well inside the free Actions allowance,
+# and it keeps the service inside Render's 750 free instance-hours (one always-on service is ~730).
+#
+# TO STOP IT: disable the workflow in the Actions tab, or delete this file. Nothing depends on it.
+
+name: Guardian Keep-Alive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+# Read-only. This workflow has no reason to touch the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: guardian-keepalive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Wake the control plane
+        env:
+          URL: https://guardian-api-s1jd.onrender.com/health
+        run: |
+          set -uo pipefail
+          # --max-time 90 because a cold start legitimately takes most of a minute; a shorter
+          # timeout would report the wake-up as a failure and teach us to ignore this job.
+          code="$(curl -sS -o /tmp/body -w '%{http_code}' --max-time 90 "$URL" || echo 000)"
+          echo "GET /health -> ${code}"
+          head -c 300 /tmp/body || true
+          echo
+          # A non-200 is reported, not swallowed. A keep-alive that cannot fail tells us the
+          # service is up whether or not it is, which is worse than having no keep-alive.
+          if [ "$code" != "200" ]; then
+            echo "::error::/health answered ${code} — the control plane is not serving."
+            exit 1
+          fi

@@ -66,7 +66,16 @@ async function raw(path: string, opts: RequestInit = {}): Promise<Response> {
                        { ...opts, headers: { ...headers, ...opts.headers } });
   } catch (e) {
     // A network failure is a state the customer must see, not an empty list.
-    throw new ApiError(0, `Could not reach Guardian: ${(e as Error).message}`);
+    //
+    // The browser's own words for this are "Failed to fetch", which names the API that failed
+    // rather than what happened. On a host that sleeps when idle — a free tier, a scale-to-zero
+    // deployment — the commonest cause by far is that the control plane is cold and the holding
+    // page it serves while starting carries no CORS headers, so the request is rejected before
+    // any status exists to report. That reads identically to "the server is gone", and the two
+    // need different responses from the person reading it.
+    throw new ApiError(0,
+      "Could not reach the control plane. If it has been idle it may be starting up — this can "
+      + `take up to a minute on a sleeping instance. Try again shortly. (${(e as Error).message})`);
   }
   if (!resp.ok) throw new ApiError(resp.status, reason(resp.status, await resp.text()));
   return resp;

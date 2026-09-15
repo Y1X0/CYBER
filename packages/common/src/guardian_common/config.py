@@ -197,6 +197,18 @@ class Settings(BaseSettings):
     bootstrap_tenant: str = "Acme Security"
     bootstrap_admin_email: str = "admin@example.com"
     bootstrap_admin_password: str = _DEFAULT_BOOTSTRAP_PASSWORD
+    # Account recovery, off by default and never implied.
+    #
+    # The seed creates the bootstrap admin and then leaves the password alone forever, which is
+    # correct: a deploy must not silently revert a password its owner changed. That also means an
+    # operator who loses the bootstrap password has no way back in, and on a managed host with no
+    # shell there is no back door either — which is how this flag came to exist, after the seed ran
+    # with one value and the environment was changed to another sixteen seconds later.
+    #
+    # It is deliberately a separate switch rather than "reset whenever the value differs": the
+    # latter cannot tell a deliberate rotation from a redeploy, so it would undo a user-chosen
+    # password on every restart. Set it, deploy once, then remove it.
+    bootstrap_admin_reset: bool = False
 
     # AI analyst (Phase 3). With no API key the platform uses the deterministic stub provider.
     anthropic_api_key: str = ""

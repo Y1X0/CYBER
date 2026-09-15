@@ -120,6 +120,17 @@ def seed() -> None:
             )
             db.add(user)
             db.flush()
+        elif settings.bootstrap_admin_reset:
+            # Only ever on an explicit flag, and it says so in the log. A password reset that
+            # happens quietly is indistinguishable from a compromise in an audit trail, so this
+            # one announces itself with the account it touched.
+            user.password_hash = hash_password(settings.bootstrap_admin_password)
+            log.warning(
+                "bootstrap_admin_password_reset",
+                email=email,
+                note="GUARDIAN_BOOTSTRAP_ADMIN_RESET was set; remove it so the next deploy "
+                     "does not overwrite a password chosen since.",
+            )
         membership = (
             db.query(TenantMembership)
             .filter(TenantMembership.user_id == user.id, TenantMembership.tenant_id == tenant.id)
