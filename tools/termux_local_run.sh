@@ -404,12 +404,32 @@ cd apps/web
 # not interchangeable here, so the choice is made explicitly rather than left to PATH order.
 NODE_PATH_CLEAN=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 NPM_BIN=/usr/bin/npm
-if [ ! -x "$NPM_BIN" ] || [ ! -x /usr/bin/node ]; then
+if [ ! -x /usr/bin/node ]; then
   echo "  installing node and npm into the container"
   apt-get install -y -qq --no-install-recommends nodejs npm || true
 fi
-if [ ! -x "$NPM_BIN" ] || [ ! -x /usr/bin/node ]; then
-  echo "  the container has no node — skipping the web interface, the API and worker are unaffected"
+
+# Ubuntu's node is fine; Ubuntu's npm is not. Debian debundles npm's vendored dependencies and the
+# 9.2.0 package is missing one, so every invocation dies with
+#   Cannot find module '/usr/share/node_modules/glob/dist/cjs/src/index.js'
+# The published npm tarball carries its dependencies inside it, so fetching that and running it
+# with the distribution's node gives a working npm without touching the packaged one. The check is
+# an actual `npm -v`, not the presence of the file — the broken npm exists, it just cannot run.
+if [ -x /usr/bin/node ] && ! env PATH="$NODE_PATH_CLEAN" "$NPM_BIN" -v >/dev/null 2>&1; then
+  echo "  the packaged npm cannot run — fetching npm from the registry"
+  rm -rf /opt/npm && mkdir -p /opt/npm
+  if curl -fsSL https://registry.npmjs.org/npm/-/npm-10.9.2.tgz \
+       | tar -xz -C /opt/npm --strip-components=1; then
+    printf '#!/bin/sh\nexec /usr/bin/node /opt/npm/bin/npm-cli.js "$@"\n' > /usr/local/bin/npm-real
+    chmod +x /usr/local/bin/npm-real
+    NPM_BIN=/usr/local/bin/npm-real
+  else
+    echo "  could not fetch npm"
+  fi
+fi
+
+if [ ! -x /usr/bin/node ] || ! env PATH="$NODE_PATH_CLEAN" "$NPM_BIN" -v >/dev/null 2>&1; then
+  echo "  no working npm — skipping the web interface, the API and worker are unaffected"
 else
   echo "  node $(/usr/bin/node -v), npm $(env PATH=$NODE_PATH_CLEAN $NPM_BIN -v)"
   # A tree installed by Termux's node holds android-only binaries that the container's node cannot
