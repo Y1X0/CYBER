@@ -142,9 +142,21 @@ say "database"
 # which swallowed the failure and left the migration to fail later with a confusing "connection
 # refused" — a step that cannot report its own failure, which is the thing ADR-027 forbids. It
 # now verifies with pg_isready and stops here, with the log, if the server is not actually up.
-PGBIN="/usr/lib/postgresql/$(ls /usr/lib/postgresql | sort -V | tail -1)/bin"
+# Pure globbing, no subprocess. This was `ls | sort -V | tail -1`, and that three-process pipeline
+# is exactly where the script stalled under proot — twice, at the same point, which is what ruled
+# out a random freeze. proot translates every fork and exec, so spawning three processes to answer
+# a question that one path expansion answers is a cost with nothing bought. The glob sorts
+# lexically rather than by version, so a host with both 9.6 and 18 installed would pick 9.6; the
+# loop takes the last entry that actually has psql, and versions here are all two digits.
+PGBIN=""
+for _d in /usr/lib/postgresql/*/bin; do
+  # `if`, not `[ … ] && …`: under `set -e` a trailing && list that tests false is a failing command
+  # and would abort the script on the last iteration.
+  if [ -x "$_d/psql" ]; then PGBIN="$_d"; fi
+done
 PGDATA=/var/lib/postgresql/guardian
-[ -x "$PGBIN/pg_ctl" ] || fail "PostgreSQL did not install: $PGBIN/pg_ctl is missing."
+[ -n "$PGBIN" ] || fail "No PostgreSQL client found under /usr/lib/postgresql/*/bin."
+echo "  client: $PGBIN"
 
 # ── reuse a server that is already listening, before trying to start one ──────────────────────
 # On Android this is the only path that works, and it is not a workaround for proot. PostgreSQL
@@ -188,6 +200,9 @@ else
 fi
 
 if [ "$PG_EXTERNAL" = 0 ]; then
+[ -x "$PGBIN/pg_ctl" ] || fail "Only the PostgreSQL client is installed ($PGBIN) — no pg_ctl, so
+no local server can be started. Either install the server package or start one elsewhere on
+127.0.0.1:5432."
 mkdir -p "$PGDATA"
 chown -R postgres:postgres "$PGDATA"
 if [ ! -f "$PGDATA/PG_VERSION" ]; then
