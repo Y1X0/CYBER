@@ -50,6 +50,9 @@ class EngineKey(str, Enum):
     # The first engine whose external tool is its ONLY detector (no built-in fallback), so a
     # missing binary is genuine degradation — verification treats its silence as INCONCLUSIVE.
     ML_MODEL = "ml_model"
+    # CI/CD & supply-chain security: GitHub Actions script injection, poisoned pull_request_target,
+    # unpinned actions, over-privileged tokens (Phase A, self-contained built-in detector).
+    CICD = "cicd"
 
 
 # Engines that actively probe a live target and therefore REQUIRE an authorization record

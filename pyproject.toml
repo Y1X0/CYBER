@@ -67,6 +67,7 @@ iac = "guardian_scanner.engines.iac_engine:IacEngine"
 dast = "guardian_scanner.engines.dast_engine:DastEngine"
 api = "guardian_scanner.engines.api_engine:ApiEngine"
 ml_model = "guardian_scanner.engines.ml_model_engine:MlModelEngine"
+cicd = "guardian_scanner.engines.cicd_engine:CicdEngine"
 
 # EASM discovery collectors (Phase 6) — same plugin pattern as scanners. Passive providers first.
 [project.entry-points."guardian.discovery_providers"]
