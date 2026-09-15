@@ -31,9 +31,11 @@ from guardian_db.models import (
     FindingCorrelation,
     FindingEvent,
     FindingVerification,
+    ProofRecord,
     Scan,
     ScanEngineRun,
 )
+from guardian_db.proof_store import load_proof
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -331,6 +333,50 @@ def get_finding(
         verifications=verifications,
         timeline=timeline,
     )
+
+
+@router.get("/{finding_id}/proof")
+def get_finding_proof(
+    finding_id: uuid.UUID,
+    request: Request,
+    identity: Identity = Depends(require_scope(Scope.FINDINGS_READ)),
+    db: Session = Depends(get_db),
+) -> dict:
+    """The Proof-of-Vulnerability for a finding: the safe reproduction that demonstrates it and the
+    signal that proved it. Decrypted and integrity-checked here; viewing it is audit-logged, because
+    who looked at a finding's technical evidence is itself something an auditor asks about."""
+    finding = db.execute(
+        _visible(select(Finding), identity).where(Finding.id == finding_id)
+    ).scalar_one_or_none()
+    if finding is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "finding not found")
+
+    record = db.execute(
+        select(ProofRecord)
+        .where(ProofRecord.finding_id == finding.id, ProofRecord.tenant_id == identity.tenant_id)
+        .order_by(ProofRecord.created_at.desc())
+    ).scalars().first()
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            "no proof of vulnerability is stored for this finding")
+
+    proof = load_proof(record)
+    if proof is None:
+        # Decrypt failed or the integrity hash did not match — never present unverifiable evidence.
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "the stored proof failed its integrity check and was not returned")
+
+    record_audit(
+        db, action="finding.proof.viewed", tenant_id=identity.tenant_id,
+        customer_id=finding.customer_id, actor_id=identity.user.id,
+        entity_type="proof_of_vulnerability", entity_id=str(record.id),
+        ip=client_ip(request), metadata={"finding_id": str(finding.id)},
+    )
+    return {
+        "finding_id": str(finding.id),
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+        "proof": proof,
+    }
 
 
 # ── triage ────────────────────────────────────────────────────────────────────────────────────────

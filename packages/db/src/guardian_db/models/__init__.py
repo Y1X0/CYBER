@@ -47,6 +47,7 @@ from guardian_db.models.tenancy import (
     TenantMembership,
     User,
 )
+from guardian_db.models.vault import ProofRecord
 from guardian_db.models.webhooks import WebhookDelivery, WebhookEndpoint
 
 __all__ = [
@@ -66,6 +67,7 @@ __all__ = [
     "DomainEvent",
     "Engagement",
     "EvidenceItem",
+    "ProofRecord",
     "DomainVerification",
     "Exploit",
     "FeedState",
