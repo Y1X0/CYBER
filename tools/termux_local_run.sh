@@ -372,16 +372,64 @@ for _i in $(seq 1 60); do
   sleep 3
 done
 
-if [ "$api_up" = 1 ]; then
-  printf '\n\033[1;32mGuardian is running.\033[0m\n\n'
-  printf '  Console   http://127.0.0.1:8000/docs\n'
-  printf '  Login     admin@example.com / ChangeMe123!\n'
-  printf '  Logs      tail -f api.log worker.log\n'
-  printf '  Stop      pkill -f guardian_api.main ; pkill -f guardian_scanner\n\n'
-  printf 'Keep this session open. Both processes are children of this shell, so closing the\n'
-  printf 'container session stops them.\n\n'
-else
+if [ "$api_up" != 1 ]; then
   printf '\n\033[1;31mThe API is alive but never answered /health in 3 minutes.\033[0m\n\n'
   tail -30 api.log
   exit 1
 fi
+
+say "web interface"
+# apps/web is the actual product surface — Dashboard, Assets, Scans, Findings, Remediation,
+# Compliance, the attack graph. An earlier version of this script started only the API and labelled
+# /docs the "console". /docs is the OpenAPI explorer, which is a list of endpoints, not a console.
+#
+# Vite's dev server is used rather than a production build: its proxy forwards /api to the control
+# plane on 8000, so the SPA and API share an origin and no CORS configuration is needed for a
+# throwaway local run. Nothing is rebuilt that a build would check — `npm run build` is still the
+# path for a real deployment.
+#
+# Failure here is reported and does not stop Guardian. The API and worker are already up and the
+# product is usable through them; a missing web interface is a smaller, clearly-stated loss.
+WEB_UP=0
+cd apps/web
+if ! command -v npm >/dev/null 2>&1; then
+  echo "  installing node and npm"
+  apt-get install -y -qq --no-install-recommends nodejs npm || true
+fi
+if ! command -v npm >/dev/null 2>&1; then
+  echo "  npm is not available — skipping the web interface, the API and worker are unaffected"
+else
+  echo "  node $(node -v), npm $(npm -v)"
+  echo "  installing web dependencies — slow on a phone, and it prints as it goes"
+  # `npm install`, not `npm ci`: ci deletes node_modules and refetches everything on every run,
+  # which on a phone is minutes thrown away for no gain on a local demo.
+  if npm install --no-audit --no-fund; then
+    npm run dev -- --host 127.0.0.1 --port 5173 > ../../web.log 2>&1 &
+    WEB_PID=$!
+    echo "  waiting for the dev server"
+    for _i in $(seq 1 40); do
+      if curl -fsS http://127.0.0.1:5173/ >/dev/null 2>&1; then WEB_UP=1; break; fi
+      if ! kill -0 "$WEB_PID" 2>/dev/null; then
+        echo "  the dev server exited:"; tail -20 ../../web.log; break
+      fi
+      sleep 3
+    done
+    [ "$WEB_UP" = 1 ] || echo "  the web interface did not come up — see web.log"
+  else
+    echo "  npm install failed — skipping the web interface, the API and worker are unaffected"
+  fi
+fi
+cd ../..
+
+printf '\n\033[1;32mGuardian is running.\033[0m\n\n'
+if [ "$WEB_UP" = 1 ]; then
+  printf '  Dashboard   http://127.0.0.1:5173\n'
+else
+  printf '  Dashboard   unavailable — see web.log\n'
+fi
+printf '  API docs    http://127.0.0.1:8000/docs\n'
+printf '  Login       admin@example.com / ChangeMe123!\n'
+printf '  Logs        tail -f api.log worker.log web.log\n'
+printf '  Stop        pkill -f guardian_api.main ; pkill -f guardian_scanner ; pkill -f vite\n\n'
+printf 'Keep this session open. These processes are children of this shell, so closing the\n'
+printf 'container session stops them.\n\n'
