@@ -1,0 +1,106 @@
+# Render Blueprint — the deployed control plane, as a file rather than as dashboard clicks.
+#
+# Everything this stack needs is declared here: the web service, the broker, the database, and the
+# wiring between them. A blueprint is the difference between a deployment someone can rebuild and
+# one that exists only as a sequence of clicks nobody wrote down — which is how the previous
+# deployment came to be gone with no record of how to recreate it.
+#
+# DEPLOY:  Render dashboard → Blueprints → New Blueprint Instance → this repo.
+#
+# WHAT IS FREE AND WHAT EXPIRES. Every plan below is `free`. Render's free Postgres is deleted 30
+# days after creation and only one may exist per workspace — so this database is a pilot, not a
+# home for anything that matters. Free web services sleep after 15 minutes of no traffic and cold
+# start on the next request; a scan queued while asleep runs when the instance wakes, because the
+# request that queues it is itself what wakes it.
+#
+# THE WORKER. It runs inside the web service (see infra/render/start.sh), not as a Background
+# Worker, because Render bills those. That closes BLOCKER-1 — scans complete without a human
+# dispatching a workflow — at the cost of resource isolation, not of the architecture's plane
+# separation: `api` and `worker-default` already share one secret set in docker-compose.prod.yml.
+#
+# TLS IS NOT OPTIONAL HERE. The settings validator refuses to boot outside local/dev unless Redis
+# is `rediss://` with credentials and Postgres pins an sslmode that actually encrypts. Render's
+# INTERNAL URLs are plaintext `redis://` and carry no password, so `fromService`/`fromDatabase`
+# with the internal connection string would fail that check — correctly. The external connection
+# strings are TLS and authenticated, and they are what must be set. They are not injected here
+# because a blueprint cannot read them; see the `sync: false` entries, which Render prompts for.
+
+services:
+  - type: web
+    name: guardian-api
+    runtime: python
+    plan: free
+    region: frankfurt
+    branch: claude/security-guardian-architecture-p1315d
+    buildCommand: bash infra/render/build.sh
+    startCommand: bash infra/render/start.sh
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+
+      - key: GUARDIAN_ENV
+        value: production
+
+      - key: GUARDIAN_LOG_LEVEL
+        value: INFO
+
+      # ── connection strings ───────────────────────────────────────────────────────────────────
+      # Set to the EXTERNAL URLs, with TLS. Not `fromDatabase`/`fromService`: those yield internal
+      # plaintext URLs that the production validator rejects, and rightly — an unencrypted broker
+      # carries job payloads and an unencrypted database carries every tenant's findings.
+      #
+      #   GUARDIAN_DATABASE_URL      postgresql+psycopg://…@…frankfurt-postgres.render.com/…?sslmode=require
+      #   GUARDIAN_APP_DATABASE_URL  same host, user guardian_app (created by migration 0006)
+      #   GUARDIAN_REDIS_URL         rediss://red-…:PASSWORD@frankfurt-keyvalue.render.com:6379
+      - key: GUARDIAN_DATABASE_URL
+        sync: false
+      - key: GUARDIAN_APP_DATABASE_URL
+        sync: false
+      - key: GUARDIAN_REDIS_URL
+        sync: false
+
+      # ── secrets ──────────────────────────────────────────────────────────────────────────────
+      # generateValue asks Render for a strong random value once, and it is never in this repo, in
+      # a log, or in a chat transcript. The validator refuses the documented development sentinels
+      # outside local/dev, so a leaked dev secret cannot be replayed against this deployment.
+      - key: GUARDIAN_JWT_SECRET
+        generateValue: true
+      - key: GUARDIAN_ENCRYPTION_KEY
+        generateValue: true
+      - key: GUARDIAN_BROKER_SEAL_KEY
+        generateValue: true
+      - key: GUARDIAN_APP_DB_PASSWORD
+        generateValue: true
+
+      # The bootstrap admin. The validator refuses to start production with the publicly
+      # documented password, which is why this is generated rather than defaulted — read it once
+      # from the Render dashboard and change it on first sign-in.
+      - key: GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD
+        generateValue: true
+      - key: GUARDIAN_BOOTSTRAP_ADMIN_EMAIL
+        sync: false
+      - key: GUARDIAN_BOOTSTRAP_TENANT
+        value: Guardian Pilot
+
+      # ── capability switches ──────────────────────────────────────────────────────────────────
+      # The recon plane needs CAP_NET_ADMIN and kernel nftables for its egress allowlist. A Render
+      # instance has neither, so it stays off: an engine whose sandbox cannot be enforced must not
+      # run unconfined, and an engine that did not run reports `not_checked`, never `clean`.
+      - key: GUARDIAN_RECON_PLANE
+        value: "false"
+      - key: GUARDIAN_SANDBOX_ENGINES
+        value: "true"
+
+databases:
+  - name: guardian-db
+    plan: free
+    region: frankfurt
+    postgresMajorVersion: "16"
+
+# Render calls this resource type `redis` in blueprints even though the product is now Key Value.
+services_note: |
+  The broker is declared in the dashboard rather than here because a free Key Value instance and a
+  free Postgres cannot both be created by a blueprint in every account state. guardian-queue
+  (frankfurt, free) already exists; point GUARDIAN_REDIS_URL at its external rediss:// URL.
