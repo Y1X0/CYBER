@@ -201,7 +201,7 @@ class AiDiscoveryEngine:
             return
         seen: set[tuple[str, int, str]] = set()
         for item in items:
-            raw = self._to_raw(item, path)
+            raw = self._to_raw(item, path, code)
             if raw is None:
                 continue
             key = (path, int(raw.location.get("line") or 0), raw.title[:60])
@@ -210,7 +210,7 @@ class AiDiscoveryEngine:
             seen.add(key)
             yield raw
 
-    def _to_raw(self, item: object, path: str) -> RawFinding | None:
+    def _to_raw(self, item: object, path: str, code: str) -> RawFinding | None:
         if not isinstance(item, dict):
             return None
         title = str(item.get("title") or "").strip()
@@ -223,15 +223,51 @@ class AiDiscoveryEngine:
         cwe = cwe_match.group(0).upper() if cwe_match else None
         line = item.get("line")
         line = int(line) if isinstance(line, int) and 0 < line < _MAX_LINE else None
-        # An unverified AI lead never claims high confidence: high -> medium, else -> low.
+
+        # Location verification: does the line the model cited actually exist and hold code? This is
+        # the cheapest, safest verifier there is — it catches the most common AI failure (a cited
+        # line number that is empty or past the end of the file, i.e. a hallucinated location) and,
+        # when the line checks out, yields a real static Proof-of-Vulnerability: the source the
+        # model flagged. A verified location earns a stored proof and keeps its confidence; an
+        # unverified one is forced to low.
+        code_lines = code.splitlines()
+        excerpt = ""
+        verified = bool(line and 1 <= line <= len(code_lines) and code_lines[line - 1].strip())
+        if verified:
+            excerpt = scrub(code_lines[line - 1].strip())[0][:200]
+
+        # An unverified AI lead never claims high confidence: high -> medium, else -> low. A lead
+        # whose cited location does not check out is always low, whatever the model said.
         ai_conf = str(item.get("confidence") or "").lower()
-        confidence = "medium" if ai_conf in ("high", "very high") else "low"
-        description = (
-            f"{explanation}\n\n"
-            "⚠ UNVERIFIED — identified by AI code analysis, not by a deterministic tool. This is a "
-            "lead to confirm, not a confirmed vulnerability: review it (or run a verifier) before "
-            "treating it as real. Severity and confidence here are the model's estimate."
+        confidence = "medium" if (verified and ai_conf in ("high", "very high")) else "low"
+        status_line = (
+            "✔ LOCATION VERIFIED — the cited line exists in the source and is shown below; a "
+            "static proof of presence. Runtime exploitability still needs live confirmation."
+            if verified else
+            "⚠ UNVERIFIED — identified by AI code analysis, not by a deterministic tool, and the "
+            "cited location could not be confirmed. Treat as a lead to review, not a finding."
         )
+        description = f"{explanation}\n\n{status_line}"
+        evidence: dict = {
+            "detector": "ai-discovery",
+            "model": _safe_provider_name(),
+            "unverified": not verified,
+            "location_verified": verified,
+            "vuln_type": vuln_type,
+            "ai_severity": str(item.get("severity") or ""),
+            "ai_confidence": ai_conf,
+        }
+        if verified:
+            # A safe, static reproduction — the source line itself, redacted. The vault stores this
+            # (via build_proof's safety gate) so an auditor can be shown what was flagged and
+            # a regression retest can re-check the same location after a fix.
+            evidence["reproduction"] = {
+                "method": "static_location",
+                "probe": excerpt,
+                "expected_signal": vuln_type or "vulnerable pattern",
+                "target": {"path": path, "line": line},
+                "observed": f"{path}:{line}: {excerpt}",
+            }
         return RawFinding(
             engine=EngineKey.AI_DISCOVERY,
             title=f"AI-suspected {vuln_type or 'vulnerability'}: {title}"[:300],
@@ -241,14 +277,7 @@ class AiDiscoveryEngine:
             confidence=confidence,
             cwe_id=cwe,
             location={"path": path, "line": line, "rule": "ai-discovery"},
-            evidence={
-                "detector": "ai-discovery",
-                "model": _safe_provider_name(),
-                "unverified": True,
-                "vuln_type": vuln_type,
-                "ai_severity": str(item.get("severity") or ""),
-                "ai_confidence": ai_conf,
-            },
+            evidence=evidence,
             references=({"cwe": f"https://cwe.mitre.org/data/definitions/{cwe.split('-')[1]}.html"}
                         if cwe else {}),
         )

@@ -20,6 +20,7 @@ from guardian_common.logging import get_logger
 from guardian_core import authorization as authz
 from guardian_core import safescan
 from guardian_core.enums import ACTIVE_ENGINES, EngineKey, ScanStatus
+from guardian_core.proof import SafeReproduction, UnsafeReproductionError, build_proof
 from guardian_db.audit import record_audit
 from guardian_db.models import (
     Asset,
@@ -30,6 +31,7 @@ from guardian_db.models import (
     ScanEngineRun,
     UsageRecord,
 )
+from guardian_db.proof_store import store_proof
 from guardian_db.session import session_scope
 from sqlalchemy import select, update
 
@@ -64,6 +66,40 @@ def _run_engine(engine, ctx: ScanContext) -> list:  # noqa: ANN001 - engine is a
     ):
         return sandbox.run_in_sandbox(lambda: list(engine.run(ctx)), sandbox.policy_for(engine.key))
     return list(engine.run(ctx))
+
+
+def _maybe_store_proof(session, finding, raw) -> None:  # noqa: ANN001
+    """Seal a finding's safe reproduction into the Proof-of-Vulnerability vault, if it has one.
+
+    Engines that can demonstrate a finding attach a `reproduction` to its evidence (AI discovery
+    does this for a verified source line). `build_proof` re-runs the safety gate — defence in depth,
+    so a reproduction that somehow carried a weaponized payload is refused here too — and only a
+    safe one is encrypted and stored. Never fatal: proof capture is a bonus, not the scan result.
+    """
+    repro = (raw.evidence or {}).get("reproduction")
+    if not isinstance(repro, dict) or not repro.get("probe"):
+        return
+    try:
+        proof = build_proof(
+            finding_fingerprint=finding.fingerprint,
+            vuln_class=finding.cwe_id or finding.category or "",
+            reproduction=SafeReproduction(
+                method=str(repro.get("method") or "static_location"),
+                probe=str(repro.get("probe") or ""),
+                expected_signal=str(repro.get("expected_signal") or ""),
+                target=repro.get("target") if isinstance(repro.get("target"), dict) else {},
+            ),
+            observed_evidence=str(repro.get("observed") or ""),
+            regression_ref={"engine": raw.engine.value,
+                            "method": str(repro.get("method") or "static_location")},
+        )
+        store_proof(session, finding=finding, proof=proof)
+    except UnsafeReproductionError as exc:
+        # A reproduction that failed the safety gate is dropped, loudly — the finding still stands,
+        # it simply gets no stored proof.
+        log.warning("proof_refused_unsafe", fingerprint=finding.fingerprint, reason=str(exc)[:200])
+    except Exception as exc:  # noqa: BLE001 - proof capture must never fail the scan
+        log.warning("proof_store_failed", error=f"{type(exc).__name__}: {exc}"[:200])
 
 
 def _now() -> dt.datetime:
@@ -379,6 +415,9 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                             session.add(finding)
                             known[finding.fingerprint] = finding
                             observed[finding.fingerprint] = finding
+                            # If the engine attached a safe reproduction (e.g. AI discovery's
+                            # verified source line), seal it into the Proof-of-Vulnerability vault.
+                            _maybe_store_proof(session, finding, raw)
                         else:
                             observed[finding.fingerprint] = merge_sighting(
                                 prior, finding, scan_id=scan.id, engine_run_id=run.id)

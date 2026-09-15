@@ -42,7 +42,8 @@ _ITEM = {
     "severity": "critical", "line": 42, "confidence": "high",
     "explanation": "The username parameter is concatenated into the SQL string at line 42.",
 }
-_CODE = 'q = "SELECT * FROM users WHERE n=\'" + name + "\'"\n'
+# A 42-line file whose line 42 holds the flagged code, so the model's cited line verifies.
+_CODE = ("\n" * 40) + 'x = 1\nq = "SELECT * FROM users WHERE n=\'" + name + "\'"\n'
 
 
 def _use_provider(monkeypatch, provider):
@@ -101,8 +102,31 @@ def test_a_candidate_becomes_an_ai_assisted_hypothesis(monkeypatch):
     assert f.cwe_id == "CWE-89"
     assert f.location["line"] == 42
     assert f.evidence["detector"] == "ai-discovery"
-    assert f.evidence["unverified"] is True
     assert "AI-suspected" in f.title
+
+
+def test_a_verified_location_yields_a_safe_static_proof(monkeypatch):
+    # The cited line (42) exists in _CODE and holds code, so it is verified and earns a stored proof.
+    _use_provider(monkeypatch, _FakeProvider({"findings": [_ITEM]}))
+    f = _discover()[0]
+    assert f.evidence["location_verified"] is True
+    assert f.evidence["unverified"] is False
+    assert "LOCATION VERIFIED" in f.description
+    repro = f.evidence["reproduction"]
+    assert repro["method"] == "static_location"
+    assert repro["target"] == {"path": "<inline>", "line": 42}
+    assert "SELECT" in repro["probe"]
+
+
+def test_an_unverified_location_is_flagged_and_gets_no_proof(monkeypatch):
+    # The model cites line 999, which does not exist in a short file — a hallucinated location.
+    item = dict(_ITEM, line=999)
+    _use_provider(monkeypatch, _FakeProvider({"findings": [item]}))
+    f = _discover(code="a = 1\nb = 2\n")[0]
+    assert f.evidence["location_verified"] is False
+    assert f.evidence["unverified"] is True
+    assert "reproduction" not in f.evidence
+    assert f.confidence == "low"        # an unverified location is never above low confidence
     assert "UNVERIFIED" in f.description
 
 
