@@ -4,8 +4,8 @@
 // risk rationale, exploit intelligence, correlation, verification history and remediation. A
 // customer should never need to call the API to understand why Guardian thinks something matters.
 
-import { useState } from "react";
-import { Finding, FindingDossier, api } from "../api";
+import { useEffect, useState } from "react";
+import { ApiError, Finding, FindingDossier, ProofOfVulnerability, api } from "../api";
 import { navigate } from "../router";
 import {
   Async, Card, EmptyState, SEVERITIES, SeverityBadge, StatusPill, useAsync, when,
@@ -205,6 +205,8 @@ export function FindingDetailScreen({ id }: { id: string }) {
             </Card>
           )}
 
+          <ProofCard id={id} />
+
           <Card title="Verification history" actions={<RetestButton id={id} onDone={loader.reload} />}>
             {d.verifications.length === 0 ? (
               <p className="muted">
@@ -252,6 +254,88 @@ export function FindingDetailScreen({ id }: { id: string }) {
         </>
       )}
     </Async>
+  );
+}
+
+function ProofCard({ id }: { id: string }) {
+  const [state, setState] = useState<
+    { kind: "loading" } | { kind: "none" } | { kind: "tampered" }
+    | { kind: "error"; msg: string } | { kind: "ok"; proof: ProofOfVulnerability }>(
+    { kind: "loading" });
+
+  useEffect(() => {
+    let live = true;
+    setState({ kind: "loading" });
+    api.proof(id)
+      .then((p) => live && setState({ kind: "ok", proof: p }))
+      .catch((e: unknown) => {
+        if (!live) return;
+        if (e instanceof ApiError && e.status === 404) setState({ kind: "none" });
+        else if (e instanceof ApiError && e.status === 409) setState({ kind: "tampered" });
+        else setState({ kind: "error", msg: e instanceof Error ? e.message : "request failed" });
+      });
+    return () => { live = false; };
+  }, [id]);
+
+  if (state.kind === "loading") return null;
+  if (state.kind === "error") {
+    return (
+      <Card title="Proof of Vulnerability">
+        <p className="err" role="alert">Could not load the proof: {state.msg}.</p>
+      </Card>
+    );
+  }
+  if (state.kind === "none") {
+    return (
+      <Card title="Proof of Vulnerability">
+        <p className="muted">
+          No stored proof yet. A safe Proof-of-Vulnerability is captured automatically when a
+          finding is verified — for example an AI-discovered finding whose cited source line was
+          confirmed. It records the benign reproduction, never a working exploit.
+        </p>
+      </Card>
+    );
+  }
+  if (state.kind === "tampered") {
+    return (
+      <Card title="Proof of Vulnerability">
+        <p className="err" role="alert">
+          A proof is stored for this finding but it failed its integrity check, so it was not shown.
+          The evidence may have been altered at rest — treat this as a security event, not a display
+          bug.
+        </p>
+      </Card>
+    );
+  }
+
+  const p = state.proof.proof;
+  const target = Object.entries(p.reproduction.target ?? {})
+    .map(([k, v]) => `${k}: ${String(v)}`).join(" · ");
+  return (
+    <Card title={<>Proof of Vulnerability <StatusPill tone="ok">safe reproduction</StatusPill></>}>
+      <p className="muted">
+        The concrete, technical evidence that this finding is real — a <em>benign</em> reproduction
+        that demonstrates it without exploiting it. Show it to an auditor to settle any doubt; a
+        regression retest replays it after a fix to confirm the issue is closed.
+      </p>
+      <dl className="kv">
+        <dt>Weakness</dt><dd>{p.vuln_class || "—"}</dd>
+        <dt>Method</dt><dd className="mono">{p.reproduction.method}</dd>
+        {target && (<><dt>Where</dt><dd className="mono">{target}</dd></>)}
+        <dt>Safe reproduction</dt>
+        <dd className="mono">{p.reproduction.probe || "—"}</dd>
+        {p.reproduction.expected_signal && (
+          <><dt>Proves it when</dt><dd>{p.reproduction.expected_signal}</dd></>
+        )}
+        {p.observed_evidence && (
+          <><dt>Observed</dt><dd className="mono">{p.observed_evidence}</dd></>
+        )}
+      </dl>
+      <p className="muted">
+        Stored encrypted and isolated to your organization; credentials are scrubbed before it is
+        saved. Captured {when(state.proof.created_at)}.
+      </p>
+    </Card>
   );
 }
 

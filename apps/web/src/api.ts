@@ -170,6 +170,23 @@ export interface FindingDossier {
   }[];
 }
 
+export interface ProofOfVulnerability {
+  finding_id: string;
+  created_at: string | null;
+  proof: {
+    vuln_class: string;
+    safe: boolean;
+    observed_evidence: string;
+    reproduction: {
+      method: string;
+      probe: string;
+      expected_signal: string;
+      target: Record<string, unknown>;
+    };
+    regression_ref: Record<string, unknown>;
+  };
+}
+
 export interface Asset {
   id: string;
   customer_id: string;
@@ -419,6 +436,7 @@ export const api = {
     return paged<Finding>(`/findings${q ? `?${q}` : ""}`);
   },
   finding: (id: string) => req<FindingDossier>(`/findings/${id}`),
+  proof: (id: string) => req<ProofOfVulnerability>(`/findings/${id}/proof`),
   findingSummary: (scanId?: string) =>
     req<FindingSummary>(`/findings/summary${scanId ? `?scan_id=${scanId}` : ""}`),
   triage: (id: string, status: string, note: string) =>
