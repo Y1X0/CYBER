@@ -262,6 +262,19 @@ with a credential-handling review as a precondition.
 **AI dimension:** high. PMapper/cartography produce a graph of "who can reach what"; an LLM turns a
 privilege-escalation path into a plain-language attack narrative and a prioritized fix.
 
+### 3.8 Mobile — static analysis of an uploaded app
+
+Static APK/IPA analysis is offline artifact work (upload → decompile → analyse), so it is L0 and
+free-host — the same shape as the forensics providers.
+
+| Tool | Level | Licence | Plane | Host | Effort | Prio |
+|---|---|---|---|---|---|---|
+| **apktool / jadx** (decompile APK) | L0 | Apache-2.0 | offline | free | M | P2 |
+| **MobSF analysers** (static APK/IPA — the analysers, not the server) | L0 | GPL-3.0 | offline (sep-proc) | free | L | P2 |
+
+MobSF is a whole platform and awkward to embed wholesale — use its individual static analysers, not
+its server. Dynamic mobile (frida) needs a physical device and is out of scope.
+
 ---
 
 ## 4. Catalogue — active network (needs the worker host; ties to BLOCKER-1)
@@ -315,6 +328,24 @@ the P1 network pair, not nmap.
 Everything that actively injects (ZAP active, ffuf, dalfox, sqlmap) is L3+ and therefore already
 requires a campaign and a human approval before it can touch a target. The governance is done; the
 providers are not.
+
+### 4.4 Active Directory & identity — the highest-value red-team domain
+
+Entirely worker-host and L3/L4, but called out separately because it carries the study's single
+strongest architectural fit.
+
+| Tool | Level | Licence | Plane | Host | Effort | Prio |
+|---|---|---|---|---|---|---|
+| **BloodHound CE** (AD attack-path graph) | L3 | Apache-2.0 | uid_nft | worker | L | P2 |
+| **impacket** (protocol toolkit) | L3/L4 | Apache-2.0 | uid_nft | worker | L | P3 |
+| **Certipy** (AD CS abuse paths) | L4 | MIT | uid_nft | worker | M | P3 |
+| **kerbrute** (user enum) | L3 | Apache-2.0 | uid_nft | worker | M | P3 |
+
+**The fit:** Guardian already has an attack-path engine (`AttackGraph`). BloodHound's collector
+output is a graph of AD reachability — it would feed the existing engine directly rather than
+needing a new visualization. That makes BloodHound the highest-leverage single tool in the active
+tier: most of the consuming side is already built. kerbrute carries account-lockout risk and needs
+rate governance beyond the current model before it ships.
 
 ---
 
@@ -548,6 +579,20 @@ holds. Model default is `claude-opus-5` per config; that is correct for this rea
 6. **`engine_outcome()` is non-negotiable.** Every tool added must report `not_checked` when it
    cannot run, and the AI must never turn an opinion into a finding. This is the product's whole
    credibility and it constrains every addition above.
+
+### What to decline, and why
+
+Saying no is part of the study. These are not "later" — they are deliberate no's.
+
+| Tool / category | Reason |
+|---|---|
+| **masscan, TruffleHog, Velociraptor, hayabusa** | AGPL-3.0 — §13 covers network interaction, which a SaaS is. Bundle-prohibited; the AGPL DFIR ones are viable only as the customer-hosted tier (§5b.3). |
+| **CodeQL** | Proprietary, free only for open source. `PROHIBITED`. |
+| **nmap in a shipped image** | NPSL restricts commercial redistribution; needs an OEM licence. Use naabu + fingerprintx (MIT) instead. |
+| **interactsh / any OOB collector** | Sends customer data to a third-party host. The template validator already refuses it. |
+| **Wireless (aircrack-ng, kismet)** | Needs physical radio hardware and monitor mode — **not feasible in any cloud deployment.** This would be an on-prem appliance, a different product. Decline rather than half-build. |
+| **frida / dynamic mobile** | Needs a physical device. Out of scope. |
+| **Storing exploit bodies** | Index and metadata yes, weaponized code no — storing it makes the knowledge base itself a liability. Already the standing line. |
 
 ---
 
