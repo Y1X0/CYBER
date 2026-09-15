@@ -74,6 +74,7 @@ ARG SYFT_VERSION=unset
 ARG GRYPE_VERSION=unset
 ARG SEMGREP_VERSION=1.101.0
 ARG CHECKOV_VERSION=3.2.334
+ARG MODELSCAN_VERSION=0.8.5
 
 # The versions actually installed, readable from the image itself. A scanner that silently changes
 # version changes its findings, and "which build produced this report" must be answerable later.
@@ -84,7 +85,8 @@ LABEL org.opencontainers.image.title="guardian-scanner" \
       guardian.tools.syft="${SYFT_VERSION}" \
       guardian.tools.grype="${GRYPE_VERSION}" \
       guardian.tools.semgrep="${SEMGREP_VERSION}" \
-      guardian.tools.checkov="${CHECKOV_VERSION}"
+      guardian.tools.checkov="${CHECKOV_VERSION}" \
+      guardian.tools.modelscan="${MODELSCAN_VERSION}"
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -108,10 +110,13 @@ RUN apt-get update \
 
 COPY --from=tools /out/trivy /out/gitleaks /out/osv-scanner /out/syft /out/grype /usr/local/bin/
 
-# Semgrep (LGPL-2.1, invoked as a separate process) and Checkov (Apache-2.0) install as Python
-# packages. Both are already wrapped by existing engines; the wrappers no-op when absent, which is
-# exactly why the deployed image never produced their findings before.
-RUN pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" "checkov==${CHECKOV_VERSION}"
+# Semgrep (LGPL-2.1, invoked as a separate process), Checkov (Apache-2.0) and modelscan (Apache-2.0)
+# install as Python packages. Semgrep and Checkov augment engines that already have a complete
+# built-in detector; modelscan is different — it is the ML-model engine's ONLY detector, so its
+# absence leaves that engine degraded and every ML-model result INCONCLUSIVE. Installing it here is
+# what lets the engine actually clear a model rather than only ever say "not checked".
+RUN pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" "checkov==${CHECKOV_VERSION}" \
+    "modelscan==${MODELSCAN_VERSION}"
 
 WORKDIR /app
 

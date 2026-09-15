@@ -46,6 +46,10 @@ class EngineKey(str, Enum):
     NMAP = "nmap"
     # Templated web checks provider (Framework — first L3 SENSITIVE, in-proc curated detection).
     WEB_CHECKS = "web_checks"
+    # ML-model supply-chain: unsafe operators in serialized models (Phase A, modelscan-backed).
+    # The first engine whose external tool is its ONLY detector (no built-in fallback), so a
+    # missing binary is genuine degradation — verification treats its silence as INCONCLUSIVE.
+    ML_MODEL = "ml_model"
 
 
 # Engines that actively probe a live target and therefore REQUIRE an authorization record

@@ -68,6 +68,8 @@ cannot simply be bundled.
 | detect-secrets | 1.5.x | Apache-2.0 | `APPROVED` | Permissive alternative with a baseline model. |
 | bandit | 1.8.x | Apache-2.0 | `APPROVED` | Python-native SAST. |
 | gosec | 2.x | Apache-2.0 | `APPROVED` | Go-native SAST. |
+| **AI / ML supply chain** | | | | |
+| modelscan | 0.8.x | Apache-2.0 | `APPROVED` | Static scan of serialized ML models (pickle / PyTorch / TensorFlow / Keras / ONNX) for unsafe operators that execute on load. Opens files only — never loads or executes a model. The ML-model engine's only detector, so it is `degraded` when absent (no built-in fallback). |
 | **Cloud / containers** | | | | |
 | Prowler | 4.x | Apache-2.0 | `APPROVED` | 500+ checks with CIS/NIST/PCI mappings. |
 | ScoutSuite | 5.x | GPL-2.0 | `APPROVED_SEPARATE_PROCESS` | Second opinion; not required. |
