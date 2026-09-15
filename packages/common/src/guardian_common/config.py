@@ -216,6 +216,16 @@ class Settings(BaseSettings):
     ai_effort: str = "medium"  # low | medium | high | xhigh | max
     ai_max_tokens: int = 8192
 
+    # Vendor-neutral alternative to Claude: any OpenAI-compatible chat API. This is what lets the
+    # analyst run on a FREE LLM — Google Gemini's OpenAI endpoint, Groq, OpenRouter, Together, or a
+    # self-hosted server — with no paid Anthropic key. Set the key + base URL (+ ai_model) and the
+    # analyst uses it; leave them empty and it falls back to the deterministic stub. Example:
+    #   GUARDIAN_AI_API_KEY=...   (a free key, no card, from the provider's console)
+    #   GUARDIAN_AI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+    #   GUARDIAN_AI_MODEL=gemini-2.0-flash
+    ai_api_key: str = ""
+    ai_base_url: str = ""
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
