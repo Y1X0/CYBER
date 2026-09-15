@@ -297,9 +297,27 @@ python3 -m venv .venv
 # shellcheck disable=SC1091
 . .venv/bin/activate
 python -V
+# proot-distro inherits a resolv.conf that Android can leave without a usable nameserver, and pip
+# then fails with "Temporary failure in name resolution" many minutes into a download. Check
+# first, repair once, and stop with a clear reason rather than retrying into nothing.
+if ! getent hosts pypi.org >/dev/null 2>&1; then
+  echo "  DNS cannot resolve pypi.org — writing public resolvers into /etc/resolv.conf"
+  printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' > /etc/resolv.conf
+  getent hosts pypi.org >/dev/null 2>&1 \
+    || fail "Still cannot resolve pypi.org. The phone has no working network route right now —
+this is not a Guardian problem. Check the connection and re-run; pip keeps what it already
+downloaded, so the install resumes rather than starting over."
+fi
+
 echo "  installing dependencies — expect this to take a while and to print as it goes"
-pip install --upgrade pip
-pip install -e .
+# A phone moving between wifi and mobile data drops connections mid-download; pip's default of 5
+# retries and a 15s timeout gives up on blips that resolve on their own a moment later. Nothing
+# here weakens verification — pip still checks every hash it is given.
+PIP_OPTS="--retries 10 --timeout 60"
+# shellcheck disable=SC2086
+pip install $PIP_OPTS --upgrade pip
+# shellcheck disable=SC2086
+pip install $PIP_OPTS -e .
 
 say "settings"
 # Local-profile values, safe to commit precisely because the validator refuses them outside
