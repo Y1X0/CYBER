@@ -282,12 +282,24 @@ redis-cli ping 2>/dev/null | grep -q PONG || fail "Redis did not start."
 echo "  redis up"
 
 say "python environment"
+# NOT quiet, deliberately. This is the longest step in the script — on a phone CPU pip compiles
+# extensions for tens of minutes — and it was running under `-q`, which prints nothing at all
+# while it works. That makes "building" and "dead" look identical, which is the same mistake as
+# silencing initdb and as hiding psql's password prompt: the third time in this one file that a
+# step was given no way to show it was alive. Verbose output is the whole fix.
+#
+# PIP_NO_INPUT is the other half: a pip that pauses for an answer on a screen nobody is watching
+# is indistinguishable from a hang, and here it fails instead.
+export PIP_NO_INPUT=1
 cd "$(dirname "$0")/.."
+echo "  creating the virtualenv"
 python3 -m venv .venv
 # shellcheck disable=SC1091
 . .venv/bin/activate
-pip install --upgrade pip -q
-pip install -e . -q
+python -V
+echo "  installing dependencies — expect this to take a while and to print as it goes"
+pip install --upgrade pip
+pip install -e .
 
 say "settings"
 # Local-profile values, safe to commit precisely because the validator refuses them outside
