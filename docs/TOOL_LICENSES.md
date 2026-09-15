@@ -16,6 +16,7 @@ cannot simply be bundled.
 | `APPROVED_SEPARATE_PROCESS` | Copyleft, but invoked as a separate process with no linking and no distribution of modified source. Commonly accepted; confirmed by counsel per deployment model. |
 | `LEGAL_REVIEW` | Cannot ship until counsel signs off. Blocked in CI. |
 | `PROHIBITED` | Incompatible with a commercial SaaS product. Never ship. |
+| `NOT_ADOPTED` | The licence is acceptable, but the capability is deliberately not used; the tool must not enter an image. Blocked in CI, with a different reason from a licence block. |
 
 ## Registry
 
@@ -28,6 +29,7 @@ cannot simply be bundled.
 | tar | 1.35+ | GPL-3.0 | `APPROVED_SEPARATE_PROCESS` | Build stage only; extracts release archives. |
 | pip | 24.x | MIT | `APPROVED` | Build stage only. |
 | setuptools | 78+ | MIT | `APPROVED` | Build stage only. |
+| nftables | 1.0+ | GPL-2.0 | `APPROVED_SEPARATE_PROCESS` | The `nft` binary is invoked as a subprocess by the uid_nft execution backend to build the per-run kernel egress allowlist; never linked. Worker-tools image only. |
 | **Discovery** | | | | |
 | subfinder | 2.6.x | MIT | `APPROVED` | Passive subdomain enumeration. |
 | dnsx | 1.2.x | MIT | `APPROVED` | Bulk DNS resolution. |

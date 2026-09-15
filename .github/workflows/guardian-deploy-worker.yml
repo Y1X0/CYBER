@@ -49,8 +49,11 @@ jobs:
 
       # The licence gate runs before the build, not after: an image that should not exist is
       # cheaper to refuse than to build, push and then have to unpublish.
+      # No --image: the gate now defaults to every shipping image (scanner AND worker-tools), so a
+      # blocked binary in either is refused before the build. Gating only the scanner image left the
+      # worker-tools image — which installs the network-plane binaries — able to ship unreviewed.
       - name: Tool licence gate
-        run: python tools/check_tool_licenses.py --image infra/docker/Dockerfile.scanner
+        run: python tools/check_tool_licenses.py
 
       # Resolve each tool's ACTUAL release asset rather than writing version numbers and filenames
       # by hand. The first attempt hard-coded both from memory and 404'd on the first download; the

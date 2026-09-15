@@ -36,10 +36,23 @@ _NON_STATE = {"STATUS", "STATE", "APPROVAL"}
 
 _ROW = re.compile(r"^\|\s*\*{0,2}([^|*]+?)\*{0,2}\s*\|\s*([^|]*?)\s*\|\s*([^|]*?)\s*\|"
                   r"\s*`?(\w+)`?\s*\|\s*([^|]*?)\s*\|\s*$")
-# Tools an image installs, however it installs them.
+# Tools an image installs via a package manager.
 _INSTALL = re.compile(
     r"(?:apt-get\s+install|apk\s+add|go\s+install|pip\s+install|npm\s+i(?:nstall)?)\s+([^\n&|]+)"
 )
+# Tools an image installs by DOWNLOADING a release — the pattern this repo actually uses for its
+# main binaries (trivy, gitleaks, syft, grype, osv-scanner all arrive via `curl … | tar`). The
+# package-manager regex above never saw them, so a curl-fetched prohibited binary walked straight
+# past the gate — the exact false negative the tool exists to prevent (Phase-0 audit P1-2). Three
+# complementary signals, deliberately over-inclusive:
+#   * the binary named as the member extracted from a tarball: `tar -xzf trivy.tgz trivy`;
+#   * a bare binary written by curl/wget with `-o name` (no archive extension): `-o osv-scanner`;
+#   * the repo in a GitHub release URL when it appears literally: `github.com/owner/grype/releases`.
+_TAR_MEMBER = re.compile(
+    r"tar\s+-[A-Za-z]*x[A-Za-z]*f?\s+\S+\.(?:tgz|tar\.gz|tar|tar\.xz)\s+([A-Za-z0-9][\w.+-]+)")
+_CURL_OUT = re.compile(r"(?:curl|wget)\b[^\n&|]*?\s-o\s+(\S+)")
+_GH_RELEASE = re.compile(r"github\.com/[\w.-]+/([\w.-]+)/releases/download")
+_ARCHIVE_SUFFIX = (".tgz", ".tar.gz", ".tar", ".tar.xz", ".zip", ".gz")
 # A package token can arrive as `name`, `"name==1.2.3"`, `name@v1.2.3`, `owner/repo@v1`, or
 # `name=1.2-3` (apk/apt pins). Anchoring on "ends with @ or end-of-string" missed every quoted
 # pip pin — semgrep and checkov walked straight past the gate, which is the false negative this
@@ -99,12 +112,33 @@ def tools_in_image(path: Path) -> set[str]:
     positive costs one registry row, a false negative ships an unreviewed binary."""
     if not path.exists():
         return set()
+    text = path.read_text(encoding="utf-8")
     found: set[str] = set()
-    for match in _INSTALL.finditer(path.read_text(encoding="utf-8")):
+
+    # Package-manager installs.
+    for match in _INSTALL.finditer(text):
         for token in match.group(1).split():
             name = _package_name(token.strip("\\"))
             if name:
                 found.add(name)
+
+    # Downloaded-release installs (curl|tar / curl -o / GitHub release URL).
+    for member in _TAR_MEMBER.findall(text):
+        name = _package_name(member)
+        if name:
+            found.add(name)
+    for target in _CURL_OUT.findall(text):
+        cleaned = target.strip("\"'\\")
+        if cleaned.lower().endswith(_ARCHIVE_SUFFIX):
+            continue                      # `-o trivy.tgz` is the archive, not the tool
+        name = _package_name(cleaned)
+        if name:
+            found.add(name)
+    for repo in _GH_RELEASE.findall(text):
+        name = _package_name(repo)
+        if name:
+            found.add(name)
+
     return found
 
 
@@ -133,9 +167,17 @@ def render_notice(registry: dict[str, Entry]) -> str:
     return "\n".join(lines)
 
 
+# Every runtime image that ships tools. Both must be gated: the scanner image installs the SCA and
+# secrets binaries, and the worker-tools image installs the network-plane binaries (nftables today,
+# nmap/naabu tomorrow). Gating only the first — the previous behaviour — left the second able to ship
+# a blocked binary with no CI catching it (Phase-0 audit P1-2).
+_DEFAULT_IMAGES = ("infra/docker/Dockerfile.scanner", "infra/docker/Dockerfile")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", default="infra/docker/Dockerfile.scanner", type=Path)
+    parser.add_argument("--image", action="append", type=Path,
+                        help="a runtime image to gate; repeatable. Defaults to every shipping image.")
     parser.add_argument("--notice", action="store_true", help="print a NOTICE file and exit")
     args = parser.parse_args(argv)
 
@@ -149,18 +191,37 @@ def main(argv: list[str] | None = None) -> int:
     for entry in sorted(blocked, key=lambda e: e.name):
         print(f"  {entry.state:<14} {entry.name} ({entry.licence})")
 
-    if not args.image.exists():
-        print(f"\nno runtime image at {args.image} yet — registry checked, nothing to enforce")
-        return 0
+    # An explicitly-named image that does not exist is a HARD failure: a renamed or removed
+    # Dockerfile must turn the gate red, not green. When no --image is given we gate every default
+    # image that exists, and require at least one — a repo with no gateable image is itself a fault.
+    explicit = args.image is not None
+    images = args.image if explicit else [Path(p) for p in _DEFAULT_IMAGES]
 
-    problems = check(args.image, registry)
-    if problems:
-        print(f"\n{len(problems)} licence problem(s) in {args.image}:")
-        for problem in problems:
-            print(f"  ✗ {problem}")
+    present = [img for img in images if img.exists()]
+    missing = [img for img in images if not img.exists()]
+
+    if explicit and missing:
+        for img in missing:
+            print(f"\n✗ requested image {img} does not exist — the gate cannot verify it")
         return 1
-    print(f"\nevery tool installed by {args.image} is approved")
-    return 0
+    if not present:
+        print("\n✗ no runtime image found to gate — "
+              f"expected one of {', '.join(str(p) for p in images)}")
+        return 1
+    for img in missing:
+        print(f"\nnote: {img} not present, skipping (not explicitly requested)")
+
+    total = 0
+    for img in present:
+        problems = check(img, registry)
+        total += len(problems)
+        if problems:
+            print(f"\n{len(problems)} licence problem(s) in {img}:")
+            for problem in problems:
+                print(f"  ✗ {problem}")
+        else:
+            print(f"\nevery tool installed by {img} is approved")
+    return 1 if total else 0
 
 
 if __name__ == "__main__":

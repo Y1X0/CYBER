@@ -82,6 +82,60 @@ def test_go_install_with_a_module_path_is_detected(tmp_path):
     assert "naabu" in tools_in_image(image)
 
 
+# ── downloaded-release installs: the P1-2 false-negative class ────────────────────────────────────
+def test_curl_tar_release_install_is_detected(tmp_path):
+    """The exact pattern Guardian uses for its main binaries — curl a tarball, extract the named
+    member — used to be invisible to the gate. A prohibited binary fetched this way would ship."""
+    image = tmp_path / "Dockerfile"
+    image.write_text(
+        'FROM alpine\n'
+        'RUN curl -fsSL "$TRIVY_URL" -o trivy.tgz && tar -xzf trivy.tgz trivy && rm trivy.tgz\n')
+    found = tools_in_image(image)
+    assert "trivy" in found
+    assert "trivy.tgz" not in found, "the archive name must not be mistaken for the tool"
+
+
+def test_curl_bare_binary_install_is_detected(tmp_path):
+    image = tmp_path / "Dockerfile"
+    image.write_text('FROM alpine\nRUN curl -fsSL "$OSV_URL" -o osv-scanner && chmod +x osv-scanner\n')
+    assert "osv-scanner" in tools_in_image(image)
+
+
+def test_a_curl_downloaded_prohibited_binary_is_now_refused(tmp_path, registry):
+    """The point of P1-2: a masscan binary fetched via curl|tar must be caught, not waved through."""
+    image = tmp_path / "Dockerfile"
+    image.write_text(
+        'FROM alpine\n'
+        'RUN curl -fsSL "$U" -o masscan.tgz && tar -xzf masscan.tgz masscan && rm masscan.tgz\n')
+    problems = check(image, registry)
+    assert any("masscan" in p and "PROHIBITED" in p for p in problems)
+
+
+def test_github_release_url_names_the_repo(tmp_path):
+    image = tmp_path / "Dockerfile"
+    image.write_text(
+        "FROM alpine\n"
+        "RUN curl -fsSL https://github.com/anchore/grype/releases/download/v0.98.0/grype.tgz -o g\n")
+    assert "grype" in tools_in_image(image)
+
+
+def test_a_missing_explicit_image_is_a_hard_failure(tmp_path):
+    """A renamed or removed Dockerfile must turn the gate red, not pass with 'nothing to enforce'."""
+    from tools.check_tool_licenses import main
+
+    missing = tmp_path / "Dockerfile.gone"
+    assert main(["--image", str(missing)]) == 1
+
+
+def test_both_shipping_images_are_gated_by_default():
+    """With no --image, the gate must cover every shipping image that exists — not just the scanner
+    one. The worker-tools image installs the network-plane binaries and was previously ungated."""
+    from tools.check_tool_licenses import _DEFAULT_IMAGES
+
+    assert "infra/docker/Dockerfile" in _DEFAULT_IMAGES
+    assert "infra/docker/Dockerfile.scanner" in _DEFAULT_IMAGES
+
+
 # ── enforcement ───────────────────────────────────────────────────────────────────────────────────
 def test_a_prohibited_tool_is_refused(tmp_path, registry):
     image = tmp_path / "Dockerfile"
