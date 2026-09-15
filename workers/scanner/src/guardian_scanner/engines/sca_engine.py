@@ -10,21 +10,42 @@ deliberately — which is where most vulnerable code enters a project. Reading `
 sees the few direct dependencies and misses the hundreds beneath them.
 
 Parsing lives here; the vulnerability data source is injected — so the engine works offline against
-the seeded KB and needs no network in CI.
+the seeded KB and needs no network in CI. When the **osv-scanner** binary is present it is run as an
+ADDITIONAL backend (the same way SastEngine wraps semgrep), widening lockfile coverage to ecosystems
+the built-in parser skips — additive, never a precondition.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
+import subprocess  # noqa: S404 - fixed argv, no shell, bounded
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
-from guardian_core.enums import EngineKey
+from guardian_common.logging import get_logger
+from guardian_core.enums import EngineKey, Severity
 from guardian_core.evidence import dependency_evidence
 from guardian_core.findings import RawFinding
 
 from guardian_scanner.engines.base import ScanContext, VulnMatch
+
+log = get_logger("guardian.engine.sca")
+
+# osv-scanner (Apache-2.0, APPROVED) is run as an ADDITIONAL backend when present. It is genuinely
+# additive rather than redundant: the built-in parser covers a fixed set of lockfiles (pip, npm,
+# go), while osv-scanner reads Cargo.lock, Gemfile.lock, composer.lock, pom.xml, poetry.lock,
+# Pipfile.lock, pnpm/yarn and more — vulnerable dependencies in ecosystems the built-in skips
+# entirely. Same OSV data, wider format coverage. Additive, never a precondition; overlap on a
+# shared lockfile collapses under the downstream fingerprint dedup. It needs files on disk, so it
+# augments a workspace scan but not an inline one.
+_OSV_TIMEOUT = 300
+_OSV_MAX_FINDINGS = 3_000
+_OSV_SEVERITY = {
+    "CRITICAL": Severity.CRITICAL, "HIGH": Severity.HIGH, "MODERATE": Severity.MEDIUM,
+    "MEDIUM": Severity.MEDIUM, "LOW": Severity.LOW,
+}
 
 _REQ_LINE = re.compile(r"^\s*([A-Za-z0-9_.\-]+)\s*==\s*([A-Za-z0-9_.\-]+)")
 _SKIP_DIRS = {".git", "node_modules", "venv", ".venv", "dist", "build", "__pycache__"}
@@ -46,15 +67,91 @@ class ScaEngine:
     def health(self):  # noqa: ANN201
         from guardian_scanner.engines.base import EngineHealth
 
-        return EngineHealth(ok=True, detail="manifest parsing; matcher injected at runtime")
+        # The built-in parser + injected matcher is complete for its ecosystems, so the engine is
+        # never degraded — osv-scanner only widens format coverage.
+        has_osv = bool(shutil.which("osv-scanner"))
+        return EngineHealth(
+            ok=True,
+            detail=("manifest parsing; matcher injected at runtime"
+                    + (" + osv-scanner" if has_osv else " (osv-scanner absent)")),
+        )
 
     def run(self, ctx: ScanContext) -> Iterable[RawFinding]:
-        if ctx.vuln_matcher is None:
-            return  # no data source wired → nothing to assert
-        deps = list(self._collect_dependencies(ctx))
-        for name, version, ecosystem, source in deps:
-            for vm in ctx.vuln_matcher.match(name=name, version=version, ecosystem=ecosystem):
-                yield self._finding(name, version, ecosystem, source, vm)
+        if ctx.vuln_matcher is not None:
+            for name, version, ecosystem, source in self._collect_dependencies(ctx):
+                for vm in ctx.vuln_matcher.match(name=name, version=version, ecosystem=ecosystem):
+                    yield self._finding(name, version, ecosystem, source, vm)
+        # osv-scanner needs files on disk; it augments a workspace scan, not an inline one, and it
+        # runs regardless of whether a matcher is wired — it carries its own data source.
+        if ctx.inline_content is None and ctx.workspace_path:
+            root = Path(ctx.workspace_path)
+            if root.exists():
+                yield from self._run_osv_scanner_if_available(root)
+
+    def _run_osv_scanner_if_available(self, root: Path) -> Iterable[RawFinding]:
+        """Wrap osv-scanner when installed. No-op otherwise; CI and built-in path unchanged."""
+        exe = shutil.which("osv-scanner")
+        if not exe:
+            return
+        try:
+            proc = subprocess.run(  # noqa: S603 - fixed argv, no shell, bounded
+                [exe, "--format", "json", "-r", str(root)],
+                capture_output=True, text=True, timeout=_OSV_TIMEOUT, check=False)
+            data = json.loads(proc.stdout or "{}")
+        except (subprocess.SubprocessError, OSError, ValueError) as exc:
+            # osv-scanner is installed but did not answer (often no network to OSV.dev). The
+            # built-in matcher ran, so this is reduced coverage, not a failure — never silent.
+            log.warning("sca_osv_scanner_failed", error=f"{type(exc).__name__}: {exc}"[:200])
+            return
+        emitted = 0
+        seen: set[tuple[str, str, str]] = set()
+        for result in (data.get("results") or []):
+            source = str((result.get("source") or {}).get("path") or "").strip()
+            for pkg in (result.get("packages") or []):
+                info = pkg.get("package") or {}
+                name = str(info.get("name") or "").strip()
+                version = str(info.get("version") or "").strip()
+                ecosystem = str(info.get("ecosystem") or "").strip().lower()
+                if not name or not version:
+                    continue
+                for vuln in (pkg.get("vulnerabilities") or []):
+                    if emitted >= _OSV_MAX_FINDINGS:
+                        return
+                    finding = self._osv_finding(name, version, ecosystem, source, vuln)
+                    if finding is None:
+                        continue
+                    key = (name, version, str(vuln.get("id") or ""))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    emitted += 1
+                    yield finding
+
+    def _osv_finding(self, name: str, version: str, ecosystem: str, source: str,
+                     vuln: dict) -> RawFinding | None:
+        if not isinstance(vuln, dict):
+            return None
+        vid = str(vuln.get("id") or "").strip()
+        if not vid:
+            return None
+        aliases = [str(a) for a in (vuln.get("aliases") or []) if str(a).startswith("CVE-")]
+        db = vuln.get("database_specific") or {}
+        sev = _OSV_SEVERITY.get(str(db.get("severity") or "").upper(), Severity.MEDIUM)
+        summary = str(vuln.get("summary")
+                      or f"{name}@{version} is affected by {vid}.").strip()[:400]
+        return RawFinding(
+            engine=EngineKey.SCA,
+            title=f"Vulnerable dependency: {name}@{version} ({vid})"[:300],
+            category="vuln-dep",
+            description=summary,
+            base_severity=sev,
+            confidence="high",
+            cve_ids=aliases,
+            location={"path": source, "package": name, "version": version, "ecosystem": ecosystem},
+            evidence=dependency_evidence(
+                package=name, version=version, ecosystem=ecosystem, advisory=vid),
+            references={"advisory": vid, "detector": "osv-scanner"},
+        )
 
     def _collect_dependencies(self, ctx: ScanContext) -> Iterator[tuple[str, str, str, str]]:
         if ctx.inline_content is not None:
