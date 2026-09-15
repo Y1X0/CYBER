@@ -167,12 +167,24 @@ PGDATA=/var/lib/postgresql/guardian
 # waits on the answer forever. That is a check with no failure path, which is exactly what
 # ADR-027 forbids — and it is the third time this file has grown one. -w makes psql fail instead
 # of asking, </dev/null denies it a terminal to read from, and the timeout bounds the connect.
+#
+# `timeout` is the outermost guard and it is not redundant with PGCONNECT_TIMEOUT: that bounds the
+# connect, not a query that hangs after connecting. Every outcome below says something. A step that
+# can end in silence is a step that cannot report failure.
+echo "  looking for a server on 127.0.0.1:5432"
 PG_EXTERNAL=0
-if PGPASSWORD=guardian PGCONNECT_TIMEOUT=5 \
-     "$PGBIN/psql" -w -h 127.0.0.1 -U guardian -d guardian -tAc 'SELECT 1' \
-     </dev/null >/dev/null 2>&1; then
+probe_rc=0
+PGPASSWORD=guardian PGCONNECT_TIMEOUT=5 timeout 15 \
+  "$PGBIN/psql" -w -h 127.0.0.1 -U guardian -d guardian -tAc 'SELECT 1' \
+  </dev/null >/dev/null 2>&1 || probe_rc=$?
+if [ "$probe_rc" = 0 ]; then
   PG_EXTERNAL=1
   echo "  using the PostgreSQL already answering on 127.0.0.1:5432"
+elif [ "$probe_rc" = 124 ]; then
+  fail "The probe to 127.0.0.1:5432 did not answer within 15s. Something is listening but not
+completing a login. Check the server is still up from a Termux shell: pg_isready -h 127.0.0.1"
+else
+  echo "  nothing usable on 127.0.0.1:5432 (psql exit $probe_rc) — creating a local cluster"
 fi
 
 if [ "$PG_EXTERNAL" = 0 ]; then
@@ -241,7 +253,8 @@ fi  # end of the locally-created cluster
 # reached precisely because logging in as `guardian` already worked — but it still has to prove
 # the migration can write, and that is a stronger claim than "the login succeeded". A role with
 # no CREATE right on the database would pass the probe above and fail on migration 0001.
-PGPASSWORD=guardian PGCONNECT_TIMEOUT=5 "$PGBIN/psql" -w -h 127.0.0.1 -U guardian -d guardian -tAc \
+PGPASSWORD=guardian PGCONNECT_TIMEOUT=5 timeout 15 \
+  "$PGBIN/psql" -w -h 127.0.0.1 -U guardian -d guardian -tAc \
   'CREATE TABLE IF NOT EXISTS guardian_local_preflight(x int); DROP TABLE guardian_local_preflight;' \
   </dev/null >/dev/null \
   || fail "Connected to PostgreSQL as 'guardian' but could not create a table in it."
