@@ -194,7 +194,7 @@ export function Backdrop() {
  * the app mounts behind it.
  */
 const BOOT_MODULES = [
-  "KERNEL", "NETWORK", "SCANNER", "THREAT ENGINE", "POLICY", "DATABASE",
+  "KERNEL", "CRYPTO", "RECON", "SCAN ENGINE", "THREAT INTEL", "POLICY GATE", "DATASTORE",
 ];
 
 export function BootSequence({ onDone }: { onDone: () => void }) {
@@ -230,8 +230,9 @@ export function BootSequence({ onDone }: { onDone: () => void }) {
   return (
     <div className={`boot${leaving ? " done" : ""}`} role="status" aria-label="Starting">
       <div className="boot-inner">
-        <div className="boot-title">Security Core</div>
-        <div className="boot-sub">Initializing · encrypted channel</div>
+        {/* data-text feeds the chromatic-split pseudo-element; one paint, no duplicate node. */}
+        <div className="boot-title" data-text="SECURITY CORE">SECURITY CORE</div>
+        <div className="boot-sub">Establishing encrypted channel · offensive operations</div>
         {BOOT_MODULES.map((m, i) => (
           i < step && (
             <div className="boot-row" key={m} style={{ animationDelay: `${i * 20}ms` }}>
@@ -470,4 +471,86 @@ export function SystemClock() {
     return () => clearInterval(id);
   }, []);
   return <b>{now.toISOString().slice(11, 19)}Z</b>;
+}
+
+
+/* ══ threat level ═════════════════════════════════════════════════════════════════════════════ */
+
+export type ThreatLevel = "none" | "low" | "elevated" | "high" | "critical";
+
+/**
+ * Derive a threat level from what the tenant actually has open.
+ *
+ * `measured` is separate from the counts on purpose. A tenant that has never completed a scan has
+ * no findings — and that is not a low threat level, it is an unknown one. Rendering "LOW" there
+ * would be the dashboard's 100/100 problem again in a different costume: an absence of evidence
+ * presented as a reassuring result.
+ */
+export function threatLevel(counts: Record<string, number>, measured: boolean):
+  { level: ThreatLevel; label: string; lit: number } {
+  if (!measured) return { level: "none", label: "UNKNOWN — NOTHING SCANNED", lit: 0 };
+  const crit = counts.critical ?? 0, high = counts.high ?? 0, med = counts.medium ?? 0;
+  if (crit > 0) return { level: "critical", label: "CRITICAL", lit: 10 };
+  if (high > 2) return { level: "high", label: "HIGH", lit: 8 };
+  if (high > 0) return { level: "elevated", label: "ELEVATED", lit: 6 };
+  if (med > 0) return { level: "elevated", label: "ELEVATED", lit: 4 };
+  return { level: "low", label: "LOW", lit: 2 };
+}
+
+export function ThreatBar({ counts, measured, note }:
+  { counts: Record<string, number>; measured: boolean; note?: string }) {
+  const { level, label, lit } = threatLevel(counts, measured);
+  return (
+    <div className={`threat t-${level}`} role="status">
+      <span className="label">Threat level</span>
+      <span className="value">{label}</span>
+      <span className="threat-meter" aria-hidden="true">
+        {Array.from({ length: 10 }, (_, i) => (
+          <i key={i} className={i < lit ? "on" : undefined} />
+        ))}
+      </span>
+      <span className="spacer" />
+      {note && <span className="label">{note}</span>}
+    </div>
+  );
+}
+
+/** A red frame at the edge of the viewport while unresolved criticals exist. Rendered only then —
+ *  a permanent alarm is not an alarm. */
+export function EdgeAlert({ active }: { active: boolean }) {
+  if (!active) return null;
+  return <div className="edge-alert" aria-hidden="true" />;
+}
+
+/* ══ radar ════════════════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * A sweep with one blip per asset, placed deterministically from the asset count so the picture is
+ * stable between renders rather than jittering on every repaint. It represents attack surface
+ * size, and it says so — it is not a map, and nothing here implies the blips are locations.
+ */
+export function Radar({ blips }: { blips: number }) {
+  const pts = useMemo(() => {
+    const n = Math.min(blips, 12);
+    return Array.from({ length: n }, (_, i) => {
+      const angle = (i * 137.5) * (Math.PI / 180);       // golden angle: even, non-repeating
+      const radius = 18 + ((i * 7) % 30);
+      return {
+        left: `${50 + Math.cos(angle) * radius}%`,
+        top: `${50 + Math.sin(angle) * radius}%`,
+        delay: `${(i % 6) * 0.6}s`,
+      };
+    });
+  }, [blips]);
+
+  return (
+    <div className="radar" role="img"
+         aria-label={`${blips} asset(s) under watch`}>
+      <div className="sweep" />
+      {pts.map((pt, i) => (
+        <span className="blip" key={i}
+              style={{ left: pt.left, top: pt.top, animationDelay: pt.delay }} />
+      ))}
+    </div>
+  );
 }

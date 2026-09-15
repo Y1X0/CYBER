@@ -939,3 +939,195 @@ input[type="checkbox"] { accent-color: var(--crimson); width: 14px; height: 14px
 .score small { font-size: var(--fs-lg); color: var(--text-faint); }
 .badges { display: flex; gap: var(--s-2); justify-content: center; flex-wrap: wrap;
           margin: var(--s-3) 0; }
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════════
+ * THREAT SURFACE — the layer that makes this read as an offensive-security console.
+ *
+ * Everything below is transform, opacity or a static paint. Nothing here introduces a blur, a
+ * blend mode or a backdrop filter, because the page was just taken from 10fps to 60 by removing
+ * exactly those, and the drama is worth nothing if it costs the frame budget back.
+ *
+ * The other constraint is that every effect here reports something true. The threat bar reads
+ * from real counts, the alert pulse fires on real critical findings, the reticle marks the panel
+ * the pointer is actually on. A console that looks alarming at random teaches its operator to
+ * ignore alarm.
+ * ══════════════════════════════════════════════════════════════════════════════════════════════ */
+
+/* ── boot sequence, second pass ─────────────────────────────────────────────────────────────── */
+.boot { background: radial-gradient(ellipse 120% 80% at 50% 50%, #0a0d16, var(--void) 70%); }
+
+.boot-inner { position: relative; }
+
+/* A beam that crosses the panel once per second while modules come online. */
+.boot-inner::before {
+  content: ""; position: absolute; left: -12%; right: -12%; height: 1px; top: 0;
+  background: linear-gradient(to right, transparent, var(--plasma), transparent);
+  box-shadow: 0 0 16px var(--plasma);
+  animation: boot-beam 1.15s var(--ease-out) infinite;
+}
+@keyframes boot-beam {
+  0%   { transform: translateY(0); opacity: 0; }
+  10%  { opacity: 1; }
+  90%  { opacity: 1; }
+  100% { transform: translateY(210px); opacity: 0; }
+}
+
+.boot-title {
+  position: relative;
+  text-shadow: 0 0 26px rgba(255, 45, 79, 0.55);
+}
+/* Chromatic split on the title: two offset copies in red and cyan, jittering briefly. Drawn with
+   text-shadow rather than duplicated elements, so it is one paint. */
+.boot-title::after {
+  content: attr(data-text); position: absolute; inset: 0;
+  color: transparent;
+  text-shadow: 1.5px 0 var(--plasma), -1.5px 0 #2fd8ff;
+  opacity: 0.55;
+  animation: glitch-jit 2.4s steps(1) infinite;
+}
+@keyframes glitch-jit {
+  0%, 92%, 100% { transform: translate(0, 0); opacity: 0.5; }
+  93%           { transform: translate(-2px, 1px); opacity: 0.9; }
+  95%           { transform: translate(2px, -1px); opacity: 0.9; }
+  97%           { transform: translate(-1px, 0); opacity: 0.7; }
+}
+
+.boot-grant {
+  animation: grant-in 420ms var(--ease-snap) both;
+  text-shadow: 0 0 20px rgba(69, 212, 138, 0.7);
+}
+@keyframes grant-in {
+  from { opacity: 0; transform: scale(0.94); letter-spacing: 0.6em; }
+  to   { opacity: 1; transform: none; }
+}
+
+/* ── threat level bar ───────────────────────────────────────────────────────────────────────── */
+.threat {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: var(--s-2) var(--s-4);
+  border: 1px solid var(--edge); border-left-width: 3px;
+  border-radius: var(--r-sm);
+  background: linear-gradient(to right, rgba(20, 25, 38, 0.9), rgba(10, 13, 22, 0.5));
+  font-family: var(--font-mono); font-size: var(--fs-micro);
+  letter-spacing: var(--track-wide); text-transform: uppercase;
+}
+.threat .label { color: var(--text-faint); }
+.threat .value { font-size: var(--fs-sm); font-weight: 600; letter-spacing: var(--track-wide); }
+.threat .spacer { flex: 1; }
+
+.threat.t-none     { border-left-color: var(--text-faint); }
+.threat.t-none     .value { color: var(--text-dim); }
+.threat.t-low      { border-left-color: var(--ok-text); }
+.threat.t-low      .value { color: var(--ok-text); }
+.threat.t-elevated { border-left-color: var(--amber-text); }
+.threat.t-elevated .value { color: var(--amber-text); }
+.threat.t-high     { border-left-color: var(--crimson); }
+.threat.t-high     .value { color: var(--red-text); }
+.threat.t-critical { border-left-color: var(--plasma); background:
+  linear-gradient(to right, rgba(77, 8, 19, 0.85), rgba(10, 13, 22, 0.5)); }
+.threat.t-critical .value {
+  color: #fff; text-shadow: 0 0 14px var(--plasma);
+  animation: threat-throb 1.9s ease-in-out infinite;
+}
+@keyframes threat-throb { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
+
+/* A meter of ten cells; the lit ones are the severity actually present. */
+.threat-meter { display: flex; gap: 2px; }
+.threat-meter i {
+  width: 5px; height: 12px; background: rgba(255, 255, 255, 0.07);
+  border-radius: 1px; transition: background var(--t-slow) var(--ease-out);
+}
+.threat-meter i.on { background: currentColor; box-shadow: 0 0 6px currentColor; }
+
+/* ── critical edge pulse ────────────────────────────────────────────────────────────────────── */
+/* A red frame breathing at the viewport edge while unresolved criticals exist. Pointer-events
+   none, one element, opacity only. */
+.edge-alert {
+  position: fixed; inset: 0; z-index: var(--z-chrome); pointer-events: none;
+  box-shadow: inset 0 0 90px -30px var(--plasma), inset 0 0 0 1px rgba(255, 45, 79, 0.28);
+  animation: edge-breathe 3.4s ease-in-out infinite;
+}
+@keyframes edge-breathe { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.85; } }
+@media (prefers-reduced-motion: reduce) { .edge-alert { animation: none; opacity: 0.5; } }
+
+/* ── targeting reticle on panels ────────────────────────────────────────────────────────────── */
+/* The HUD corners already exist; under the pointer they become a lock. Transform and opacity
+   only, and only on the hovered panel. */
+.panel.hud-corners::before, .panel.hud-corners::after {
+  transition: opacity var(--t-fast) var(--ease-out), width var(--t-base) var(--ease-out),
+              height var(--t-base) var(--ease-out);
+}
+.panel.hud-corners:hover::before, .panel.hud-corners:hover::after {
+  width: 20px; height: 20px; opacity: 1;
+  border-color: var(--plasma);
+}
+
+/* A hairline that runs the width of a panel header when it is hovered — a channel opening. */
+.panel-head { position: relative; }
+.panel-head::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 1px;
+  background: linear-gradient(to right, var(--plasma), transparent 70%);
+  transform: scaleX(0); transform-origin: left;
+  transition: transform var(--t-slow) var(--ease-out);
+}
+.panel:hover .panel-head::after { transform: scaleX(1); }
+
+/* ── numbers that arrive rather than appear ─────────────────────────────────────────────────── */
+.stat-value { position: relative; }
+.stat-bad .stat-value::after {
+  /* A thin scan passing over a critical figure, so the eye is pulled to it without the number
+     itself moving — a moving digit is a digit you cannot read. */
+  content: ""; position: absolute; inset: -2px -6px;
+  background: linear-gradient(to right, transparent, rgba(255, 45, 79, 0.22), transparent);
+  transform: translateX(-120%);
+  animation: fig-scan 4.2s var(--ease-out) infinite;
+  pointer-events: none;
+}
+@keyframes fig-scan { 0% { transform: translateX(-120%); } 40%, 100% { transform: translateX(220%); } }
+
+/* ── content sweep ──────────────────────────────────────────────────────────────────────────── */
+/* The background sweep is now anchored to the working area rather than the whole viewport, so it
+   reads as the console scanning its own contents. */
+.bg-sweep {
+  background: linear-gradient(to bottom, transparent,
+    rgba(255, 45, 79, 0.055) 40%, rgba(255, 106, 26, 0.03) 55%, transparent);
+  height: 240px;
+  animation-duration: 9s;
+}
+
+/* ── radar ──────────────────────────────────────────────────────────────────────────────────── */
+.radar { position: relative; width: 104px; height: 104px; flex: none; }
+.radar::before {
+  content: ""; position: absolute; inset: 0; border-radius: 50%;
+  border: 1px solid var(--edge-red);
+  background:
+    radial-gradient(circle, transparent 0 32%, rgba(224, 27, 60, 0.13) 32.5% 33%, transparent 33.5%),
+    radial-gradient(circle, transparent 0 64%, rgba(224, 27, 60, 0.13) 64.5% 65%, transparent 65.5%);
+}
+.radar .sweep {
+  position: absolute; inset: 0; border-radius: 50%;
+  background: conic-gradient(from 0deg, rgba(255, 45, 79, 0.30), transparent 62deg);
+  animation: radar-turn 3.6s linear infinite;
+  will-change: transform;
+}
+@keyframes radar-turn { to { transform: rotate(360deg); } }
+.radar .blip {
+  position: absolute; width: 5px; height: 5px; border-radius: 50%;
+  background: var(--plasma); box-shadow: 0 0 9px var(--plasma);
+  animation: blip-fade 3.6s linear infinite;
+}
+@keyframes blip-fade { 0%, 60% { opacity: 0.25; } 72% { opacity: 1; } 100% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) {
+  .radar .sweep, .radar .blip { animation: none; }
+}
+
+/* ── section rule ───────────────────────────────────────────────────────────────────────────── */
+.section-rule {
+  display: flex; align-items: center; gap: var(--s-3); margin: var(--s-2) 0;
+  font-family: var(--font-mono); font-size: var(--fs-micro);
+  letter-spacing: var(--track-mega); text-transform: uppercase; color: var(--text-faint);
+}
+.section-rule::after {
+  content: ""; flex: 1; height: 1px;
+  background: linear-gradient(to right, var(--edge-red), transparent);
+}

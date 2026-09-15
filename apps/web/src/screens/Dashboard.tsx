@@ -2,7 +2,9 @@
 // guess and nothing is hardcoded. Where a value has no data behind it the screen says so.
 
 import { Dashboard, api } from "../api";
-import { Counter, SecurityGauge, TerminalPanel, TermLine } from "../design/fx";
+import {
+  Counter, EdgeAlert, Radar, SecurityGauge, TerminalPanel, TermLine, ThreatBar,
+} from "../design/fx";
 import { navigate } from "../router";
 import { Async, Bars, Card, SEVERITIES, SEV_COLOR, Stat, StatusPill, useAsync, when } from "../ui";
 
@@ -24,8 +26,21 @@ export function DashboardScreen() {
         const measured = d.scans_completed > 0 && d.last_successful_scan_at !== null;
         const score = measured ? d.security_score : null;
 
+        const criticals = d.open_severity_counts.critical ?? 0;
+
         return (
           <>
+            {/* Only while unresolved criticals exist. A frame that is always red is wallpaper. */}
+            <EdgeAlert active={criticals > 0} />
+
+            <ThreatBar
+              counts={d.open_severity_counts}
+              measured={measured}
+              note={measured
+                ? `${d.assets_total} asset(s) · ${d.scans_completed} scan(s) completed`
+                : "run a scan to establish a baseline"}
+            />
+
             {queue.data?.state === "stalled" && (
               <div className="state state-blocked" role="alert">
                 <h4>Your scans are queued but nothing is running</h4>
@@ -52,6 +67,7 @@ export function DashboardScreen() {
                 <div style={{ display: "flex", gap: "var(--s-5)", alignItems: "center",
                               flexWrap: "wrap" }}>
                   <SecurityGauge value={score} caption={measured ? "score" : "no data"} />
+                  <Radar blips={d.assets_total} />
                   <div style={{ flex: "1 1 200px", minWidth: 0 }}>
                     {measured ? (
                       <p className="muted">

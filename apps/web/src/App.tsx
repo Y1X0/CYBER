@@ -84,17 +84,17 @@ function Console({ onSignOut }: { onSignOut: () => void }) {
            role="button" tabIndex={0}
            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") navigate("dashboard"); }}>
         <span className="mark" aria-hidden="true">◆</span>
-        <span className="wordmark">Security<em>Guardian</em></span>
+        <span className="wordmark">Guardian<em>//</em>OPS</span>
       </div>
 
       <header className="shell-top">
         <div className="telemetry">
           <span className="live-dot" />
-          <b>SECURE</b>
+          <b>LINK SECURE</b>
           <span className="sep opt">│</span>
-          <span className="opt">AES-256</span>
+          <span className="opt">TLS 1.3 · AES-256-GCM</span>
           <span className="sep opt">│</span>
-          <span className="opt"><SystemClock /></span>
+          <span className="opt">SESSION <SystemClock /></span>
         </div>
         <div className="telemetry">
           {me.data && <span className="opt">{me.data.email}</span>}
