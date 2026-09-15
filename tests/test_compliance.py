@@ -27,7 +27,7 @@ from guardian_core.compliance import (
 )
 
 ALL_ENGINES = {"sast", "sca", "secrets", "dast", "api", "cspm", "k8s", "iac", "container",
-               "service_cve", "nmap", "discovery"}
+               "service_cve", "nmap", "discovery", "ml_model", "cicd"}
 
 
 def _f(fid="f1", *, severity="high", cwe=None, category="", rule="", status="open", title="t"):
@@ -165,5 +165,57 @@ def test_control_ids_are_unique_within_a_framework():
         assert len(ids) == len(set(ids))
 
 
-def test_the_catalogue_covers_the_three_frameworks():
+def test_the_catalogue_covers_every_declared_framework():
     assert {c.framework for c in CONTROLS} == set(FRAMEWORKS)
+
+
+def test_the_government_frameworks_are_present():
+    # NIST 800-53 (federal / FedRAMP) and CIS v8 are the two a government or university buyer asks
+    # for by name, so their absence is a product gap, not just a missing table.
+    assert "nist-800-53" in FRAMEWORKS
+    assert "cis-v8" in FRAMEWORKS
+    assert controls_for("nist-800-53")
+    assert controls_for("cis-v8")
+
+
+# ── the new engines must actually reach controls, in every framework ──────────────────────────────
+@pytest.mark.parametrize("framework,control_id", [
+    ("soc2", "CC6.8"), ("iso27001", "A.8.28"),
+    ("nist-800-53", "SI-3"), ("nist-800-53", "SR-3"), ("cis-v8", "CIS-10"),
+])
+def test_a_malicious_model_finding_fails_the_supply_chain_controls(framework, control_id):
+    # A modelscan CWE-502 finding must map to the malicious-code / supply-chain control in each
+    # framework — otherwise the ML engine finds real risk that no compliance view ever reflects.
+    finding = _f(cwe="CWE-502", category="ml-model-malware", title="unsafe pickle operator")
+    assessment = assess(framework, [finding], engines_completed=ALL_ENGINES)
+    assert _status(assessment, control_id) == FAILING
+
+
+@pytest.mark.parametrize("framework,control_id", [
+    ("soc2", "CC7.1"), ("iso27001", "A.8.28"), ("pci-dss", "6.2"),
+    ("nist-800-53", "SA-15"), ("cis-v8", "CIS-16"),
+])
+def test_a_cicd_finding_fails_the_secure_development_controls(framework, control_id):
+    finding = _f(cwe="CWE-1357", category="cicd-supply-chain", title="unpinned action")
+    assessment = assess(framework, [finding], engines_completed=ALL_ENGINES)
+    assert _status(assessment, control_id) == FAILING
+
+
+def test_a_cicd_injection_maps_to_input_validation_in_nist():
+    finding = _f(cwe="CWE-94", category="cicd-injection", title="workflow script injection")
+    assessment = assess("nist-800-53", [finding], engines_completed=ALL_ENGINES)
+    assert _status(assessment, "SI-10") == FAILING
+
+
+def test_the_ml_model_engine_alone_can_assess_the_malicious_code_control():
+    # With only modelscan run and nothing found, SI-3 is a genuine `passing` — an engine that can
+    # assess it completed. Controls it cannot speak to stay `not_assessed`, never passing.
+    assessment = assess("nist-800-53", [], engines_completed={"ml_model"})
+    assert _status(assessment, "SI-3") == PASSING
+    assert _status(assessment, "AU-2") == NOT_ASSESSED   # logging: modelscan says nothing about it
+
+
+def test_the_cicd_engine_alone_assesses_development_but_not_cryptography():
+    assessment = assess("nist-800-53", [], engines_completed={"cicd"})
+    assert _status(assessment, "SA-15") == PASSING
+    assert _status(assessment, "SC-13") == NOT_ASSESSED

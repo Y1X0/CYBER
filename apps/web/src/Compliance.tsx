@@ -28,6 +28,8 @@ const FRAMEWORK_LABEL: Record<string, string> = {
   soc2: "SOC 2",
   iso27001: "ISO/IEC 27001",
   "pci-dss": "PCI DSS v4.0",
+  "nist-800-53": "NIST SP 800-53",
+  "cis-v8": "CIS Controls v8",
 };
 
 export function CompliancePanel() {
