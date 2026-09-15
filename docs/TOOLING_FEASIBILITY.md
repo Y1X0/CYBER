@@ -345,6 +345,131 @@ usage policy (whose hashes, consent) rather than on infrastructure.
 
 ---
 
+## 5b. New & emerging tools (the newest generation, 2024–2026)
+
+The catalogue above is the established toolset. This section is what has appeared *recently* — the
+part of the field that did not exist, or barely existed, two years ago. It is where a product that
+ships now can be genuinely ahead rather than reimplementing what everyone already has.
+
+**Licence discipline note:** every tool here is marked with its licence and a state, but a new tool
+is `REVIEW` until `tools/check_tool_licenses.py` and counsel clear it — the same rule as the main
+registry. Nothing here is asserted `APPROVED` on the strength of a permissive-sounding name; several
+are AGPL and therefore **bundle-prohibited but usable customer-hosted**, which is a real distinction
+for a SaaS.
+
+### 5b.1 AI / LLM security — the brand-new domain
+
+This did not exist as a category before ~2023. It is the single most strategically interesting area
+for Guardian specifically, because **the product already runs an LLM** — so it can test AI systems
+with credibility, and it can dogfood these tools on its own analyst. A security platform that scans
+*the customer's AI* is a market most incumbents have not entered.
+
+| Tool | What it finds | Level | Licence | Plane | Host | Prio |
+|---|---|---|---|---|---|---|
+| **garak** (NVIDIA) | LLM vuln scanner — jailbreaks, prompt injection, data leakage, toxicity | L1 | Apache-2.0 | net-inproc | free¹ | P1 |
+| **PyRIT** (Microsoft) | Automated red-teaming of generative-AI systems | L1 | MIT | net-inproc | free¹ | P2 |
+| **promptfoo** | LLM red-team + eval harness, CI-friendly | L0/L1 | MIT | offline/net | free | P2 |
+| **LLM Guard** (Protect AI) | Input/output scanning for LLM apps (injection, PII, secrets) | L0 | MIT | offline | free | P2 |
+| **Rebuff** | Prompt-injection detection (self-hardening) | L0 | Apache-2.0 | offline | free | P3 |
+| **ModelScan** (Protect AI) | Malicious-code detection in ML model files (pickle, etc.) | L0 | Apache-2.0 | offline | free | P1 |
+| **Giskard** | ML model vulnerability/bias scanning | L0 | Apache-2.0 | offline | free | P3 |
+
+¹ "network" here is API calls to the *customer's own* LLM endpoint under test — in-process, no host
+scanning, so it runs on the free host. It is gated on the same authorization every target needs.
+
+**Why this is P1, not a novelty:** garak + ModelScan are offline-or-API, licence-clean, and fill a
+gap nobody's SAST/DAST covers. ModelScan especially — detecting a malicious pickle in an uploaded
+model file — is pure L0 forensics-of-ML-artifacts and fits the current host today. And the AI
+dimension folds back on itself: Guardian's own analyst can *explain* a garak finding, which is the
+correlation story (§6) applied to AI risk.
+
+### 5b.2 Next-generation secrets & supply chain
+
+| Tool | Edge over the incumbent | Level | Licence | Host | Prio |
+|---|---|---|---|---|---|
+| **Nosey Parker** (Praetorian) | ML-assisted, extremely fast secret detection; beats regex-only | L0 | Apache-2.0 | free | P1 |
+| **Kingfisher** (MongoDB) | Secret detection **with live validation** built in | L0/L3² | Apache-2.0 | free/worker | P2 |
+| **OpenSSF Scorecard** | Automated repo security-posture score (branch protection, pinning, SAST-in-CI) | L1 | Apache-2.0 | free | P1 |
+| **GUAC** (OpenSSF) | Graph of software supply-chain metadata (SBOM+SLSA+vulns) | L0 | Apache-2.0 | worker³ | P3 |
+| **Sigstore / cosign / rekor** | Signature + transparency-log provenance verification | L0 | Apache-2.0 | free | P2 |
+| **bomctl** | Multi-format SBOM management and diffing | L0 | Apache-2.0 | free | P3 |
+
+² Validation is the L3 part (it authenticates); detection alone is L0.
+³ GUAC runs a graph database — disk-bound, worker host.
+
+OpenSSF Scorecard is the standout: it scores a repository's *security practices* (not its code),
+which is a dimension Guardian doesn't have yet and which enterprise buyers increasingly demand.
+Offline-against-the-repo, Apache-2.0, free host.
+
+### 5b.3 Modern DFIR (digital forensics — the newest engines)
+
+The user named forensics; this is its cutting edge, distinct from the classic tools in §3.1.
+
+| Tool | What it does | Level | Licence | Host | Prio |
+|---|---|---|---|---|---|
+| **dissect** (Fox-IT) | Modern, fast disk-image & artifact forensics framework | L0 | Apache-2.0 | free⁴ | P1 |
+| **Velociraptor** | Endpoint DFIR + hunting via VQL | L0 | AGPL-3.0 | **customer-hosted only** | P3 |
+| **plaso / log2timeline** | Super-timeline from disparate artifacts | L0 | Apache-2.0 | worker⁴ | P2 |
+| **Timesketch** (Google) | Collaborative timeline analysis | L0 | Apache-2.0 | worker | P3 |
+| **chainsaw** (WithSecure) | Fast Windows event-log + Sigma hunting | L0 | GPL-3.0 | free (sep-proc) | P2 |
+| **hayabusa** | Windows event-log DFIR, very fast | L0 | AGPL-3.0 | **customer-hosted only** | P3 |
+| **Sigma + pySigma** | Detection-as-code rules, convert to any SIEM | L0 | Apache/DRL | free | P1 |
+
+⁴ dissect parses images in-process and is Apache-2.0 — the cleanest modern-forensics pick. Large
+images are disk-bound, so the *big* ones want the worker host, but the framework runs free.
+
+**AGPL is the recurring trap here.** Velociraptor and hayabusa are excellent and AGPL-3.0 — §13
+covers network interaction, which is what a SaaS is, so they cannot be *bundled*. They remain viable
+as **customer-hosted** integrations (the customer runs it, Guardian ingests the output), which is a
+legitimate deployment model worth offering for exactly these high-value tools. Sigma + dissect are
+the P1 bundle-safe picks.
+
+### 5b.4 eBPF runtime security (new plane entirely)
+
+| Tool | What it does | Level | Licence | Host | Prio |
+|---|---|---|---|---|---|
+| **Falco** (CNCF) | Runtime threat detection via eBPF | L1 | Apache-2.0 | customer-hosted | P3 |
+| **Tetragon** (Cilium) | eBPF runtime security & enforcement | L1 | Apache-2.0 | customer-hosted | P3 |
+| **Tracee** (Aqua) | eBPF runtime detection & forensics | L1 | Apache-2.0 | customer-hosted | P3 |
+
+Runtime/eBPF tools watch a *running* host's kernel — they are agents the customer deploys, not
+scanners Guardian runs. So they are a P3 **ingestion** integration (Guardian consumes their alerts
+and correlates), not a provider. Flagged because "runtime security" is a category buyers ask for and
+it is worth knowing exactly where it fits: as a data source, not a scan.
+
+### 5b.5 Modern recon & code search
+
+| Tool | Edge | Level | Licence | Host | Prio |
+|---|---|---|---|---|---|
+| **uncover** (ProjectDiscovery) | Query Shodan/Censys/FOFA for exposed assets | L1 | MIT | worker | P2 |
+| **cvemap** (ProjectDiscovery) | CVE↔exploit↔EPSS↔KEV navigation | L0 | MIT | free | P1 |
+| **tlsx / asnmap** | TLS-grab and ASN-map at scale | L1/L2 | MIT | worker | P2 |
+| **ast-grep** | Structural code search — fast custom SAST rules in any language | L0 | MIT | free | P1 |
+| **weggli** | Semantic C/C++ bug-pattern search | L0 | Apache-2.0 | free | P2 |
+| **RESTler** (Microsoft) | Stateful REST-API fuzzing from a spec | L3 | MIT | worker | P2 |
+
+cvemap and ast-grep are the free-host P1s: cvemap enriches the existing feed layer with exploit/KEV
+context (pure data, no network beyond the fetch already done), and ast-grep lets Guardian ship
+*custom* structural rules without a heavyweight SAST engine — the same "adopt the format, keep
+control" pattern already used for nuclei templates.
+
+### 5b.6 What this adds up to
+
+Three of these are genuinely differentiating and free-host-ready, and belong in **Phase A/B**
+alongside the established P0s:
+
+1. **ModelScan + garak** — AI/ML security. A category incumbents largely don't have, and one
+   Guardian is uniquely placed to sell because it runs an LLM itself.
+2. **OpenSSF Scorecard** — repo security-posture scoring, an enterprise-buyer checkbox Guardian
+   currently can't tick.
+3. **dissect + Sigma** — modern DFIR that is Apache-licensed and bundle-safe.
+
+The rest sequence into the existing phases. The AGPL and customer-hosted tools (Velociraptor,
+hayabusa, Falco/Tetragon) are worth a **customer-hosted integration tier** — a deliberate product
+decision that unlocks the best tools in DFIR and runtime without a licence violation.
+
+---
+
 ## 6. The AI dimension — honestly
 
 The user asked for AI that can "search, think, and maybe invent a vulnerability that isn't already
@@ -435,10 +560,18 @@ on infrastructure that does not exist yet.
 `P0`: gitleaks · opengrep/bandit (SAST) · osv-scanner · checkov · YARA + file-magic + hashing
 (forensics) · turn on the AI analyst (needs the key). These are all L0, all licence-clean, all
 free-host, and each is an S/M provider against a seam that already exists.
+New-generation additions that are equally free-host and belong here: **ModelScan** (malicious-code
+in ML model files), **OpenSSF Scorecard** (repo security-posture score), **cvemap** (exploit/KEV
+enrichment of the feed layer), **ast-grep** (custom structural SAST rules) — all §5b, all L0.
 
 **Phase B — offline forensics & PCAP depth.**
 `P1`: tshark/Zeek PCAP dissection (the Wireshark ask) · PE/ELF analysis · detect-secrets · syft +
 grype · KICS/tfsec. Plus the **AI correlation layer** (§6.2) — the real differentiator.
+New-generation additions: **dissect** (modern disk-image forensics), **Sigma + pySigma**
+(detection-as-code), **Nosey Parker** (ML-assisted secrets), **garak** (LLM vulnerability scanning
+against the customer's own model). The AGPL DFIR tools (**Velociraptor**, **hayabusa**) come in as a
+**customer-hosted integration tier** rather than bundled — a deliberate product decision that
+unlocks the best DFIR without a licence violation.
 
 **Phase C — cloud posture (credential review first).**
 `P1/P2`: Prowler · Kubescape · kube-bench · PMapper. Precondition: the customer-cloud-credential
