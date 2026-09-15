@@ -1,9 +1,16 @@
-// The console shell: identity, navigation, and the routing table.
+// The console shell: identity, navigation, routing, and the atmosphere everything sits inside.
+//
+// The shell is where the product says what it is in the first three seconds, so it carries the
+// boot sequence, the backdrop, the telemetry strip and the route transition. Everything below it
+// — the thirteen screens — is unchanged logic rendering through restyled primitives.
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { AttackGraph } from "./AttackGraph";
 import { CompliancePanel } from "./Compliance";
 import { api, getToken, setToken } from "./api";
+import {
+  Backdrop, BootSequence, RouteTransition, SystemClock, TargetingCursor,
+} from "./design/fx";
 import { navigate, useRoute } from "./router";
 import { AssetsScreen } from "./screens/Assets";
 import { AuthorizationScreen } from "./screens/Authorization";
@@ -37,39 +44,87 @@ const NAV = [
 
 export function App() {
   const [authed, setAuthed] = useState<boolean>(!!getToken());
-  if (!authed) return <AuthScreen onAuthed={() => setAuthed(true)} />;
-  return <Console onSignOut={() => { setToken(null); setAuthed(false); }} />;
+
+  // The boot sequence runs once per browser session, not once per sign-in and not on every
+  // reload of a screen an operator is working in. Cinema on first contact; out of the way after.
+  const [booted, setBooted] = useState<boolean>(() => {
+    try { return sessionStorage.getItem("guardian.booted") === "1"; } catch { return false; }
+  });
+  const finishBoot = useCallback(() => {
+    setBooted(true);
+    try { sessionStorage.setItem("guardian.booted", "1"); } catch { /* private mode: replay it */ }
+  }, []);
+
+  return (
+    <>
+      <Backdrop />
+      <TargetingCursor />
+      {!booted && <BootSequence onDone={finishBoot} />}
+      {authed
+        ? <Console onSignOut={() => { setToken(null); setAuthed(false); }} />
+        : <AuthScreen onAuthed={() => setAuthed(true)} />}
+    </>
+  );
 }
 
 function Console({ onSignOut }: { onSignOut: () => void }) {
   const route = useRoute();
   const me = useAsync(() => api.me(), []);
 
+  // Keep the document title tracking the route: browser history and tab switching are navigation
+  // too, and a console that is always called "Security Guardian" is unusable with ten tabs open.
+  useEffect(() => {
+    const item = NAV.find((n) => n.screen === route.screen);
+    document.title = item ? `${item.label} · Security Guardian` : "Security Guardian";
+  }, [route.screen]);
+
   return (
     <div className="app">
-      <header>
-        <h2 onClick={() => navigate("dashboard")} className="brand">🛡️ Security Guardian</h2>
-        <div className="header-right">
-          {me.data && <span className="muted">{me.data.email}</span>}
+      <div className="shell-brand hud-corners" onClick={() => navigate("dashboard")}
+           role="button" tabIndex={0}
+           onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") navigate("dashboard"); }}>
+        <span className="mark" aria-hidden="true">◆</span>
+        <span className="wordmark">Security<em>Guardian</em></span>
+      </div>
+
+      <header className="shell-top">
+        <div className="telemetry">
+          <span className="live-dot" />
+          <b>SECURE</b>
+          <span className="sep opt">│</span>
+          <span className="opt">AES-256</span>
+          <span className="sep opt">│</span>
+          <span className="opt"><SystemClock /></span>
+        </div>
+        <div className="telemetry">
+          {me.data && <span className="opt">{me.data.email}</span>}
           <button onClick={onSignOut}>Sign out</button>
         </div>
       </header>
 
-      <nav className="tabs">
-        {NAV.map((item) => (
+      <nav className="shell-nav" aria-label="Sections">
+        {NAV.map((item, i) => (
           <button
             key={item.screen}
-            className={route.screen === item.screen ? "tab on" : "tab"}
+            className={route.screen === item.screen ? "nav-item on" : "nav-item"}
+            aria-current={route.screen === item.screen ? "page" : undefined}
             onClick={() => navigate(item.screen)}
           >
+            <span className="idx" aria-hidden="true">{String(i + 1).padStart(2, "0")}</span>
             {item.label}
           </button>
         ))}
       </nav>
 
-      <main>
+      <main className="shell-main">
         {/* An expired session must not render as a set of empty screens. */}
-        <Async loader={me}>{() => <Screen screen={route.screen} id={route.id} />}</Async>
+        <Async loader={me}>
+          {() => (
+            <RouteTransition routeKey={`${route.screen}/${route.id ?? ""}`}>
+              <Screen screen={route.screen} id={route.id} />
+            </RouteTransition>
+          )}
+        </Async>
       </main>
     </div>
   );

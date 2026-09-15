@@ -1,0 +1,117 @@
+/* Design tokens.
+ *
+ * One layer, no component knows a raw hex. Everything downstream — panels, buttons, charts,
+ * effects, canvases — reads from here, so the identity is changed in one file rather than
+ * hunted across thirteen screens.
+ *
+ * On colour: the palette is black → charcoal → deep crimson → red glow → ember, with white-grey
+ * technical text. Crimson at full strength is a *surface* colour — borders, glows, fills — and
+ * never body text. Red text uses --red-text, which is lightened specifically so it clears 7:1
+ * against the page. A cybersecurity product that is hard to read has failed at its job before it
+ * has started.
+ */
+
+:root {
+  /* ── depth: seven steps from void to raised glass ─────────────────────────────────────────── */
+  --void:        #04050a;
+  --obsidian:    #070911;
+  --surface-0:   #0a0d16;
+  --surface-1:   #0e121d;
+  --surface-2:   #141926;
+  --surface-3:   #1b2132;
+  --glass:       rgba(18, 23, 36, 0.62);
+  --glass-hi:    rgba(30, 38, 57, 0.55);
+
+  /* ── edges ────────────────────────────────────────────────────────────────────────────────── */
+  --edge:        rgba(140, 160, 200, 0.10);
+  --edge-strong: rgba(160, 180, 220, 0.20);
+  --edge-red:    rgba(224, 27, 60, 0.32);
+  --edge-red-hi: rgba(255, 60, 90, 0.65);
+
+  /* ── the accent family ────────────────────────────────────────────────────────────────────── */
+  --crimson:     #e01b3c;
+  --crimson-dim: #8e1026;
+  --crimson-deep:#4d0813;
+  --ember:       #ff6a1a;
+  --ember-dim:   #a33d06;
+  --plasma:      #ff2d4f;
+
+  /* Red that is safe to read. Full crimson on near-black is ~4.1:1 — under the 4.5 floor for
+     body text — so text gets this instead and crimson stays on borders and fills. */
+  --red-text:    #ff7085;
+  --amber-text:  #ffb44d;
+  --ok-text:     #45d48a;
+  --info-text:   #62b8ff;
+
+  /* ── type ─────────────────────────────────────────────────────────────────────────────────── */
+  --text:        #dfe4ee;
+  --text-dim:    #929bb0;
+  --text-faint:  #5f687d;
+
+  --font-ui: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas,
+               "Liberation Mono", monospace;
+
+  --fs-micro: 10px;
+  --fs-xs:    11px;
+  --fs-sm:    12px;
+  --fs-base:  13px;
+  --fs-md:    15px;
+  --fs-lg:    19px;
+  --fs-xl:    26px;
+  --fs-2xl:   38px;
+  --fs-3xl:   56px;
+
+  --track-wide: 0.14em;   /* uppercase technical labels */
+  --track-mega: 0.32em;   /* boot sequence, system headers */
+
+  /* ── space / radius ───────────────────────────────────────────────────────────────────────── */
+  --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
+  --s-5: 24px; --s-6: 32px; --s-7: 48px; --s-8: 64px;
+
+  --r-sm: 3px; --r-md: 6px; --r-lg: 10px; --r-pill: 999px;
+
+  /* ── light ────────────────────────────────────────────────────────────────────────────────── */
+  --glow-red:    0 0 0 1px var(--edge-red), 0 0 24px -6px rgba(224, 27, 60, 0.55);
+  --glow-red-hi: 0 0 0 1px var(--edge-red-hi), 0 0 34px -4px rgba(255, 45, 79, 0.75);
+  --glow-ember:  0 0 26px -6px rgba(255, 106, 26, 0.6);
+  --shadow-panel: 0 1px 0 rgba(255,255,255,0.03) inset, 0 18px 46px -24px rgba(0,0,0,0.95);
+  --inner-top:   inset 0 1px 0 rgba(255, 255, 255, 0.045);
+
+  /* ── motion ───────────────────────────────────────────────────────────────────────────────── */
+  --t-instant: 90ms;
+  --t-fast:    160ms;
+  --t-base:    260ms;
+  --t-slow:    520ms;
+  --t-cine:    900ms;
+
+  --ease-out:  cubic-bezier(0.16, 1, 0.3, 1);      /* decelerate — arrivals */
+  --ease-in:   cubic-bezier(0.7, 0, 0.84, 0);      /* accelerate — departures */
+  --ease-snap: cubic-bezier(0.34, 1.56, 0.64, 1);  /* overshoot — confirmations */
+
+  /* ── layering ─────────────────────────────────────────────────────────────────────────────── */
+  --z-bg: 0; --z-content: 10; --z-chrome: 40; --z-overlay: 60; --z-transition: 80; --z-cursor: 100;
+
+  /* Effects read this and scale themselves down rather than each one guessing. Overridden for
+     coarse pointers and for reduced motion below. */
+  --fx-density: 1;
+}
+
+/* Phones do the same work on a fraction of the power budget. One variable moves every particle
+   count, and the heaviest layers switch off entirely in system.css. */
+@media (pointer: coarse), (max-width: 760px) {
+  :root { --fx-density: 0.35; }
+}
+
+/* An accessibility requirement, not a courtesy: motion sickness and vestibular disorders are
+   real, and a security console people work in all day has to be usable by them. Effects check
+   this at runtime too — the canvases stop their animation frames rather than merely hiding. */
+@media (prefers-reduced-motion: reduce) {
+  :root { --fx-density: 0; --t-fast: 1ms; --t-base: 1ms; --t-slow: 1ms; --t-cine: 1ms; }
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -53,7 +53,29 @@ describe("dashboard", () => {
 
     await waitFor(() => expect(screen.getByText("Open findings")).toBeInTheDocument());
     expect(screen.getByText("4")).toBeInTheDocument();          // assets_total
-    expect(screen.getByText(/Security score 62\/100/)).toBeInTheDocument();
+    expect(screen.getByText(/62\/100/)).toBeInTheDocument();
+  });
+
+  // The counterpart to the test above, and the one that was missing: with nothing measured the
+  // screen must not print a score at all. A tenant that has never completed a scan rendering
+  // "100/100" is the interface asserting a clean result from an absence of evidence — the exact
+  // failure `engine_outcome()` prevents in the scanner.
+  it("refuses to show a score when no scan has completed", async () => {
+    vi.spyOn(api, "dashboard").mockResolvedValue({
+      ...DASH,
+      security_score: 100,
+      scans_completed: 0,
+      last_successful_scan_at: null,
+      total_findings: 0,
+      open_findings: 0,
+      open_severity_counts: {},
+    } as never);
+    vi.spyOn(api, "queueHealth").mockResolvedValue({ state: "idle", detail: "" } as never);
+
+    render(<DashboardScreen />);
+
+    await waitFor(() => expect(screen.getByText(/Not calculated/)).toBeInTheDocument());
+    expect(screen.queryByText(/100\/100/)).not.toBeInTheDocument();
   });
 
   it("warns that engines which did not answer are not clean results", async () => {

@@ -3,10 +3,19 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#04050a" />
     <title>Security Guardian</title>
+    <!-- Preconnect before the stylesheet so the handshake overlaps parsing rather than following
+         it. `display=swap` means text renders in the fallback immediately: a console that shows
+         nothing until a webfont arrives has made its own font a single point of failure. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" />
   </head>
   <body>
     <div id="root"></div>
+    <noscript>Security Guardian requires JavaScript.</noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

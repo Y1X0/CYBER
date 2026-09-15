@@ -7,8 +7,14 @@ export function AuthScreen({ onAuthed }: { onAuthed: () => void }) {
   const [mode, setMode] = useState<"login" | "signup">("login");
   return (
     <div className="center">
-      <div className="card">
-        <h1>🛡️ Security Guardian</h1>
+      <div className="card hud-corners">
+        {/* The first screen anyone sees, so it carries the identity rather than a stock title.
+            The subtitle states the product's actual claim, which is narrower and more useful
+            than a tagline. */}
+        <h1>◆ Security Guardian</h1>
+        <p className="muted" style={{ textAlign: "center", marginTop: "calc(var(--s-2) * -1)" }}>
+          Offensive security operations · authenticated access only
+        </p>
         <div className="tabs">
           <button className={mode === "login" ? "tab on" : "tab"} onClick={() => setMode("login")}>
             Sign in

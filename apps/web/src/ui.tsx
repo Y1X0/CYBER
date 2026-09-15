@@ -11,11 +11,11 @@ import { ApiError } from "./api";
 export const SEVERITIES = ["critical", "high", "medium", "low", "info"] as const;
 
 export const SEV_COLOR: Record<string, string> = {
-  critical: "#b00020",
-  high: "#d9534f",
-  medium: "#f0ad4e",
-  low: "#5bc0de",
-  info: "#777",
+  critical: "#ff2d4f",
+  high: "#e01b3c",
+  medium: "#ff8a1a",
+  low: "#62b8ff",
+  info: "#5f687d",
 };
 
 export function SeverityBadge({ severity }: { severity: string }) {
@@ -57,7 +57,7 @@ export function StatusPill({ tone, children }: { tone: string; children: ReactNo
 export function Card({ title, children, actions }:
   { title?: ReactNode; children: ReactNode; actions?: ReactNode }) {
   return (
-    <section className="panel">
+    <section className="panel hud-corners">
       {(title || actions) && (
         <div className="panel-head">
           {title && <h3>{title}</h3>}
@@ -119,7 +119,7 @@ export function Blocked({ title, body, children }:
   );
 }
 
-export function Spinner({ label = "Loading…" }: { label?: string }) {
+export function Spinner({ label = "Querying" }: { label?: string }) {
   return <div className="state state-loading" role="status">{label}</div>;
 }
 
