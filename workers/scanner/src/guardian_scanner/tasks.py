@@ -365,6 +365,10 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                             exposure=asset.exposure,
                             asset_criticality=customer.criticality,
                             business_impact=business_impact,
+                            # An engine may declare its provenance: the AI-discovery engine sets
+                            # "ai_assisted" so an unverified LLM hypothesis is never mistaken for a
+                            # deterministic result. Other engines leave the default "automated".
+                            source=getattr(engine, "finding_source", "automated"),
                         )
                         # One row per issue, not one per sighting. Without this a rescan filed a
                         # duplicate of everything it saw and the customer's open count climbed while

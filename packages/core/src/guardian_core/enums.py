@@ -53,6 +53,10 @@ class EngineKey(str, Enum):
     # CI/CD & supply-chain security: GitHub Actions script injection, poisoned pull_request_target,
     # unpinned actions, over-privileged tokens (Phase A, self-contained built-in detector).
     CICD = "cicd"
+    # AI-assisted vulnerability discovery: an LLM reads source and proposes candidate weaknesses the
+    # pattern engines miss (logic/authz/complex injection). Its output is HYPOTHESES — persisted as
+    # source=ai_assisted, always non-exhaustive, so its silence never resolves a finding.
+    AI_DISCOVERY = "ai_discovery"
 
 
 # Engines that actively probe a live target and therefore REQUIRE an authorization record

@@ -24,6 +24,7 @@ def to_finding(
     exposure: str,
     asset_criticality: str,
     business_impact: str = "medium",
+    source: str = "automated",
 ) -> Finding:
     # Risk Engine: deterministic severity band + 0–100 score + auditable rationale.
     risk = assess(
@@ -62,7 +63,10 @@ def to_finding(
         risk_rationale=risk.rationale,
         confidence=raw.confidence,
         status="open",
-        source="automated",
+        # Provenance: most engines are deterministic ("automated"); the AI-discovery engine marks
+        # its findings "ai_assisted" so an unverified LLM hypothesis is never mistaken for a
+        # tool-confirmed result (doc 07 §6).
+        source=source,
         location=raw.location,
         evidence=raw.evidence,
         references=raw.references,
