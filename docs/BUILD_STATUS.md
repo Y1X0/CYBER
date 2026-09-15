@@ -304,6 +304,36 @@ was ephemeral and was stopped with the job. A1 is therefore `LIVE_VERIFIED` for 
 BLOCKER-1 remains open as an operational gap: what is missing is a host, and nothing else that is
 known.
 
+**15 Sep 2026 — the deployment was rebuilt from files, and stopped one resource short.**
+
+The previous Render deployment no longer exists: the account holds no Guardian service and no
+Guardian database. That is what a stack assembled by clicking costs — there was no record of how to
+recreate it. It is now declared in `render.yaml` with build and start scripts under `infra/render/`.
+
+Standing up the replacement got three of four resources live and proved the two things that were
+unknown:
+
+* `guardian-queue` — Key Value, free, frankfurt, `available`.
+* `guardian-api` — web service `srv-dakbjtou01pc73eiatpg`, python runtime, free, frankfurt,
+  auto-deploy off, at `https://guardian-api-s1jd.onrender.com`.
+* **The build works.** Deploy `dep-dakbju8u01pc73eiavvg` installed the application and fetched the
+  external tools, then ran `start.sh`, which reached `[start] schema`.
+* **The validator works.** Boot stopped with
+  `GUARDIAN_JWT_SECRET must be set to a strong value outside local/dev` — the production invariants
+  refusing to run half-configured and naming the exact variable, rather than starting and serving
+  wrong answers.
+
+**What blocks it is a quota, not a defect.** Render permits one free Postgres per workspace and the
+slot is held by an unrelated project's database. Every code path between a git push and a booting
+control plane is now demonstrated; what is missing is a database to point it at.
+
+**BLOCKER-1's remaining half is addressed by this topology.** `start.sh` runs the default worker
+inside the web service, because Render bills Background Workers. That does not cross a plane
+boundary — `api` and `worker-default` already share one secret block in `docker-compose.prod.yml`,
+and the genuinely isolated planes are not deployed here — and the container exits if either process
+dies, so the worker cannot fail silently while the API keeps answering health checks. What it gives
+up is resource isolation on a shared instance.
+
 **Schema migration of 23 Aug 2026 — rollback point recorded before the fact.**
 
 The deployed API was rebuilt and is current, but the database schema was not. Run 32623456084 reached
