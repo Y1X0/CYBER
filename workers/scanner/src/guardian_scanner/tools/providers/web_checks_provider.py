@@ -40,12 +40,15 @@ from __future__ import annotations
 import ipaddress
 import re
 import socket
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from guardian_common.logging import get_logger
 from guardian_core.enums import EngineKey
 from guardian_core.findings import RawFinding
 from guardian_core.tool import RawEvidence, ToolCapabilities, ToolJob
 
+from guardian_scanner import egress, sandbox
 from guardian_scanner.templates import Response, Template, library_path, load_directory
 from guardian_scanner.templates.runner import run_template
 
@@ -107,6 +110,38 @@ def _assert_target_public(host: str) -> None:
             raise EgressBlocked(f"{host!r} resolves to non-public {ip}")
 
 
+@contextmanager
+def _pinned_egress() -> Iterator[None]:
+    """Pin every connect in the enclosed block to a pre-validated PUBLIC IP (DNS-rebinding safe).
+
+    `_assert_target_public` validates a hostname, but httpx then reconnects BY HOSTNAME and
+    re-resolves — a validate-then-reconnect TOCTOU: a record that answers public for the check and
+    rebinds to 169.254.169.254 / an internal address for the connect defeats it. This intercepts
+    `socket.create_connection` (httpx's chokepoint) and resolves+validates+pins the IP at connect
+    time via `sandbox._resolve_public_address`, so there is no second resolution to rebind.
+
+    In production this provider runs inside `run_in_sandbox` with the recon egress allowlist, whose
+    own guard ALREADY resolves+validates+pins each connect. Double-pinning there would hand that
+    guard an IP it correctly rejects as not-allowlisted, so when an allowlist is active we defer to
+    it; when none is active (the provider running outside the sandbox) we pin here.
+    """
+    if egress.current_allowlist() is not None:
+        yield
+        return
+    real_create_connection = socket.create_connection
+
+    def _pinned(address, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        host, port = address[0], address[1]
+        address = (sandbox._resolve_public_address(host, port), port)  # validate + pin each connect
+        return real_create_connection(address, *args, **kwargs)
+
+    socket.create_connection = _pinned  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        socket.create_connection = real_create_connection  # type: ignore[assignment]
+
+
 def _url(host: str, port: int, path: str) -> str:
     scheme = "https" if port == 443 else "http"
     return f"{scheme}://{host}:{port}{path}"
@@ -115,19 +150,25 @@ def _url(host: str, port: int, path: str) -> str:
 def _fetch_live(  # pragma: no cover - network
     host: str, port: int, method: str, path: str, headers: tuple[tuple[str, str], ...]
 ) -> Response:
-    """Hardened live request: authorized host only, public-only resolution, no redirect follow."""
+    """Hardened live request: authorized host only, public-only resolution PINNED into the
+    connection (no rebind between check and connect), no redirect follow."""
     import httpx
 
     _assert_target_public(host)
     sent = {"user-agent": "guardian-web-checks", **{k.lower(): v for k, v in headers}}
-    with httpx.Client(follow_redirects=False, timeout=_TIMEOUT) as client:
-        resp = client.request(method, _url(host, port, path), headers=sent)
-        response_headers = {k.lower(): v for k, v in resp.headers.items()}
-        if 300 <= resp.status_code < 400:
-            # Never follow a response-chosen Location, and never treat its body as evidence.
-            return Response(status=resp.status_code, headers=response_headers, body="")
-        return Response(status=resp.status_code, headers=response_headers,
-                        body=resp.text[:_MAX_BYTES])
+    try:
+        with _pinned_egress(), httpx.Client(follow_redirects=False, timeout=_TIMEOUT) as client:
+            resp = client.request(method, _url(host, port, path), headers=sent)
+            response_headers = {k.lower(): v for k, v in resp.headers.items()}
+            if 300 <= resp.status_code < 400:
+                # Never follow a response-chosen Location, and never treat its body as evidence.
+                return Response(status=resp.status_code, headers=response_headers, body="")
+            return Response(status=resp.status_code, headers=response_headers,
+                            body=resp.text[:_MAX_BYTES])
+    except PermissionError as exc:
+        # The connect-time pin refused an internal/rebinded address — surface it in the provider's
+        # own fail-closed error type rather than letting a raw PermissionError escape.
+        raise EgressBlocked(str(exc)) from exc
 
 
 class WebChecksProvider:
