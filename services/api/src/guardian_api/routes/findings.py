@@ -23,6 +23,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from guardian_common.logging import get_logger
 from guardian_core.apikeys import Scope
+from guardian_core.finding_explain import explain_finding
 from guardian_core.redaction import scrub
 from guardian_db.audit import record_audit
 from guardian_db.models import (
@@ -250,6 +251,9 @@ class FindingDossier(BaseModel):
     asset: dict
     scan: dict
     engine: str | None
+    # Plain-language explanation (what it means / why it matters / what to do), from the same source
+    # as the report and the remediation ticket — so the screen and the artefacts never disagree.
+    explanation: dict
     risk_rationale: list
     exploit: dict
     correlation: dict | None = None
@@ -323,6 +327,7 @@ def get_finding(
               "finished_at": scan.finished_at.isoformat() if scan and scan.finished_at else None}
         if scan else {},
         engine=run.engine if run else None,
+        explanation=explain_finding(finding).to_dict(),
         risk_rationale=finding.risk_rationale or [],
         exploit={"kev": finding.kev, "maturity": finding.exploit_maturity,
                  "ransomware": finding.ransomware,

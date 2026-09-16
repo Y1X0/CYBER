@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 
+from guardian_core.finding_explain import explain_finding
+from guardian_core.redaction import scrub_text
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
@@ -15,6 +17,12 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+
+
+def _x(v) -> str:  # noqa: ANN001 - escape dynamic text for reportlab's mini-markup
+    from xml.sax.saxutils import escape  # noqa: PLC0415
+    return escape(str(v if v is not None else ""))
+
 
 _SEV_COLOR = {
     "critical": colors.HexColor("#b00020"),
@@ -91,6 +99,32 @@ def render_pdf(report, findings: list, *, truncation_note: str = "") -> bytes:  
         style.append(("TEXTCOLOR", (0, i), (0, i), _SEV_COLOR.get(f.severity, colors.black)))
     table.setStyle(TableStyle(style))
     story.append(table)
+
+    # Per-finding detail leads with the same plain-language explanation the console and the HTML
+    # report show — one source (guardian_core.finding_explain), so the artefacts never disagree.
+    if ordered:
+        story.append(Spacer(1, 6 * mm))
+        story.append(Paragraph("Finding details", styles["Heading1"]))
+        for f in ordered:
+            ex = explain_finding(f)
+            standards = " · ".join(x for x in (f.cwe_id, f.owasp_ref) if x)
+            evidence = scrub_text(str((f.evidence or {}).get("match")
+                                      or (f.evidence or {}).get("summary") or ""))[0]
+            story.append(Paragraph(
+                f"<b>{_x(f.severity.upper())}</b> — {_x(f.title)} "
+                f"<font color='#777'>· risk {f.risk_score}</font>", styles["Heading3"]))
+            story.append(Paragraph(f"<b>What this means.</b> {_x(ex.what_it_means)}",
+                                   styles["Normal"]))
+            story.append(Paragraph(f"<b>Why it matters.</b> {_x(ex.why_it_matters)}",
+                                   styles["Normal"]))
+            story.append(Paragraph(f"<b>What to do.</b> {_x(ex.what_to_do)}", styles["Normal"]))
+            tech = standards or "no standard mapping"
+            if ex.where:
+                tech += f" · {ex.where}"
+            story.append(Paragraph(f"<font size=8 color='#555'>Technical: {_x(tech)}"
+                                   + (f" · Evidence: {_x(evidence)}" if evidence else "")
+                                   + "</font>", styles["Normal"]))
+            story.append(Spacer(1, 3 * mm))
 
     story.append(Spacer(1, 8 * mm))
     story.append(

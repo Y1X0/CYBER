@@ -134,6 +134,9 @@ def ticket_payload(
     due: dt.datetime | None = None,
     finding_url: str = "",
     duplicate_count: int = 0,
+    what_it_means: str = "",
+    why_it_matters: str = "",
+    what_to_do: str = "",
 ) -> TicketPayload:
     """One ticket for one underlying issue.
 
@@ -153,13 +156,22 @@ def ticket_payload(
             f"**Reported by {duplicate_count + 1} findings** — the same underlying issue. "
             "Fixing it resolves all of them."
         )
+    # Lead with the same plain-language explanation the console and the report show, so whoever
+    # picks up the ticket reads the identical what/why/how — no drift between the screen and the
+    # tracker. The deeper technical description follows for the engineer who wants it.
+    if what_it_means:
+        lines += ["", "### What this means", what_it_means]
+    if why_it_matters:
+        lines += ["", "### Why it matters", why_it_matters]
+    if what_to_do:
+        lines += ["", "### What to do", what_to_do]
     if description:
-        lines += ["", "### What it is", description]
+        lines += ["", "### Technical description", description]
     if evidence_summary:
         # Evidence is quoted, never re-derived: the ticket has to be checkable against the finding.
         lines += ["", "### Evidence", f"`{evidence_summary}`"]
-    if remediation:
-        lines += ["", "### How to fix it", remediation]
+    if remediation and remediation != what_to_do:
+        lines += ["", "### How to fix it (detail)", remediation]
     if finding_url:
         lines += ["", f"[Open the finding in Guardian]({finding_url})"]
     lines += ["", "_Verification is automatic: this closes when a scan runs the engine that found "

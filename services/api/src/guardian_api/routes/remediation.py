@@ -21,6 +21,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from guardian_core import remediation as rem
+from guardian_core.finding_explain import explain_finding
 from guardian_core.redaction import scrub_text
 from guardian_db.audit import record_audit
 from guardian_db.models import Asset, Finding, RemediationItem, User
@@ -241,6 +242,8 @@ def get_ticket_payload(
     evidence = str((finding.evidence or {}).get("summary")
                    or (finding.evidence or {}).get("match") or "")
 
+    # The same plain-language explanation the console and the report show (one source of truth).
+    ex = explain_finding(finding)
     payload = rem.ticket_payload(
         finding_title=finding.title,
         severity=finding.severity,
@@ -255,6 +258,9 @@ def get_ticket_payload(
         due=item.due_at,
         finding_url=f"/findings/{finding.id}",
         duplicate_count=max(0, duplicates),
+        what_it_means=ex.what_it_means,
+        why_it_matters=ex.why_it_matters,
+        what_to_do=ex.what_to_do,
     )
     return {
         "title": payload.title, "body": payload.body, "labels": list(payload.labels),

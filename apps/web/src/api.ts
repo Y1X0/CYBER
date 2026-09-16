@@ -171,6 +171,11 @@ export interface FindingDossier {
   asset: Record<string, string>;
   scan: Record<string, string>;
   engine: string | null;
+  // Plain-language explanation from the backend (the single source of truth shared with the report
+  // and the remediation ticket). Optional so an older API response still renders via the local map.
+  explanation?: {
+    what_it_means: string; why_it_matters: string; what_to_do: string; where: string;
+  };
   risk_rationale: string[];
   exploit: {
     kev: boolean; maturity: string | null; ransomware: boolean;

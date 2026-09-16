@@ -125,7 +125,15 @@ export function FindingDetailScreen({ id }: { id: string }) {
   return (
     <Async loader={loader}>
       {(d: FindingDossier) => {
-        const ex = explainFinding(d.finding);
+        // Prefer the backend's explanation (the source of truth shared with the report and the
+        // ticket); fall back to the local map only if an older API response omitted it.
+        const local = explainFinding(d.finding);
+        const ex = {
+          whatItMeans: d.explanation?.what_it_means ?? local.whatItMeans,
+          whyItMatters: d.explanation?.why_it_matters ?? local.whyItMatters,
+          whatToDo: d.explanation?.what_to_do ?? local.whatToDo,
+          where: d.explanation?.where ?? local.where,
+        };
         const standards = [d.finding.cwe_id, d.finding.owasp_ref].filter(Boolean).join(" · ");
         return (
         <>
