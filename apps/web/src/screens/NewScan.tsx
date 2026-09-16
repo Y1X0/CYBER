@@ -8,9 +8,10 @@ import { navigate } from "../router";
 import { SCAN_TYPES, ScanType } from "../scanCatalog";
 import { Async, Card, useAsync } from "../ui";
 
-export function NewScanScreen() {
+export function NewScanScreen({ preselect }: { preselect?: string | null }) {
   const customers = useAsync(() => api.customers(), []);
-  const [type, setType] = useState<ScanType | null>(null);
+  const [type, setType] = useState<ScanType | null>(
+    () => (preselect ? SCAN_TYPES.find((t) => t.id === preselect) ?? null : null));
 
   return (
     <Async loader={customers}>

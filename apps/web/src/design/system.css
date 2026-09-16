@@ -1202,3 +1202,48 @@ a.journey-step:hover .journey-dot { border-color: var(--edge-red-hi); }
   border: 1px solid var(--edge); border-radius: var(--r-sm); padding: 1px var(--s-2);
   background: var(--surface-2);
 }
+
+/* ── first-run welcome ──────────────────────────────────────────────────────────────────────── */
+.welcome { display: flex; flex-direction: column; gap: var(--s-5); }
+.welcome-hero {
+  padding: var(--s-6); text-align: center;
+  background: linear-gradient(160deg, var(--surface-2), var(--surface-0));
+  border: 1px solid var(--edge); border-radius: var(--r-lg);
+}
+.welcome-eyebrow {
+  font-size: var(--fs-xs); letter-spacing: var(--track-wide); text-transform: uppercase;
+  color: var(--red-text); font-family: var(--font-mono);
+}
+.welcome-title {
+  font-size: var(--fs-2xl); margin: var(--s-3) 0 var(--s-2); text-wrap: balance; color: #fff;
+}
+.welcome-sub { max-width: 62ch; margin: 0 auto; color: var(--text-dim); font-size: var(--fs-md); }
+.welcome-q {
+  font-size: var(--fs-lg); text-align: center; color: var(--text);
+  letter-spacing: var(--track-wide);
+}
+.welcome-cta { display: flex; justify-content: center; margin-top: var(--s-2); }
+.btn-primary {
+  font-size: var(--fs-md); padding: var(--s-3) var(--s-6);
+  background: linear-gradient(to bottom, var(--plasma), var(--crimson));
+  border: 1px solid var(--edge-red-hi); color: #fff; border-radius: var(--r-md);
+  letter-spacing: var(--track-wide); text-transform: uppercase; cursor: pointer;
+  box-shadow: var(--glow-red);
+}
+.btn-primary:hover { box-shadow: var(--glow-red-hi); }
+
+/* ── components & sbom view ─────────────────────────────────────────────────────────────────── */
+.components-pick { display: inline-flex; flex-direction: column; gap: var(--s-1);
+  margin: var(--s-3) 0; }
+.components-head {
+  display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;
+  gap: var(--s-3); margin: var(--s-3) 0;
+}
+.components-counts { display: flex; gap: var(--s-4); align-items: baseline; font-size: var(--fs-sm); }
+.components-counts b { color: var(--text); font-size: var(--fs-md); }
+.components-counts .vuln b { color: var(--red-text); }
+.tag-vuln {
+  font-size: var(--fs-micro); letter-spacing: var(--track-wide); text-transform: uppercase;
+  color: #fff; background: var(--crimson-dim); border: 1px solid var(--edge-red-hi);
+  border-radius: var(--r-pill); padding: 1px var(--s-2);
+}

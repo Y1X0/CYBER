@@ -129,6 +129,15 @@ export interface SbomMeta {
   vulnerable_count?: number;
 }
 
+export interface SbomComponent { name: string; version?: string; purl: string; }
+export interface SbomVuln { id: string; affects?: { ref: string }[]; ratings?: { severity: string }[]; }
+export interface SbomDocument {
+  bomFormat: string;
+  specVersion: string;
+  components?: SbomComponent[];
+  vulnerabilities?: SbomVuln[];
+}
+
 export interface QueueHealth {
   state: "working" | "stalled" | "idle";
   detail: string;
@@ -451,6 +460,7 @@ export const api = {
   scan: (id: string) => req<Scan>(`/scans/${id}`),
   scanEngines: (id: string) => req<EngineRun[]>(`/scans/${id}/engines`),
   sbomMeta: (id: string) => req<SbomMeta>(`/scans/${id}/sbom/meta`),
+  sbomDocument: (id: string) => req<SbomDocument>(`/scans/${id}/sbom`),
   async downloadSbom(id: string): Promise<Blob> {
     const resp = await raw(`/scans/${id}/sbom`);
     return resp.blob();

@@ -6,6 +6,7 @@ import {
   Counter, EdgeAlert, Radar, SecurityGauge, TerminalPanel, TermLine, ThreatBar,
 } from "../design/fx";
 import { navigate } from "../router";
+import { SCAN_TYPES } from "../scanCatalog";
 import { Async, Bars, Card, SEVERITIES, SEV_COLOR, Stat, StatusPill, useAsync, when } from "../ui";
 
 export function DashboardScreen() {
@@ -27,6 +28,12 @@ export function DashboardScreen() {
         const score = measured ? d.security_score : null;
 
         const criticals = d.open_severity_counts.critical ?? 0;
+
+        // A brand-new account has nothing to summarise. Rather than a technical dashboard of zeroes,
+        // it gets a welcome that answers the only question it has yet: what would you like to scan?
+        // The moment the first asset or scan exists, this gives way to the security overview.
+        const firstRun = d.assets_total === 0 && d.scans_completed === 0 && d.scans_active === 0;
+        if (firstRun) return <FirstRun />;
 
         return (
           <>
@@ -210,6 +217,43 @@ export function DashboardScreen() {
         );
       }}
     </Async>
+  );
+}
+
+/** The first thing a new account sees: a welcome, and the one question it can answer — what to
+ *  scan. Each tile opens the guided flow pre-set to that kind. Gone the moment there is a scan. */
+function FirstRun() {
+  return (
+    <div className="welcome">
+      <div className="welcome-hero hud-corners">
+        <span className="welcome-eyebrow">◆ Security Guardian</span>
+        <h1 className="welcome-title">Protect what you own.</h1>
+        <p className="welcome-sub">
+          Guardian assesses things you tell it about — a website, an app, a server, a cloud account,
+          your code. Choose what you'd like to check and it sets up the target and runs the right
+          engines for you.
+        </p>
+      </div>
+
+      <h2 className="welcome-q">What would you like to scan?</h2>
+      <div className="scan-type-grid">
+        {SCAN_TYPES.map((t) => (
+          <button key={t.id} className="scan-type hud-corners"
+                  onClick={() => navigate(`new-scan/${t.id}`)}>
+            <span className="scan-type-icon" aria-hidden="true">{t.icon}</span>
+            <span className="scan-type-label">{t.label}</span>
+            <span className="scan-type-blurb">{t.blurb}</span>
+            {t.network && <span className="scan-type-tag">needs authorization</span>}
+          </button>
+        ))}
+      </div>
+
+      <div className="welcome-cta">
+        <button className="btn-primary" onClick={() => navigate("new-scan")}>
+          Start your first scan →
+        </button>
+      </div>
+    </div>
   );
 }
 

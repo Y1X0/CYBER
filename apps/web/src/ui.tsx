@@ -219,8 +219,8 @@ const JOURNEY_STEPS: { key: string; label: string; to: string | null }[] = [
   { key: "scan", label: "Scan", to: null },
   { key: "findings", label: "Findings", to: "findings" },
   { key: "risk", label: "Risk", to: "findings" },
-  { key: "components", label: "Components", to: null },
-  { key: "sbom", label: "SBOM", to: null },
+  { key: "components", label: "Components", to: "components" },
+  { key: "sbom", label: "SBOM", to: "components" },
   { key: "report", label: "Report", to: "reports" },
   { key: "remediation", label: "Remediation", to: "remediation" },
 ];

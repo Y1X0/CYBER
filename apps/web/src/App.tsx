@@ -13,6 +13,7 @@ import {
 } from "./design/fx";
 import { navigate, useRoute } from "./router";
 import { AssetsScreen } from "./screens/Assets";
+import { ComponentsScreen } from "./screens/Components";
 import { NewScanScreen } from "./screens/NewScan";
 import { AuthorizationScreen } from "./screens/Authorization";
 import { DashboardScreen } from "./screens/Dashboard";
@@ -42,6 +43,7 @@ const NAV_GROUPS: { group: string; items: { screen: string; label: string; prima
   ] },
   { group: "Results", items: [
     { screen: "findings", label: "Findings" },
+    { screen: "components", label: "Components" },
     { screen: "remediation", label: "Remediation" },
     { screen: "reports", label: "Reports" },
     { screen: "compliance", label: "Compliance" },
@@ -156,7 +158,7 @@ function Console({ onSignOut }: { onSignOut: () => void }) {
 function Screen({ screen, id }: { screen: string; id: string | null }) {
   switch (screen) {
     case "dashboard": return <DashboardScreen />;
-    case "new-scan": return <NewScanScreen />;
+    case "new-scan": return <NewScanScreen preselect={id} />;
     case "organization": return <OrganizationScreen />;
     case "assets": return <AssetsScreen />;
     case "ownership": return <OwnershipScreen />;
@@ -164,6 +166,7 @@ function Screen({ screen, id }: { screen: string; id: string | null }) {
     case "discovery": return <DiscoveryScreen />;
     case "scans": return id ? <ScanDetailScreen id={id} /> : <ScansScreen />;
     case "findings": return id ? <FindingDetailScreen id={id} /> : <FindingsScreen />;
+    case "components": return <ComponentsScreen />;
     case "remediation": return <RemediationScreen />;
     case "reports": return <ReportsScreen />;
     case "compliance": return <CompliancePanel />;
