@@ -1,0 +1,28 @@
+id: security-txt-missing
+info:
+  name: No security.txt disclosure policy
+  author: guardian
+  severity: info
+  description: |
+    The site publishes no security.txt at /.well-known/security.txt. RFC 9116 defines this file as
+    the standard place to advertise a contact for reporting vulnerabilities. Without it a researcher
+    who finds a flaw has no sanctioned channel, and reports are more likely to be lost or disclosed
+    publicly. This is a best-practice gap, not an exposure.
+  remediation: |
+    Publish /.well-known/security.txt with at least a Contact field (a mailto: or a reporting URL)
+    and an Expires field, per RFC 9116. Serve it over HTTPS.
+  classification:
+    cwe-id: CWE-1059
+  tags: misconfig,best-practice,disclosure
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}/.well-known/security.txt"
+    matchers-condition: and
+    matchers:
+      - type: word
+        part: body
+        words:
+          - "Contact:"
+        case-insensitive: true
+        negative: true

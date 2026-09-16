@@ -11,18 +11,29 @@ const KINDS = [
   { value: "api", label: "API", hint: "A base URL with an OpenAPI document" },
   { value: "cloud", label: "Cloud account", hint: "Assessed from a collector export" },
   { value: "host", label: "Host", hint: "A hostname or address" },
+  { value: "mobile_app", label: "Mobile app (Android)",
+    hint: "Upload an Android .apk — analysed statically (no emulator)" },
+  { value: "network_host", label: "Home network / Router",
+    hint: "Run the local agent and submit its posture report (see docs/LOCAL_AGENT.md)" },
+  { value: "server_host", label: "Server (Linux)",
+    hint: "Run the local agent and submit its posture report (see docs/LOCAL_AGENT.md)" },
 ];
 
 const ENGINES = [
   { key: "secrets", label: "Secrets", network: false },
   { key: "sast", label: "Code analysis", network: false },
   { key: "sca", label: "Dependencies", network: false },
+  { key: "ai_discovery", label: "AI vulnerability discovery", network: false },
   { key: "iac", label: "Infrastructure code", network: false },
+  { key: "cicd", label: "CI/CD & supply chain", network: false },
   { key: "k8s", label: "Kubernetes", network: false },
   { key: "container", label: "Container", network: false },
+  { key: "ml_model", label: "ML model malware", network: false },
   { key: "cspm", label: "Cloud posture", network: false },
   { key: "dast", label: "Dynamic web testing", network: true },
   { key: "api", label: "API testing", network: true },
+  { key: "mobile", label: "Mobile app (APK)", network: false },
+  { key: "host_posture", label: "Host / network posture (agent)", network: false },
 ];
 
 export function AssetsScreen() {
