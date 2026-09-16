@@ -121,6 +121,14 @@ export interface EngineRun {
   started_at: string | null;
 }
 
+export interface SbomMeta {
+  available: boolean;
+  format?: string;
+  spec_version?: string;
+  component_count?: number;
+  vulnerable_count?: number;
+}
+
 export interface QueueHealth {
   state: "working" | "stalled" | "idle";
   detail: string;
@@ -442,6 +450,11 @@ export const api = {
     paged<Scan>(`/scans${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`),
   scan: (id: string) => req<Scan>(`/scans/${id}`),
   scanEngines: (id: string) => req<EngineRun[]>(`/scans/${id}/engines`),
+  sbomMeta: (id: string) => req<SbomMeta>(`/scans/${id}/sbom/meta`),
+  async downloadSbom(id: string): Promise<Blob> {
+    const resp = await raw(`/scans/${id}/sbom`);
+    return resp.blob();
+  },
   queueHealth: () => req<QueueHealth>("/scans/queue-health"),
   startScan: (asset_id: string, engines: string[]) =>
     req<Scan>("/scans", {

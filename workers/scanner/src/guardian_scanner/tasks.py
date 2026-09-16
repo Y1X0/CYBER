@@ -21,6 +21,7 @@ from guardian_core import authorization as authz
 from guardian_core import safescan
 from guardian_core.enums import ACTIVE_ENGINES, EngineKey, ScanStatus
 from guardian_core.proof import SafeReproduction, UnsafeReproductionError, build_proof
+from guardian_core.sbom import Component, Vulnerability, build_sbom
 from guardian_db.audit import record_audit
 from guardian_db.models import (
     Asset,
@@ -32,6 +33,7 @@ from guardian_db.models import (
     UsageRecord,
 )
 from guardian_db.proof_store import store_proof
+from guardian_db.sbom_store import store_sbom
 from guardian_db.session import session_scope
 from sqlalchemy import select, update
 
@@ -100,6 +102,51 @@ def _maybe_store_proof(session, finding, raw) -> None:  # noqa: ANN001
         log.warning("proof_refused_unsafe", fingerprint=finding.fingerprint, reason=str(exc)[:200])
     except Exception as exc:  # noqa: BLE001 - proof capture must never fail the scan
         log.warning("proof_store_failed", error=f"{type(exc).__name__}: {exc}"[:200])
+
+
+def _maybe_store_sbom(session, engine, ctx, scan, asset, raws) -> None:  # noqa: ANN001
+    """Build and persist the scan's CycloneDX SBOM from the SCA engine's resolved inventory.
+
+    The SCA engine already walks every manifest/lockfile; only the *vulnerable* components became
+    findings, so the full inventory would otherwise be discarded with the ephemeral workspace. Here
+    we capture that inventory (`collect_inventory`) and cross-reference the SCA findings just
+    produced for the vulnerabilities section, so the SBOM and the findings never disagree. Reuses
+    guardian_core.sbom; adds no new scanner. Never fatal — an SBOM is a bonus deliverable.
+    """
+    collect = getattr(engine, "collect_inventory", None)
+    if not callable(collect):
+        return
+    try:
+        inventory = collect(ctx)
+        if not inventory:
+            return
+        components = [Component(name=n, version=v, ecosystem=e, source=s)
+                      for (n, v, e, s) in inventory]
+        vulns: list[Vulnerability] = []
+        for raw in raws:
+            loc = raw.location or {}
+            pkg, ver = loc.get("package"), loc.get("version")
+            if not pkg or not ver:
+                continue  # a non-dependency finding (should not occur for SCA); skip it
+            vid = (raw.cve_ids[0] if raw.cve_ids
+                   else str((raw.references or {}).get("advisory") or "")).strip()
+            if not vid:
+                continue
+            vulns.append(Vulnerability(
+                external_id=vid,
+                severity=getattr(raw.base_severity, "value", str(raw.base_severity)),
+                affects_name=str(pkg), affects_version=str(ver),
+                affects_ecosystem=str(loc.get("ecosystem") or ""),
+                description=raw.description or "",
+            ))
+        sbom = build_sbom(components, vulns, subject_name=asset.identifier or asset.name or "asset",
+                          subject_kind="application")
+        store_sbom(session, tenant_id=scan.tenant_id, customer_id=scan.customer_id,
+                   scan_id=scan.id, asset_id=asset.id, sbom=sbom)
+        log.info("sbom_stored", scan_id=str(scan.id), components=sbom.component_count,
+                 vulnerable=sbom.vulnerable_count)
+    except Exception as exc:  # noqa: BLE001 - SBOM capture must never fail the scan
+        log.warning("sbom_store_failed", error=f"{type(exc).__name__}: {exc}"[:200])
 
 
 def _now() -> dt.datetime:
@@ -423,6 +470,11 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                                 prior, finding, scan_id=scan.id, engine_run_id=run.id)
                     run.status = "completed"
                     engine_statuses.append("completed")
+                    # An SCA run resolved a full dependency inventory; keep it as the scan's SBOM
+                    # (CycloneDX), cross-referenced with the vulnerabilities just found. Additive,
+                    # reuses the resolved data, and never affects the scan result.
+                    if engine.key == EngineKey.SCA:
+                        _maybe_store_sbom(session, engine, ctx, scan, asset, raws)
                 except Exception as exc:  # noqa: BLE001 - isolate per-engine failure
                     run.status = "failed"
                     run.error = str(exc)[:2000]

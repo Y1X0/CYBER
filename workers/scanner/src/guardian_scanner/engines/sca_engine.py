@@ -42,6 +42,9 @@ log = get_logger("guardian.engine.sca")
 # augments a workspace scan but not an inline one.
 _OSV_TIMEOUT = 300
 _OSV_MAX_FINDINGS = 3_000
+# The SBOM inventory is bounded independently of findings: a pathological lockfile should widen the
+# document, never make it unbounded. Mirrors guardian_core.sbom's own cap.
+_INVENTORY_MAX = 20_000
 _OSV_SEVERITY = {
     "CRITICAL": Severity.CRITICAL, "HIGH": Severity.HIGH, "MODERATE": Severity.MEDIUM,
     "MEDIUM": Severity.MEDIUM, "LOW": Severity.LOW,
@@ -87,6 +90,23 @@ class ScaEngine:
             root = Path(ctx.workspace_path)
             if root.exists():
                 yield from self._run_osv_scanner_if_available(root)
+
+    def collect_inventory(self, ctx: ScanContext) -> list[tuple[str, str, str, str]]:
+        """The full resolved dependency inventory — every component, not only the vulnerable ones.
+
+        Reuses the exact manifest/lockfile parsing `run()` uses, so the SBOM lists precisely what
+        the SCA engine saw. Deduped and bounded; this is the *inventory* an SBOM is built from, and
+        is kept separate from `run()` (which yields findings) so neither path changes the other.
+        """
+        seen: dict[tuple[str, str, str], tuple[str, str, str, str]] = {}
+        for name, version, ecosystem, source in self._collect_dependencies(ctx):
+            if not name or not version:
+                continue
+            key = (name.lower(), version, (ecosystem or "").lower())
+            seen.setdefault(key, (name, version, ecosystem, source))
+            if len(seen) >= _INVENTORY_MAX:
+                break
+        return list(seen.values())
 
     def _run_osv_scanner_if_available(self, root: Path) -> Iterable[RawFinding]:
         """Wrap osv-scanner when installed. No-op otherwise; CI and built-in path unchanged."""

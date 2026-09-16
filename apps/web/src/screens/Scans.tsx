@@ -4,7 +4,8 @@
 // that actually ran. Every engine's outcome is shown, and an empty finding list is captioned by
 // what was and was not checked.
 
-import { EngineRun, Finding, Scan, api } from "../api";
+import { useState } from "react";
+import { EngineRun, Finding, Scan, SbomMeta, api } from "../api";
 import { navigate } from "../router";
 import {
   Async, Card, EmptyState, ENGINE_STATE, SCAN_STATE, SeverityBadge, StatusPill,
@@ -147,6 +148,8 @@ export function ScanDetailScreen({ id }: { id: string }) {
               </Async>
             </Card>
 
+            <SbomCard id={s.id} />
+
             <Card title="Findings">
               <Async
                 loader={findings}
@@ -178,6 +181,56 @@ export function ScanDetailScreen({ id }: { id: string }) {
         );
       }}
     </Async>
+  );
+}
+
+/**
+ * Software Bill of Materials — the scan's dependency inventory as a CycloneDX download.
+ *
+ * Shown only when the scan actually produced an SBOM (an SCA run over a repo/image). It is a view
+ * over the components the SCA engine already resolved, not a separate scan; the vulnerable count
+ * ties back to the findings on this same scan.
+ */
+function SbomCard({ id }: { id: string }) {
+  const meta = useAsync<SbomMeta>(() => api.sbomMeta(id), [id]);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  async function download() {
+    setBusy(true); setErr("");
+    try {
+      const blob = await api.downloadSbom(id);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `sbom-${id.slice(0, 8)}.cdx.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // No SBOM (asset had no dependency manifest, or SCA was not requested) → render nothing rather
+  // than a dead control. Never a fake download button.
+  if (!meta.data?.available) return null;
+  return (
+    <Card title="Software Bill of Materials (SBOM)">
+      <p className="muted">
+        The dependency inventory this scan resolved, exported as CycloneDX {meta.data.spec_version}.
+      </p>
+      <dl className="kv">
+        <dt>Components</dt><dd>{meta.data.component_count}</dd>
+        <dt>Vulnerable</dt><dd>{meta.data.vulnerable_count}</dd>
+        <dt>Format</dt><dd>{meta.data.format} {meta.data.spec_version}</dd>
+      </dl>
+      {err && <p className="err" role="alert">{err}</p>}
+      <button onClick={download} disabled={busy}>
+        {busy ? "Preparing…" : "Download SBOM (CycloneDX JSON)"}
+      </button>
+    </Card>
   );
 }
 

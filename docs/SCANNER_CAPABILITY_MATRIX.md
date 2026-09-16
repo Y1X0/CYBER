@@ -27,7 +27,7 @@ Status legend:
 | 5 | Server (Linux) | `server_host` | `host_posture` | **REQUIRES LOCAL AGENT** | SSH root/password/protocol-1, host firewall, EOL OS, insecure services, passwordless sudo, exposed Docker daemon (CRITICAL), privileged containers. Package→CVE reuse of SCA when an inventory is submitted. |
 | 6 | Cloud (CSPM) | `cloud` | `cspm` | IMPLEMENTED | Assessed from a collector export (no standing cloud creds in the platform). |
 | 7 | Container / K8s | `repo`, `container` | `container`, `k8s`, `iac`, `cicd` | IMPLEMENTED | Image/Dockerfile, manifests, IaC, and GitHub Actions supply-chain (script injection, `pull_request_target`, unpinned actions, `write-all`, curl\|bash, self-hosted+public). |
-| 8 | Source code | `repo` | `sast`, `sca`, `secrets`, `ml_model`, `ai_discovery` | IMPLEMENTED + STATIC (ai_discovery is `ai_assisted`) | Taint-based SAST, dependency CVEs, secret detection, ML-model malware (ModelScan), and AI-assisted discovery that verifies each cited line before it is allowed to stand. |
+| 8 | Source code | `repo` | `sast`, `sca`, `secrets`, `ml_model`, `ai_discovery` | IMPLEMENTED + STATIC (ai_discovery is `ai_assisted`) | Taint-based SAST, dependency CVEs, secret detection, ML-model malware (ModelScan), and AI-assisted discovery that verifies each cited line before it is allowed to stand. **SBOM (CycloneDX 1.5)** exported per scan from the SCA inventory — see docs/SBOM.md. |
 
 ## By engine
 

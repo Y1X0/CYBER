@@ -29,6 +29,7 @@ from guardian_db.models.node_events import NodeEvent
 from guardian_db.models.plugins import ScannerPlugin, TenantScannerConfig
 from guardian_db.models.policy import Policy
 from guardian_db.models.reporting import Report, ReportApproval, ReportSection
+from guardian_db.models.sbom import SbomRecord
 from guardian_db.models.scanning import (
     Finding,
     FindingCorrelation,
@@ -68,6 +69,7 @@ __all__ = [
     "Engagement",
     "EvidenceItem",
     "ProofRecord",
+    "SbomRecord",
     "DomainVerification",
     "Exploit",
     "FeedState",

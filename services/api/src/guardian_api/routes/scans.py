@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import uuid
 from functools import lru_cache
 
@@ -13,6 +14,7 @@ from guardian_core.enums import ScanStatus
 from guardian_core.policy import evaluate_gate
 from guardian_db.audit import record_audit
 from guardian_db.models import Asset, Finding, Policy, Scan, ScanEngineRun
+from guardian_db.sbom_store import load_sbom
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -213,6 +215,68 @@ def get_scan(
     if scan is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
     return ScanOut.model_validate(scan, from_attributes=True)
+
+
+@router.get("/{scan_id}/sbom/meta", response_model=dict)
+def scan_sbom_meta(
+    scan_id: uuid.UUID,
+    identity: Identity = Depends(get_current_identity),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Whether this scan has an SBOM, and its headline counts — lets the UI show the download only
+    when there is something to download. Tenant-scoped; no document body is returned here."""
+    scan = _scoped_query(db, identity).filter(Scan.id == scan_id).first()
+    if scan is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
+    record = load_sbom(db, scan_id=scan.id, tenant_id=identity.tenant_id)
+    if record is None:
+        return {"available": False}
+    return {
+        "available": True,
+        "format": record.bom_format,
+        "spec_version": record.spec_version,
+        "component_count": record.component_count,
+        "vulnerable_count": record.vulnerable_count,
+    }
+
+
+@router.get("/{scan_id}/sbom")
+def scan_sbom(
+    scan_id: uuid.UUID,
+    request: Request,
+    identity: Identity = Depends(get_current_identity),
+    db: Session = Depends(get_db),
+    ip: str | None = Depends(client_ip),
+) -> Response:
+    """Download the scan's SBOM as a CycloneDX JSON document.
+
+    The SBOM is the dependency inventory the SCA engine resolved for the asset — a deliverable, not
+    a secret. Tenant-scoped (a scan of another tenant 404s), and the download is audited: who
+    exported a customer's bill of materials is itself worth recording.
+    """
+    scan = _scoped_query(db, identity).filter(Scan.id == scan_id).first()
+    if scan is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "scan not found")
+    record = load_sbom(db, scan_id=scan.id, tenant_id=identity.tenant_id)
+    if record is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no SBOM for this scan")
+    record_audit(
+        db,
+        action="scan.sbom.export",
+        tenant_id=identity.tenant_id,
+        customer_id=scan.customer_id,
+        actor_id=identity.user.id if identity.user else None,
+        entity_type="scan",
+        entity_id=str(scan.id),
+        ip=ip,
+        metadata={"components": record.component_count, "format": record.bom_format},
+    )
+    db.commit()
+    return Response(
+        content=json.dumps(record.document, indent=2, sort_keys=True),
+        media_type="application/vnd.cyclonedx+json",
+        headers={"Content-Disposition": f'attachment; filename="sbom-{scan.id}.cdx.json"'},
+    )
 
 
 # What each engine-run status means to a customer. The wording is the product's promise: a run that
