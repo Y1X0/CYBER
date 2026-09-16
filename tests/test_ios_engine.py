@@ -178,6 +178,22 @@ def test_supports_and_health():
     assert e.health().ok is True
 
 
+def test_collect_inventory_lists_frameworks_and_dylibs(tmp_path):
+    path = tmp_path / "app.ipa"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("Payload/App.app/Info.plist", plistlib.dumps({"CFBundleExecutable": "App"}))
+        z.writestr("Payload/App.app/App", b"x")
+        z.writestr("Payload/App.app/Frameworks/Alamofire.framework/Info.plist",
+                   plistlib.dumps({"CFBundleShortVersionString": "5.6.1"}))
+        z.writestr("Payload/App.app/Frameworks/Alamofire.framework/Alamofire", b"x")
+        z.writestr("Payload/App.app/Frameworks/libswiftCore.dylib", b"x")
+    ctx = ScanContext(scan_id="t", asset_kind="ios_app", asset_identifier="x",
+                      asset_config={"ipa_path": str(path)})
+    inv = {n: (v, e) for (n, v, e, _s) in IosEngine().collect_inventory(ctx)}
+    assert inv["Alamofire"] == ("5.6.1", "ios-framework")     # framework version from its Info.plist
+    assert inv["libswiftCore.dylib"] == ("", "ios-framework")  # a loose dylib, version-less
+
+
 def test_xml_plist_is_also_parsed(tmp_path):
     # Not every Info.plist is binary; plistlib reads XML too. Build one explicitly.
     path = tmp_path / "app.ipa"

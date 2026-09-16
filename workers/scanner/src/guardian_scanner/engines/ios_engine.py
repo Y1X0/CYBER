@@ -29,7 +29,7 @@ from guardian_core.findings import RawFinding
 from guardian_scanner.engines.base import EngineHealth, ScanContext
 from guardian_scanner.engines.secrets_engine import _PATTERNS as _SECRET_PATTERNS
 from guardian_scanner.engines.secrets_engine import _redact
-from guardian_scanner.mobile.ipa import IpaBundle, IpaError, read_bundle
+from guardian_scanner.mobile.ipa import IpaBundle, IpaError, load_plist, read_bundle
 
 log = get_logger("guardian.engine.ios")
 
@@ -102,6 +102,45 @@ class IosEngine:
 
     def health(self) -> EngineHealth:
         return EngineHealth(ok=True, detail="static iOS .ipa analysis (offline; no device)")
+
+    def collect_inventory(self, ctx: ScanContext) -> list[tuple[str, str, str, str]]:
+        """Embedded frameworks and dylibs shipped in the .ipa, for the SBOM.
+
+        Frameworks carry a version in their own Info.plist (CFBundleShortVersionString), so those
+        are versioned; loose dylibs are reported version-less. Deduped, bounded, never raises.
+        """
+        ipa = self._locate_ipa(ctx)
+        if ipa is None:
+            return []
+        try:
+            zf = zipfile.ZipFile(ipa)
+        except (zipfile.BadZipFile, OSError):
+            return []
+        seen: dict[str, tuple[str, str, str, str]] = {}
+        with zf:
+            try:
+                names = zf.namelist()
+            except (zipfile.BadZipFile, OSError):
+                return []
+            for n in names:
+                if "/Frameworks/" not in n:
+                    continue
+                after = n.split("/Frameworks/", 1)[1]
+                if after.count("/") == 0 and after.endswith(".dylib"):
+                    seen.setdefault(after, (after, "", "ios-framework", n))
+                elif "/" in after and after.split("/", 1)[0].endswith(".framework") \
+                        and after.endswith("/Info.plist"):
+                    fw = after.split("/", 1)[0]
+                    version = ""
+                    try:
+                        plist = load_plist(zf.read(n))
+                        version = str(plist.get("CFBundleShortVersionString") or "")
+                    except (KeyError, zipfile.BadZipFile, OSError):
+                        version = ""
+                    seen[fw] = (fw[:-len(".framework")], version, "ios-framework", n)
+                if len(seen) >= _MAX_FINDINGS:
+                    break
+        return sorted(seen.values())
 
     def run(self, ctx: ScanContext) -> Iterable[RawFinding]:
         ipa = self._locate_ipa(ctx)

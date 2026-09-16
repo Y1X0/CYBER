@@ -223,3 +223,24 @@ def test_supports_and_health():
     assert e.supports("repo") is False
     assert e.health().ok is True
     assert e.health().degraded is False
+
+
+def test_collect_inventory_lists_native_libraries_deduped(tmp_path):
+    apk = tmp_path / "app.apk"
+    with zipfile.ZipFile(apk, "w") as z:
+        z.writestr("AndroidManifest.xml", "<manifest package='x'/>")
+        z.writestr("lib/arm64-v8a/libssl.so", b"x")
+        z.writestr("lib/armeabi-v7a/libssl.so", b"x")   # same lib, second ABI -> one component
+        z.writestr("lib/arm64-v8a/libfoo.so", b"y")
+    ctx = ScanContext(scan_id="t", asset_kind="mobile_app", asset_identifier="x",
+                      asset_config={"apk_path": str(apk)})
+    inv = MobileEngine().collect_inventory(ctx)
+    names = sorted(n for (n, _v, _e, _s) in inv)
+    assert names == ["libfoo.so", "libssl.so"]
+    assert all(eco == "android-native" and ver == "" for (_n, ver, eco, _s) in inv)
+
+
+def test_collect_inventory_is_empty_without_an_apk(tmp_path):
+    ctx = ScanContext(scan_id="t", asset_kind="mobile_app", asset_identifier="x",
+                      workspace_path=str(tmp_path))
+    assert MobileEngine().collect_inventory(ctx) == []

@@ -1,9 +1,28 @@
 # SBOM — Software Bill of Materials (CycloneDX)
 
-**Status: IMPLEMENTED.** Every scan that runs the SCA engine over an asset with dependency
-manifests produces a CycloneDX 1.5 SBOM, downloadable from the scan. It is a *view* over the
-dependency inventory the SCA engine already resolves — **not a new scanner and not a new finding
-type**.
+**Status: IMPLEMENTED, multi-asset.** A scan produces one CycloneDX 1.5 SBOM merged from **every
+engine that can enumerate components** — source dependencies, container image packages, server
+packages (via the authorized agent), and the native libraries / frameworks bundled in a mobile app.
+It is a *view* over inventories the scanners already resolve — **not a new scanner, not a new finding
+type, and not a separate SBOM system per scanner.**
+
+## Sources (one SBOM per scan, merged)
+
+| Asset / engine | Components | Versions | Ecosystem (PURL) |
+|---|---|---|---|
+| Source repo — `sca` | manifest + lockfile dependencies | yes | pypi/npm/golang/gem/cargo/composer |
+| Container image — `container` | OS + language packages (dpkg, apk, site-packages, node_modules) | yes | deb / apk / pypi / npm |
+| Server — `host_posture` | submitted package inventory (authorized agent) | yes | deb / apk / rpm (from the OS) |
+| Android `.apk` — `mobile` | bundled native libraries (`lib/<abi>/*.so`) | no* | generic |
+| iOS `.ipa` — `ios` | embedded frameworks + dylibs | frameworks: yes; dylibs: no* | generic |
+
+\* A static mobile package rarely exposes a library *version*; CycloneDX does not require one, so
+these ship as version-less components — legitimate "what is inside this app" inventory. iOS
+frameworks carry a version in their own `Info.plist` and are reported with it.
+
+Any engine that exposes a `collect_inventory(ctx)` method contributes automatically; adding a new
+source is one method, no pipeline change. Vulnerabilities are cross-referenced from the same scan's
+findings, so the SBOM and the findings never disagree.
 
 ## Why it exists
 
@@ -24,13 +43,17 @@ it survives the scan and can be exported.
 
 ## How it is produced
 
-1. The SCA engine (`ScaEngine`) parses manifests and lockfiles as it always has. Its new
-   `collect_inventory()` returns the **full** deduped `(name, version, ecosystem, source)` list —
-   the same parsing `run()` uses for findings, exposed without changing the findings path.
-2. After an SCA run completes, the scan pipeline (`tasks._maybe_store_sbom`) builds a CycloneDX
-   document from that inventory plus the vulnerabilities just found, and stores one SBOM per scan.
-   This is **never fatal** — an SBOM is a bonus deliverable, so a failure here never fails the scan.
-3. The document is persisted in `sbom_documents` (plain JSONB — an SBOM is a deliverable, not a
+1. An engine that can enumerate components exposes `collect_inventory(ctx)` returning a deduped
+   `(name, version, ecosystem, source)` list — reusing the same parsing its `run()` already does
+   for findings, without changing the findings path. Implemented on `sca`, `container`,
+   `host_posture`, `mobile`, and `ios`.
+2. As each engine in a scan completes, the pipeline (`tasks._accumulate_sbom`) collects that
+   engine's inventory and any package vulnerabilities it found into scan-level accumulators. This is
+   parent-side (not inside a sandboxed child), so it works whether or not an engine is sandboxed.
+3. After the whole engine loop, `tasks._finalize_sbom` builds **one** CycloneDX document from the
+   merged inventory + vulnerabilities and stores it. **Never fatal** — an SBOM is a bonus
+   deliverable, so a failure here never fails the scan.
+4. The document is persisted in `sbom_documents` (plain JSONB — an SBOM is a deliverable, not a
    secret), isolated per tenant by Row-Level Security like every other tenant-owned table.
 
 ## PURLs
@@ -66,10 +89,16 @@ control is shown for a scan that produced none.
 
 ## Known limitations
 
-- **Scope:** the SBOM covers what the SCA engine resolves — application dependency manifests and
-  lockfiles (and, where present, container OS packages via the existing image inventory). It does
-  not invent components the SCA engine cannot see.
+- **Scope:** the SBOM covers what the scanners resolve — dependency manifests/lockfiles, container
+  OS/language packages, submitted server packages, and bundled mobile libraries. It does not invent
+  components a scanner cannot see.
+- **Mobile versions:** a static `.apk`/`.ipa` rarely exposes native-library versions, so those
+  components are version-less (iOS frameworks are the exception — versioned from their `Info.plist`).
+  Version-less components carry no CVE correlation.
+- **Server packages:** contributed only when the authorized local agent submits a package inventory
+  (opt-in; the reference agent ships an empty list by default). RPM ecosystem is labelled from the
+  OS but the image RPM database itself is still not parsed for the container path.
 - **Format:** CycloneDX JSON only (the platform's self-SBOM in `tools/generate_sbom.py` uses the
   same shape). SPDX is not emitted.
 - **Bounded:** the inventory is capped (20,000 components) and truncation is recorded in the
-  document metadata, so a pathological lockfile widens the SBOM but never makes it unbounded.
+  document metadata, so a pathological input widens the SBOM but never makes it unbounded.

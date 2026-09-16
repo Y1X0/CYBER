@@ -83,12 +83,11 @@ def test_load_sbom_uses_the_scoped_query():
     assert load_sbom(_Session(existing=marker), scan_id=_SID, tenant_id=_TID) is marker
 
 
-# ── pipeline hook (_maybe_store_sbom) ──────────────────────────────────────────────────────────────
-class _StubSca:
-    key = EngineKey.SCA
-
-    def __init__(self, inventory):
+# ── pipeline hooks (_accumulate_sbom + _finalize_sbom) ──────────────────────────────────────────────
+class _StubEngine:
+    def __init__(self, inventory, key=EngineKey.SCA):
         self._inv = inventory
+        self.key = key
 
     def collect_inventory(self, _ctx):  # noqa: ANN001
         return self._inv
@@ -102,53 +101,81 @@ def _raw(pkg, ver, eco, cve):
     )
 
 
-def test_maybe_store_sbom_builds_from_inventory_and_findings(monkeypatch):
+def test_sbom_merges_inventory_from_multiple_engines(monkeypatch):
+    """The load-bearing new behaviour: one SBOM per scan, merged across engines."""
     from guardian_scanner import tasks
 
     captured = {}
+    monkeypatch.setattr(tasks, "store_sbom",
+                        lambda session, **kw: captured.update(kw))  # noqa: ANN001
 
-    def _fake_store(session, *, tenant_id, customer_id, scan_id, asset_id, sbom):  # noqa: ANN001
-        captured["sbom"] = sbom
-        captured["scan_id"] = scan_id
+    inv: list = []
+    vulns: list = []
+    # An SCA engine (repo deps) and a container engine (image packages) in the same scan.
+    sca = _StubEngine([("flask", "2.0.1", "pypi", "requirements.txt")])
+    container = _StubEngine([("openssl", "3.0.2", "Debian", "dpkg")], key=EngineKey.CONTAINER)
+    tasks._accumulate_sbom(sca, object(), [_raw("flask", "2.0.1", "pypi", "CVE-2020-1")], inv, vulns)
+    tasks._accumulate_sbom(container, object(), [], inv, vulns)
 
-    monkeypatch.setattr(tasks, "store_sbom", _fake_store)
-    engine = _StubSca([("flask", "2.0.1", "pypi", "requirements.txt"),
-                       ("requests", "2.25.0", "pypi", "requirements.txt")])
     scan = SimpleNamespace(id=_SID, tenant_id=_TID, customer_id=_CID)
     asset = SimpleNamespace(id=_AID, identifier="acme/app", name="app")
-    raws = [_raw("flask", "2.0.1", "pypi", "CVE-2020-1")]
-
-    tasks._maybe_store_sbom(object(), engine, object(), scan, asset, raws)
+    tasks._finalize_sbom(object(), scan, asset, inv, vulns)
 
     sbom = captured["sbom"]
-    assert captured["scan_id"] == _SID
-    assert sbom.component_count == 2      # both dependencies inventoried
-    assert sbom.vulnerable_count == 1     # only flask has a finding
-    ids = [v["id"] for v in sbom.document["vulnerabilities"]]
-    assert ids == ["CVE-2020-1"]
+    assert sbom.component_count == 2          # flask (pypi) + openssl (deb), merged
+    assert sbom.vulnerable_count == 1         # only flask carries a finding
+    purls = {c["purl"] for c in sbom.document["components"]}
+    assert "pkg:pypi/flask@2.0.1" in purls and "pkg:deb/openssl@3.0.2" in purls
 
 
-def test_maybe_store_sbom_is_a_noop_without_inventory(monkeypatch):
+def test_a_versionless_component_is_included(monkeypatch):
+    """Android native libs / iOS dylibs have no version — they still belong in the inventory."""
+    from guardian_scanner import tasks
+
+    captured = {}
+    monkeypatch.setattr(tasks, "store_sbom", lambda session, **kw: captured.update(kw))  # noqa: ANN001
+    inv: list = []
+    tasks._accumulate_sbom(_StubEngine([("libssl.so", "", "android-native", "lib/arm64/libssl.so")]),
+                           object(), [], inv, [])
+    tasks._finalize_sbom(object(), SimpleNamespace(id=_SID, tenant_id=_TID, customer_id=_CID),
+                         SimpleNamespace(id=_AID, identifier="app", name="app"), inv, [])
+    comp = captured["sbom"].document["components"][0]
+    assert comp["purl"] == "pkg:generic/libssl.so" and "version" not in comp
+
+
+def test_finalize_is_a_noop_without_inventory(monkeypatch):
     from guardian_scanner import tasks
 
     called = {"n": 0}
     monkeypatch.setattr(tasks, "store_sbom", lambda *a, **k: called.__setitem__("n", 1))
-    engine = _StubSca([])
-    scan = SimpleNamespace(id=_SID, tenant_id=_TID, customer_id=_CID)
-    asset = SimpleNamespace(id=_AID, identifier="x", name="x")
-    tasks._maybe_store_sbom(object(), engine, object(), scan, asset, [])
+    tasks._finalize_sbom(object(), SimpleNamespace(id=_SID, tenant_id=_TID, customer_id=_CID),
+                         SimpleNamespace(id=_AID, identifier="x", name="x"), [], [])
     assert called["n"] == 0               # nothing to store, store not called
 
 
-def test_maybe_store_sbom_never_raises(monkeypatch):
+def test_accumulate_never_raises_on_a_bad_engine():
+    from guardian_scanner import tasks
+
+    class _Boom:
+        key = EngineKey.SCA
+
+        def collect_inventory(self, _ctx):  # noqa: ANN001
+            raise RuntimeError("walk failed")
+
+    inv: list = []
+    # A collect_inventory that raises must not propagate out of the scan pipeline.
+    tasks._accumulate_sbom(_Boom(), object(), [], inv, [])
+    assert inv == []
+
+
+def test_finalize_never_raises(monkeypatch):
     from guardian_scanner import tasks
 
     def _boom(*a, **k):  # noqa: ANN002, ANN003
         raise RuntimeError("db down")
 
     monkeypatch.setattr(tasks, "store_sbom", _boom)
-    engine = _StubSca([("flask", "2.0.1", "pypi", "requirements.txt")])
-    scan = SimpleNamespace(id=_SID, tenant_id=_TID, customer_id=_CID)
-    asset = SimpleNamespace(id=_AID, identifier="x", name="x")
+    inv = [Component("flask", "2.0.1", "pypi", "requirements.txt")]
     # A storage failure must never propagate out of the scan pipeline.
-    tasks._maybe_store_sbom(object(), engine, object(), scan, asset, [])
+    tasks._finalize_sbom(object(), SimpleNamespace(id=_SID, tenant_id=_TID, customer_id=_CID),
+                         SimpleNamespace(id=_AID, identifier="x", name="x"), inv, [])

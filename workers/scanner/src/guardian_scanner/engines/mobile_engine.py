@@ -92,6 +92,30 @@ class MobileEngine:
     def health(self) -> EngineHealth:
         return EngineHealth(ok=True, detail="static Android APK analysis (offline; no emulator)")
 
+    def collect_inventory(self, ctx: ScanContext) -> list[tuple[str, str, str, str]]:
+        """Bundled native libraries shipped in the APK (`lib/<abi>/*.so`), for the SBOM.
+
+        A static APK exposes no dependency *versions*, but it does ship concrete native libraries —
+        legitimate supply-chain inventory ("what is inside this app"). Reported version-less and
+        deduped across ABIs. Never raises: an unreadable APK contributes nothing.
+        """
+        apk = self._locate_apk(ctx)
+        if apk is None:
+            return []
+        try:
+            zf = zipfile.ZipFile(apk)
+        except (zipfile.BadZipFile, OSError):
+            return []
+        seen: dict[str, tuple[str, str, str, str]] = {}
+        with zf:
+            for name in zf.namelist():
+                if name.startswith("lib/") and name.endswith(".so") and name.count("/") == 2:
+                    lib = name.rsplit("/", 1)[-1]
+                    seen.setdefault(lib, (lib, "", "android-native", name))
+                    if len(seen) >= _MAX_FINDINGS:
+                        break
+        return sorted(seen.values())
+
     def run(self, ctx: ScanContext) -> Iterable[RawFinding]:
         apk = self._locate_apk(ctx)
         if apk is None:

@@ -34,6 +34,22 @@ _INSECURE_SERVICES = {23: "telnet", 21: "ftp", 512: "rexec", 513: "rlogin", 514:
                       2375: "docker-daemon", 111: "rpcbind", 445: "smb", 139: "netbios"}
 
 
+_DEB = {"debian", "ubuntu", "kali", "mint", "linuxmint", "raspbian", "pop"}
+_RPM = {"rhel", "redhat", "centos", "fedora", "rocky", "almalinux", "amzn", "amazon", "ol",
+        "oracle", "suse", "opensuse", "sles"}
+
+
+def _distro_ecosystem(distro: str) -> str:
+    d = distro.strip().lower()
+    if d in _DEB:
+        return "deb"
+    if d == "alpine":
+        return "apk"
+    if d in _RPM:
+        return "rpm"
+    return "generic"
+
+
 class HostPostureInputError(RuntimeError):
     """No authorized posture report was submitted (readiness audit, Phase 4)."""
 
@@ -49,6 +65,28 @@ class HostPostureEngine:
 
     def health(self) -> EngineHealth:
         return EngineHealth(ok=True, detail="assesses authorized local-agent posture submissions")
+
+    def collect_inventory(self, ctx: ScanContext) -> list[tuple[str, str, str, str]]:
+        """Server package inventory (name, version, ecosystem, source) for the SBOM.
+
+        Reads the authorized agent's submitted `server.packages`, mapping the OS distribution to a
+        package ecosystem (deb/apk/rpm). Only an authorized server report contributes; a network
+        report or an unauthorized/absent one yields nothing (never raises).
+        """
+        report = self._load(ctx)
+        if report is None:
+            return []
+        posture = normalize(report)
+        if not posture.get("authorized") or posture.get("kind") != "server_host":
+            return []
+        server = posture.get("server") or {}
+        eco = _distro_ecosystem(str((server.get("os") or {}).get("distro") or ""))
+        out: list[tuple[str, str, str, str]] = []
+        for p in server.get("packages") or []:
+            name, version = str(p.get("name") or ""), str(p.get("version") or "")
+            if name:
+                out.append((name, version, eco, "local-agent"))
+        return out
 
     def run(self, ctx: ScanContext) -> Iterable[RawFinding]:
         report = self._load(ctx)

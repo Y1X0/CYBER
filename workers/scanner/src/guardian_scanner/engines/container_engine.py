@@ -126,14 +126,18 @@ class ContainerEngine:
                 yield _image_finding(issue, archive_path)
             yield from self._image_packages(archive, archive_path, ctx)
 
-    def _image_packages(
-        self, archive: ImageArchive, archive_path: str, ctx: ScanContext
-    ) -> Iterator[RawFinding]:
-        """Inventory the image and match it through the injected matcher."""
+    def _walk_image_inventory(
+        self, archive: ImageArchive
+    ) -> tuple[dict[tuple[str, str], tuple[str, str, str, str]], list[str]]:
+        """Read the image's package databases into a deduped inventory. Shared by findings and SBOM.
+
+        A later layer's database supersedes an earlier one's, so the last reading of a package
+        wins — otherwise an upgraded package is reported at its pre-upgrade version, a vuln report
+        against software that is not on the image.
+        """
         inventory: list[tuple[str, str, str, str]] = []
         paths: list[str] = []
         read = 0
-
         for entry, reader in archive.walk():
             if entry.whiteout_of or not entry.is_file:
                 continue
@@ -158,13 +162,33 @@ class ContainerEngine:
             if parsed is not None:
                 read += 1
                 inventory.extend(parsed)
-
-        # A later layer's database supersedes an earlier one's, so the last reading of a package
-        # wins — otherwise an upgraded package is reported at its pre-upgrade version, which is a
-        # vulnerability report against software that is not on the image.
         latest: dict[tuple[str, str], tuple[str, str, str, str]] = {}
         for name, version, ecosystem, source in inventory:
             latest[(name, ecosystem)] = (name, version, ecosystem, source)
+        return latest, paths
+
+    def collect_inventory(self, ctx: ScanContext) -> list[tuple[str, str, str, str]]:
+        """The image's full package inventory (name, version, ecosystem, source) for the SBOM.
+
+        Reuses the exact package readers `run()` uses; a Dockerfile-only or workspace scan with no
+        image archive yields nothing. Never raises — an unreadable image contributes no SBOM.
+        """
+        archive_path = self._image_path(ctx)
+        if not archive_path:
+            return []
+        try:
+            archive = ImageArchive(archive_path)
+        except ImageFormatError:
+            return []
+        with archive:
+            latest, _paths = self._walk_image_inventory(archive)
+        return sorted(latest.values())
+
+    def _image_packages(
+        self, archive: ImageArchive, archive_path: str, ctx: ScanContext
+    ) -> Iterator[RawFinding]:
+        """Inventory the image and match it through the injected matcher."""
+        latest, paths = self._walk_image_inventory(archive)
 
         if pkg.rpm_present(paths):
             yield RawFinding(

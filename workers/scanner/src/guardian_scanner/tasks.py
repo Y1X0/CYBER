@@ -104,42 +104,47 @@ def _maybe_store_proof(session, finding, raw) -> None:  # noqa: ANN001
         log.warning("proof_store_failed", error=f"{type(exc).__name__}: {exc}"[:200])
 
 
-def _maybe_store_sbom(session, engine, ctx, scan, asset, raws) -> None:  # noqa: ANN001
-    """Build and persist the scan's CycloneDX SBOM from the SCA engine's resolved inventory.
-
-    The SCA engine already walks every manifest/lockfile; only the *vulnerable* components became
-    findings, so the full inventory would otherwise be discarded with the ephemeral workspace. Here
-    we capture that inventory (`collect_inventory`) and cross-reference the SCA findings just
-    produced for the vulnerabilities section, so the SBOM and the findings never disagree. Reuses
-    guardian_core.sbom; adds no new scanner. Never fatal — an SBOM is a bonus deliverable.
+def _accumulate_sbom(engine, ctx, raws, inventory_acc, vuln_acc) -> None:  # noqa: ANN001
+    """Collect one engine's component inventory + the vulnerabilities it found, into scan-level
+    accumulators. Called after each engine runs so a scan's SBOM merges every source that can
+    enumerate components (SCA repo deps, container image packages, server packages via the agent,
+    Android native libs, iOS frameworks) — one SBOM per scan, not one per engine. Never fatal.
     """
-    collect = getattr(engine, "collect_inventory", None)
-    if not callable(collect):
-        return
     try:
-        inventory = collect(ctx)
-        if not inventory:
-            return
-        components = [Component(name=n, version=v, ecosystem=e, source=s)
-                      for (n, v, e, s) in inventory]
-        vulns: list[Vulnerability] = []
+        collect = getattr(engine, "collect_inventory", None)
+        if callable(collect):
+            for (n, v, e, s) in (collect(ctx) or []):
+                inventory_acc.append(Component(name=n, version=v, ecosystem=e, source=s))
+        # Any dependency/package finding this engine produced feeds the vulnerabilities section, so
+        # the SBOM and the findings never disagree. A package-shaped location marks such a finding.
         for raw in raws:
             loc = raw.location or {}
             pkg, ver = loc.get("package"), loc.get("version")
             if not pkg or not ver:
-                continue  # a non-dependency finding (should not occur for SCA); skip it
+                continue
             vid = (raw.cve_ids[0] if raw.cve_ids
                    else str((raw.references or {}).get("advisory") or "")).strip()
             if not vid:
                 continue
-            vulns.append(Vulnerability(
+            vuln_acc.append(Vulnerability(
                 external_id=vid,
                 severity=getattr(raw.base_severity, "value", str(raw.base_severity)),
                 affects_name=str(pkg), affects_version=str(ver),
                 affects_ecosystem=str(loc.get("ecosystem") or ""),
                 description=raw.description or "",
             ))
-        sbom = build_sbom(components, vulns, subject_name=asset.identifier or asset.name or "asset",
+    except Exception as exc:  # noqa: BLE001 - SBOM capture must never fail the scan
+        log.warning("sbom_accumulate_failed", error=f"{type(exc).__name__}: {exc}"[:200])
+
+
+def _finalize_sbom(session, scan, asset, inventory_acc, vuln_acc) -> None:  # noqa: ANN001
+    """Build and persist the scan's CycloneDX SBOM from the merged inventory. Never fatal — an SBOM
+    is a bonus deliverable, so a failure here never fails the scan."""
+    if not inventory_acc:
+        return
+    try:
+        sbom = build_sbom(inventory_acc, vuln_acc,
+                          subject_name=asset.identifier or asset.name or "asset",
                           subject_kind="application")
         store_sbom(session, tenant_id=scan.tenant_id, customer_id=scan.customer_id,
                    scan_id=scan.id, asset_id=asset.id, sbom=sbom)
@@ -329,6 +334,10 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
         }
         # What *this* scan saw, deduplicated — two engines reporting one issue is one sighting.
         observed: dict[str, Finding] = {}
+        # Scan-level SBOM accumulators: every engine that can enumerate components contributes to
+        # one CycloneDX SBOM per scan (built after the engine loop), never one SBOM per engine.
+        sbom_inventory: list = []
+        sbom_vulns: list = []
 
         try:
             for engine_key in scan.requested_engines or [EngineKey.SECRETS.value]:
@@ -470,16 +479,18 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                                 prior, finding, scan_id=scan.id, engine_run_id=run.id)
                     run.status = "completed"
                     engine_statuses.append("completed")
-                    # An SCA run resolved a full dependency inventory; keep it as the scan's SBOM
-                    # (CycloneDX), cross-referenced with the vulnerabilities just found. Additive,
-                    # reuses the resolved data, and never affects the scan result.
-                    if engine.key == EngineKey.SCA:
-                        _maybe_store_sbom(session, engine, ctx, scan, asset, raws)
+                    # If this engine can enumerate components (SCA deps, container image packages,
+                    # server packages via the agent, Android/iOS bundled libraries), collect them
+                    # and any package vulnerabilities into the scan-level SBOM accumulators.
+                    _accumulate_sbom(engine, ctx, raws, sbom_inventory, sbom_vulns)
                 except Exception as exc:  # noqa: BLE001 - isolate per-engine failure
                     run.status = "failed"
                     run.error = str(exc)[:2000]
                     engine_statuses.append("failed")
                     log.error("engine_failed", engine=engine_key, scan_id=scan_id, error=str(exc))
+
+            # One SBOM per scan, merged from every engine that enumerated components.
+            _finalize_sbom(session, scan, asset, sbom_inventory, sbom_vulns)
         except Exception as exc:  # noqa: BLE001 - a failure OUTSIDE the per-engine guard (workspace
             # preparation, engine lookup, ScanContext build …) must still put the scan in a terminal
             # FAILED state with the error recorded. Otherwise the exception escapes session_scope,

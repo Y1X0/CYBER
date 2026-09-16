@@ -40,8 +40,15 @@ _PURL_TYPE = {
     "maven": "maven",
     "nuget": "nuget",
     "apk": "apk",
+    "alpine": "apk",
     "deb": "deb",
+    "debian": "deb",
     "rpm": "rpm",
+    # OS/language labels other engines emit, and bundled-binary components with no upstream
+    # ecosystem (Android .so, iOS frameworks) — a stable generic PURL rather than a wrong one.
+    "android-native": "generic",
+    "ios-framework": "generic",
+    "native": "generic",
 }
 
 # CycloneDX vulnerability ratings use lowercase severities; map the platform's Severity names.
@@ -80,18 +87,24 @@ class Sbom:
 
 
 def purl(name: str, version: str, ecosystem: str) -> str:
-    """A Package-URL for a component. Also serves as its stable CycloneDX bom-ref."""
+    """A Package-URL for a component. Also serves as its stable CycloneDX bom-ref.
+
+    A component with no recoverable version (a bundled native library, a framework without version
+    metadata) gets a PURL without the `@version` suffix — CycloneDX does not require a version, and
+    an inventory of *what ships* is legitimate even when the version is unknown.
+    """
     eco = (ecosystem or "").strip().lower()
     ptype = _PURL_TYPE.get(eco, eco or "generic")
     # golang PURLs keep the module path (which contains slashes); other types keep the bare name.
-    return f"pkg:{ptype}/{name.strip()}@{version.strip()}"
+    ver = (version or "").strip()
+    return f"pkg:{ptype}/{name.strip()}@{ver}" if ver else f"pkg:{ptype}/{name.strip()}"
 
 
 def _dedupe(components: Iterable[Component]) -> list[Component]:
     seen: dict[tuple[str, str, str], Component] = {}
     for c in components:
-        if not c.name or not c.version:
-            continue
+        if not c.name:
+            continue  # a version may be unknown (bundled binary); a name may not
         key = (c.name.lower(), c.version, (c.ecosystem or "").lower())
         seen.setdefault(key, c)
     return sorted(seen.values(), key=lambda c: (c.ecosystem.lower(), c.name.lower(), c.version))
@@ -123,7 +136,9 @@ def build_sbom(
             "type": "library",
             "bom-ref": refs[(c.name.lower(), c.version, (c.ecosystem or "").lower())],
             "name": c.name,
-            "version": c.version,
+            # CycloneDX does not require a version; omit it rather than emit an empty string for a
+            # bundled binary whose version could not be recovered.
+            **({"version": c.version} if c.version else {}),
             "purl": refs[(c.name.lower(), c.version, (c.ecosystem or "").lower())],
             **({"evidence": {"identity": {"field": "purl", "concludedValue": c.source}}}
                if c.source else {}),

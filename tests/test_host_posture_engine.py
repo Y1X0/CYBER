@@ -144,3 +144,32 @@ def test_supports_and_health():
     assert e.supports("network_host") and e.supports("server_host")
     assert e.supports("repo") is False
     assert e.health().ok is True
+
+
+# ── SBOM inventory (server packages) ────────────────────────────────────────────────────────────
+def _inv(report: dict):
+    ctx = ScanContext(scan_id="t", asset_kind=report.get("kind", "server_host"),
+                      asset_identifier="x", inline_content=json.dumps(report))
+    return HostPostureEngine().collect_inventory(ctx)
+
+
+def test_collect_inventory_maps_debian_packages_to_deb():
+    inv = _inv({"kind": "server_host", "authorized": True, "server": {
+        "os": {"distro": "ubuntu", "version": "22.04"},
+        "packages": [{"name": "openssl", "version": "3.0.2"}, {"name": "curl", "version": "7.81"}]}})
+    assert ("openssl", "3.0.2", "deb", "local-agent") in inv
+    assert {e for (_n, _v, e, _s) in inv} == {"deb"}
+
+
+def test_collect_inventory_maps_rhel_to_rpm_and_alpine_to_apk():
+    rpm = _inv({"kind": "server_host", "authorized": True, "server": {
+        "os": {"distro": "fedora"}, "packages": [{"name": "glibc", "version": "2.37"}]}})
+    apk = _inv({"kind": "server_host", "authorized": True, "server": {
+        "os": {"distro": "alpine"}, "packages": [{"name": "musl", "version": "1.2.4"}]}})
+    assert rpm[0][2] == "rpm" and apk[0][2] == "apk"
+
+
+def test_collect_inventory_requires_authorization_and_a_server_report():
+    assert _inv({"kind": "server_host", "authorized": False,
+                 "server": {"packages": [{"name": "x", "version": "1"}]}}) == []
+    assert _inv({"kind": "network_host", "authorized": True, "network": {}}) == []

@@ -89,6 +89,23 @@ def _findings(path, matcher=None, asset_kind="container_image"):
     return list(ContainerEngine().run(ctx))
 
 
+def test_collect_inventory_returns_the_image_packages_for_the_sbom(tmp_path):
+    """The SBOM reuses the same package readers as the vuln scan — one inventory, two consumers."""
+    build_image(tmp_path, [_layer({"var/lib/dpkg/status": DPKG})])
+    ctx = ScanContext(scan_id="t", asset_kind="container_image", asset_identifier="fixture",
+                      workspace_path=str(tmp_path))
+    inv = ContainerEngine().collect_inventory(ctx)
+    names = {n for (n, _v, _e, _s) in inv}
+    assert "openssl" in names and "zlib1g" in names
+    assert all(eco == "Debian" for (_n, _v, eco, _s) in inv)
+
+
+def test_collect_inventory_is_empty_without_an_image(tmp_path):
+    ctx = ScanContext(scan_id="t", asset_kind="container_image", asset_identifier="x",
+                      workspace_path=str(tmp_path))
+    assert ContainerEngine().collect_inventory(ctx) == []
+
+
 def _rules(findings):
     return {f.location.get("rule") for f in findings}
 
