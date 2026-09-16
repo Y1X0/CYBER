@@ -210,3 +210,35 @@ export function Bars({ series, colors }:
     </div>
   );
 }
+
+// The assessment flow, shown as a step strip. Steps are LINKS (never buttons) so they never collide
+// with the navigation's button labels. It orients a person in the journey the product actually runs:
+// Asset → Scan → Findings → Risk → Components → SBOM → Report → Remediation.
+const JOURNEY_STEPS: { key: string; label: string; to: string | null }[] = [
+  { key: "asset", label: "Asset", to: "assets" },
+  { key: "scan", label: "Scan", to: null },
+  { key: "findings", label: "Findings", to: "findings" },
+  { key: "risk", label: "Risk", to: "findings" },
+  { key: "components", label: "Components", to: null },
+  { key: "sbom", label: "SBOM", to: null },
+  { key: "report", label: "Report", to: "reports" },
+  { key: "remediation", label: "Remediation", to: "remediation" },
+];
+
+export function JourneyStrip({ active, scanId }: { active: string; scanId?: string }) {
+  const activeIdx = JOURNEY_STEPS.findIndex((s) => s.key === active);
+  return (
+    <nav className="journey" aria-label="Assessment flow">
+      {JOURNEY_STEPS.map((s, i) => {
+        const state = i < activeIdx ? "done" : i === activeIdx ? "on" : "next";
+        const href = s.to ? `#/${s.to}` : (scanId ? `#/scans/${scanId}` : undefined);
+        const cls = `journey-step ${state}`;
+        const inner = <><span className="journey-dot" aria-hidden="true" />{s.label}</>;
+        return href
+          ? <a key={s.key} className={cls} href={href}
+               aria-current={state === "on" ? "step" : undefined}>{inner}</a>
+          : <span key={s.key} className={cls}>{inner}</span>;
+      })}
+    </nav>
+  );
+}

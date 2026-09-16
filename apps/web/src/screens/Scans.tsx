@@ -8,7 +8,7 @@ import { useState } from "react";
 import { EngineRun, Finding, Scan, SbomMeta, api } from "../api";
 import { navigate } from "../router";
 import {
-  Async, Card, EmptyState, ENGINE_STATE, SCAN_STATE, SeverityBadge, StatusPill,
+  Async, Card, EmptyState, ENGINE_STATE, JourneyStrip, SCAN_STATE, SeverityBadge, StatusPill,
   ago, useAsync, when,
 } from "../ui";
 
@@ -82,6 +82,7 @@ export function ScanDetailScreen({ id }: { id: string }) {
         const waiting = s.status === "queued" || s.status === "running";
         return (
           <>
+            <JourneyStrip active="scan" scanId={s.id} />
             <Card title={
               <>Scan <span className="mono">{s.id.slice(0, 8)}</span>{" "}
                 <StatusPill tone={state.tone}>{state.label}</StatusPill></>

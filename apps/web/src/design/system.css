@@ -1131,3 +1131,74 @@ input[type="checkbox"] { accent-color: var(--crimson); width: 14px; height: 14px
   content: ""; flex: 1; height: 1px;
   background: linear-gradient(to right, var(--edge-red), transparent);
 }
+
+/* ── navigation groups ──────────────────────────────────────────────────────────────────────── */
+.nav-group { display: flex; flex-direction: column; gap: 2px; margin-bottom: var(--s-3); }
+.nav-head {
+  font-size: var(--fs-micro); letter-spacing: var(--track-wide); text-transform: uppercase;
+  color: var(--text-faint); padding: var(--s-2) var(--s-3) var(--s-1); font-family: var(--font-mono);
+}
+.nav-item .idx { text-align: center; }
+/* The one action that starts everything, lifted out of the tab list. */
+.nav-item.primary { color: var(--red-text); font-weight: 600; }
+.nav-item.primary .idx { color: var(--plasma); }
+.nav-item.primary::before { transform: scaleY(0.6); }
+.nav-item.primary.on { color: #fff; }
+
+/* ── journey step strip ─────────────────────────────────────────────────────────────────────── */
+.journey {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2);
+  padding: var(--s-3); margin-bottom: var(--s-4);
+  background: var(--glass); border: 1px solid var(--edge);
+  border-radius: var(--r-md);
+}
+.journey-step {
+  display: inline-flex; align-items: center; gap: var(--s-2);
+  font-size: var(--fs-xs); letter-spacing: var(--track-wide); text-transform: uppercase;
+  color: var(--text-faint); text-decoration: none; font-family: var(--font-mono);
+  padding: 2px var(--s-1); position: relative;
+}
+.journey-step:not(:last-child)::after {
+  content: "→"; margin-left: var(--s-2); color: var(--text-faint); opacity: 0.5;
+}
+.journey-dot {
+  width: 6px; height: 6px; border-radius: var(--r-pill);
+  background: var(--surface-3); border: 1px solid var(--edge-strong); transform: rotate(45deg);
+}
+a.journey-step:hover { color: var(--text); }
+a.journey-step:hover .journey-dot { border-color: var(--edge-red-hi); }
+.journey-step.done { color: var(--text-dim); }
+.journey-step.done .journey-dot { background: var(--crimson-dim); border-color: var(--crimson); }
+.journey-step.on { color: #fff; }
+.journey-step.on .journey-dot { background: var(--plasma); border-color: var(--plasma);
+  box-shadow: 0 0 10px var(--plasma); }
+
+/* ── guided scan: "what do you want to scan?" ───────────────────────────────────────────────── */
+.scan-type-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--s-3); margin-top: var(--s-4);
+}
+.scan-type {
+  display: flex; flex-direction: column; gap: var(--s-1); text-align: left; cursor: pointer;
+  padding: var(--s-4); background: linear-gradient(to bottom, var(--surface-2), var(--surface-1));
+  border: 1px solid var(--edge); border-radius: var(--r-md); color: var(--text);
+  transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+.scan-type:hover {
+  border-color: var(--edge-red-hi); transform: translateY(-2px); box-shadow: var(--glow-red);
+}
+.scan-type-icon { font-size: var(--fs-xl); line-height: 1; }
+.scan-type-label { font-size: var(--fs-md); font-weight: 600; }
+.scan-type-blurb { font-size: var(--fs-xs); color: var(--text-dim); }
+.scan-type-tag {
+  align-self: flex-start; margin-top: var(--s-1); font-size: var(--fs-micro);
+  letter-spacing: var(--track-wide); text-transform: uppercase; color: var(--amber-text);
+  border: 1px solid var(--edge-strong); border-radius: var(--r-pill); padding: 1px var(--s-2);
+}
+.scan-engines-note { margin: var(--s-2) 0; display: flex; flex-direction: column; gap: var(--s-2); }
+.chips { display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.chip {
+  font-size: var(--fs-xs); font-family: var(--font-mono); color: var(--text-dim);
+  border: 1px solid var(--edge); border-radius: var(--r-sm); padding: 1px var(--s-2);
+  background: var(--surface-2);
+}
