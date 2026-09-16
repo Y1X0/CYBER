@@ -150,6 +150,7 @@ export interface QueueHealth {
 export interface Finding {
   id: string;
   title: string;
+  description?: string;
   severity: string;
   risk_score: number;
   status: string;

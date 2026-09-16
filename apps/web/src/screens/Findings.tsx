@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from "react";
 import { ApiError, Finding, FindingDossier, ProofOfVulnerability, api } from "../api";
+import { explainFinding } from "../findingExplain";
 import { navigate } from "../router";
 import {
   Async, Card, EmptyState, SEVERITIES, SeverityBadge, StatusPill, useAsync, when,
@@ -116,14 +117,45 @@ export function FindingsScreen() {
 
 export function FindingDetailScreen({ id }: { id: string }) {
   const loader = useAsync(() => api.finding(id), [id]);
+  // Two levels on one page: the plain-language explanation always leads; the technical dossier
+  // follows and can be collapsed. Default expanded so the full record is one scroll away (and so
+  // the advanced reader loses nothing).
+  const [showTech, setShowTech] = useState(true);
 
   return (
     <Async loader={loader}>
-      {(d: FindingDossier) => (
+      {(d: FindingDossier) => {
+        const ex = explainFinding(d.finding);
+        const standards = [d.finding.cwe_id, d.finding.owasp_ref].filter(Boolean).join(" · ");
+        return (
         <>
+          {/* Plain language first: what / why / what to do — no CWE required to understand it. */}
           <Card title={
             <><SeverityBadge severity={d.finding.severity} /> {d.finding.title}</>
           } actions={<button onClick={() => navigate("findings")}>Back to findings</button>}>
+            <div className="explain">
+              <div className="explain-block">
+                <h4>What this means</h4><p>{ex.whatItMeans}</p>
+              </div>
+              <div className="explain-block">
+                <h4>Why it matters</h4><p>{ex.whyItMatters}</p>
+              </div>
+              <div className="explain-block">
+                <h4>What to do</h4><p>{ex.whatToDo}</p>
+              </div>
+            </div>
+            <div className="explain-tech">
+              <span className="explain-tech-facts">
+                {standards || "no standard mapping"}{ex.where && <> · {ex.where}</>}
+              </span>
+              <button className="link" onClick={() => setShowTech((v) => !v)}>
+                {showTech ? "Hide technical details ▴" : "Show technical details ▾"}
+              </button>
+            </div>
+          </Card>
+
+          {showTech && (<>
+          <Card title="Technical details">
             <dl className="kv">
               <dt>Risk score</dt>
               <dd>{d.finding.risk_score}/100 — computed by the deterministic risk engine</dd>
@@ -148,7 +180,7 @@ export function FindingDetailScreen({ id }: { id: string }) {
                   </button></>}
               </dd>
               <dt>Standards</dt>
-              <dd>{[d.finding.cwe_id, d.finding.owasp_ref].filter(Boolean).join(" · ") || "—"}</dd>
+              <dd>{standards || "—"}</dd>
             </dl>
           </Card>
 
@@ -259,8 +291,10 @@ export function FindingDetailScreen({ id }: { id: string }) {
               </ul>
             )}
           </Card>
+          </>)}
         </>
-      )}
+        );
+      }}
     </Async>
   );
 }

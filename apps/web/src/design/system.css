@@ -1247,3 +1247,21 @@ a.journey-step:hover .journey-dot { border-color: var(--edge-red-hi); }
   color: #fff; background: var(--crimson-dim); border: 1px solid var(--edge-red-hi);
   border-radius: var(--r-pill); padding: 1px var(--s-2);
 }
+
+/* ── plain-language finding explanation ─────────────────────────────────────────────────────── */
+.explain {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: var(--s-4);
+  margin: var(--s-2) 0 var(--s-4);
+}
+.explain-block h4 {
+  margin: 0 0 var(--s-1); font-size: var(--fs-xs); letter-spacing: var(--track-wide);
+  text-transform: uppercase; color: var(--red-text); font-family: var(--font-mono);
+}
+.explain-block p { margin: 0; color: var(--text); font-size: var(--fs-md); line-height: 1.55; }
+.explain-tech {
+  display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;
+  gap: var(--s-2); padding-top: var(--s-3); border-top: 1px solid var(--edge);
+}
+.explain-tech-facts {
+  font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-dim);
+}
