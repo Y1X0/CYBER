@@ -233,7 +233,7 @@ def test_collect_inventory_lists_native_libraries_deduped(tmp_path):
         z.writestr("lib/armeabi-v7a/libssl.so", b"x")   # same lib, second ABI -> one component
         z.writestr("lib/arm64-v8a/libfoo.so", b"y")
     ctx = ScanContext(scan_id="t", asset_kind="mobile_app", asset_identifier="x",
-                      asset_config={"apk_path": str(apk)})
+                      artifact_path=str(apk))
     inv = MobileEngine().collect_inventory(ctx)
     names = sorted(n for (n, _v, _e, _s) in inv)
     assert names == ["libfoo.so", "libssl.so"]

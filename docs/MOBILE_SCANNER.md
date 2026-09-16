@@ -63,16 +63,21 @@ finding rather than falsely reporting "no secrets".
 
 **Android:**
 1. Create an asset of kind `mobile_app` (`AssetKind.MOBILE_APP`).
-2. Make the APK available to the worker: set the asset config `local_path` / `apk_path` to the
-   uploaded `.apk`, or place the file in the scan workspace. (The engine also accepts a workspace
-   directory and picks the first `*.apk`.)
-3. Create a scan requesting `engines: ["mobile"]`.
+2. Upload the `.apk`: `POST /api/v1/assets/{asset_id}/artifact` (multipart `file`). The server
+   validates it statically, stores it tenant-scoped, and attaches it to the asset by opaque id. The
+   console's guided New-scan flow does this for you.
+3. Create a scan requesting `engines: ["mobile"]`. The scan is refused until the artifact is
+   attached; the worker resolves it to a controlled temp file and reads only that.
 
 **iOS:**
 1. Create an asset of kind `ios_app` (`AssetKind.IOS_APP`).
-2. Make the IPA available: set the asset config `local_path` / `ipa_path` to the uploaded `.ipa`,
-   or place it in the scan workspace (the engine picks the first `*.ipa`).
+2. Upload the `.ipa`: `POST /api/v1/assets/{asset_id}/artifact` (multipart `file`).
 3. Create a scan requesting `engines: ["ios"]`.
+
+> The worker no longer reads a filesystem path from the asset config (the former `local_path` /
+> `apk_path` / `ipa_path` keys). Those let a request name any file on the worker (AUD-P1-6) and have
+> been removed — an artifact is addressed only by its server-owned id. See
+> [docs/ARTIFACT_UPLOADS.md](ARTIFACT_UPLOADS.md).
 
 ## Known limitations / deployment requirements
 
@@ -80,9 +85,9 @@ finding rather than falsely reporting "no secrets".
   Android emulator / device host with privileges the cloud container does not have. The engine seam
   is ready to add a dynamic worker later; until then this is static-only, and says so in every
   affected finding.
-- **APK upload plumbing** (multipart upload → object storage → asset config `local_path`) is the one
-  integration a production deployment must provide so the worker can read the file; the engine and
-  orchestration are complete.
+- **APK/IPA upload plumbing is implemented** (multipart upload → tenant-scoped Postgres storage →
+  server-owned artifact id → worker materialization). See [docs/ARTIFACT_UPLOADS.md](ARTIFACT_UPLOADS.md)
+  for storage durability, limits, and the security boundary.
 - **iOS dynamic analysis: NOT IMPLEMENTED** — it needs a device/jailbroken host and macOS tooling
   the cloud does not have. iOS static analysis of `.ipa` **is** implemented (above).
 - **FairPlay-encrypted App-Store binaries (iOS):** their `__TEXT` is encrypted, so string analysis

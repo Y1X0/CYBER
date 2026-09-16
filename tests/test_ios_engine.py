@@ -52,7 +52,7 @@ def _ipa(tmp_path, info: dict, *, entitlements=None, exe=b"App binary strings", 
 def _run(tmp_path, info, **kw):
     ipa = _ipa(tmp_path, info, **kw)
     ctx = ScanContext(scan_id="t", asset_kind="ios_app", asset_identifier="x",
-                      asset_config={"ipa_path": ipa})
+                      artifact_path=ipa)
     return list(IosEngine().run(ctx))
 
 
@@ -150,7 +150,7 @@ def test_a_non_ipa_file_is_refused(tmp_path):
     bad = tmp_path / "x.ipa"
     bad.write_bytes(b"not a zip")
     ctx = ScanContext(scan_id="t", asset_kind="ios_app", asset_identifier="x",
-                      asset_config={"ipa_path": str(bad)})
+                      artifact_path=str(bad))
     with pytest.raises(IosInputError):
         list(IosEngine().run(ctx))
 
@@ -160,7 +160,7 @@ def test_a_zip_without_a_bundle_is_refused(tmp_path):
     with zipfile.ZipFile(path, "w") as z:
         z.writestr("random.txt", "nothing here")
     ctx = ScanContext(scan_id="t", asset_kind="ios_app", asset_identifier="x",
-                      asset_config={"ipa_path": str(path)})
+                      artifact_path=str(path))
     with pytest.raises(IosInputError):
         list(IosEngine().run(ctx))
 
@@ -188,7 +188,7 @@ def test_collect_inventory_lists_frameworks_and_dylibs(tmp_path):
         z.writestr("Payload/App.app/Frameworks/Alamofire.framework/Alamofire", b"x")
         z.writestr("Payload/App.app/Frameworks/libswiftCore.dylib", b"x")
     ctx = ScanContext(scan_id="t", asset_kind="ios_app", asset_identifier="x",
-                      asset_config={"ipa_path": str(path)})
+                      artifact_path=str(path))
     inv = {n: (v, e) for (n, v, e, _s) in IosEngine().collect_inventory(ctx)}
     assert inv["Alamofire"] == ("5.6.1", "ios-framework")     # framework version from its Info.plist
     assert inv["libswiftCore.dylib"] == ("", "ios-framework")  # a loose dylib, version-less
@@ -203,5 +203,5 @@ def test_xml_plist_is_also_parsed(tmp_path):
             fmt=plistlib.FMT_XML))
         z.writestr("Payload/App.app/App", b"x")
     ctx = ScanContext(scan_id="t", asset_kind="ios_app", asset_identifier="x",
-                      asset_config={"ipa_path": str(path)})
+                      artifact_path=str(path))
     assert any("disabled globally" in x.title for x in IosEngine().run(ctx))

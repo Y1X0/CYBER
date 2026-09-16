@@ -1203,6 +1203,20 @@ a.journey-step:hover .journey-dot { border-color: var(--edge-red-hi); }
   background: var(--surface-2);
 }
 
+/* ── artifact upload progress ───────────────────────────────────────────────────────────────── */
+.upload-progress { display: flex; flex-direction: column; gap: var(--s-1); margin: var(--s-2) 0; }
+.upload-progress-bar {
+  height: 6px; border-radius: var(--r-sm); background: var(--crimson);
+  transition: width 120ms linear; min-width: 2px;
+  box-shadow: 0 0 8px rgba(224, 27, 60, 0.5);
+}
+.upload-progress { position: relative; }
+.upload-progress::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 6px;
+  border-radius: var(--r-sm); background: var(--surface-2); border: 1px solid var(--edge);
+}
+.upload-progress-bar, .upload-progress > .muted { position: relative; }
+
 /* ── first-run welcome ──────────────────────────────────────────────────────────────────────── */
 .welcome { display: flex; flex-direction: column; gap: var(--s-5); }
 .welcome-hero {

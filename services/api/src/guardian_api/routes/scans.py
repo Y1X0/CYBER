@@ -10,6 +10,7 @@ from functools import lru_cache
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from guardian_common.metrics import REGISTRY
 from guardian_core import quota
+from guardian_core.artifacts import asset_requires_artifact
 from guardian_core.enums import ScanStatus
 from guardian_core.policy import evaluate_gate
 from guardian_db.audit import record_audit
@@ -45,6 +46,17 @@ def create_scan(
     asset = db.get(Asset, body.asset_id)
     if asset is None or asset.tenant_id != identity.tenant_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "asset not found")
+
+    # An asset scanned from an uploaded binary (.apk / .ipa) cannot start a scan until that artifact
+    # is attached — otherwise the engine would run with nothing to read. Reject clearly here rather
+    # than let the scan reach the worker and fail. The upload endpoint records `artifact_id` on the
+    # asset's config server-side.
+    if asset_requires_artifact(asset.kind) and not (asset.config or {}).get("artifact_id"):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "this asset needs its file uploaded before it can be scanned "
+            f"(POST /api/v1/assets/{asset.id}/artifact)",
+        )
 
     # Validate against actually-registered engines (entry-point names == engine keys), not the core
     # enum — a third-party engine registered via entry points is requestable without editing core,

@@ -48,6 +48,11 @@ class ScanContext:
     asset_kind: str
     asset_identifier: str
     workspace_path: str | None = None  # local path to scan (cloned repo / provided dir)
+    # A server-owned local path to an uploaded artifact (.apk / .ipa) the WORKER resolved from a
+    # tenant-scoped artifact id and wrote to a controlled temp file. Engines read ONLY this, never
+    # a path from the asset's (tenant-controlled) config — that was AUD-P1-6. None when the asset
+    # carries no uploaded artifact.
+    artifact_path: str | None = None
     inline_content: str | None = None  # optional inline content (tests, single-file scans)
     exposure: str = "unknown"
     settings: dict = field(default_factory=dict)

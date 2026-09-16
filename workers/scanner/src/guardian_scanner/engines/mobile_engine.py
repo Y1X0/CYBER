@@ -29,6 +29,12 @@ from guardian_scanner.engines.base import EngineHealth, ScanContext
 from guardian_scanner.engines.secrets_engine import _PATTERNS as _SECRET_PATTERNS
 from guardian_scanner.engines.secrets_engine import _redact
 from guardian_scanner.mobile.axml import AxmlError, Element, parse_axml
+from guardian_scanner.mobile.safezip import (
+    MAX_MEMBER_BYTES,
+    ArchiveMemberTooLarge,
+    read_bounded,
+    read_whole_capped,
+)
 
 log = get_logger("guardian.engine.mobile")
 
@@ -120,8 +126,7 @@ class MobileEngine:
         apk = self._locate_apk(ctx)
         if apk is None:
             raise MobileInputError(
-                "no APK was provided (expected asset_config['apk_path'] or a .apk in the "
-                "workspace)")
+                "no APK was provided — upload the .apk to this asset before scanning")
         try:
             zf = zipfile.ZipFile(apk)
         except (zipfile.BadZipFile, OSError) as exc:
@@ -144,10 +149,12 @@ class MobileEngine:
                 yield raw
 
     def _locate_apk(self, ctx: ScanContext) -> str | None:
-        cfg = ctx.asset_config or {}
-        for key in ("apk_path", "local_path", "artifact_path"):
-            if cfg.get(key) and Path(str(cfg[key])).is_file():
-                return str(cfg[key])
+        # ONLY server-owned inputs. `artifact_path` is a temp file the worker wrote from a
+        # validated, tenant-scoped upload (resolved by opaque id); `workspace_path` is a
+        # worker-prepared dir. A path from the asset's tenant-controlled config is never trusted
+        # here (AUD-P1-6).
+        if ctx.artifact_path and Path(ctx.artifact_path).is_file():
+            return ctx.artifact_path
         if ctx.workspace_path:
             root = Path(ctx.workspace_path)
             if root.is_file() and root.suffix.lower() == ".apk":
@@ -159,7 +166,10 @@ class MobileEngine:
         return None
 
     def _read_manifest(self, zf: zipfile.ZipFile) -> Element:
-        raw = zf.read("AndroidManifest.xml")
+        try:
+            raw = read_whole_capped(zf, "AndroidManifest.xml")
+        except ArchiveMemberTooLarge as exc:
+            raise MobileInputError(f"AndroidManifest.xml is implausibly large: {exc}") from exc
         head = raw.lstrip()[:1]
         if head == b"<":
             # Some tooling ships a plaintext manifest; normalize it to the same Element tree.
@@ -277,7 +287,9 @@ class MobileEngine:
             if not (n.endswith(".dex") or n.startswith(("assets/", "res/", "resources.arsc"))):
                 continue
             try:
-                data = zf.read(n)[:budget]
+                # Bounded read: never inflate more than the remaining budget (capped per member), so
+                # a high-ratio DEFLATE bomb cannot blow up memory before the slice (AUD-P1-5).
+                data = read_bounded(zf, n, min(budget, MAX_MEMBER_BYTES))
             except (zipfile.BadZipFile, OSError):
                 continue
             budget -= len(data)

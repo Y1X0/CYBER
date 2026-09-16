@@ -239,6 +239,22 @@ export interface Asset {
   created_at?: string;
 }
 
+export interface ArtifactMeta {
+  id: string;
+  asset_id: string;
+  kind: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  sha256: string;
+  status: string;
+  created_at: string;
+}
+
+// Mirrors the server default `artifact_max_bytes` (100 MiB). The server is the source of truth and
+// rejects an over-limit upload with 413; this is only for a friendly pre-check before the upload.
+export const ARTIFACT_MAX_BYTES = 100 * 1024 * 1024;
+
 export interface Customer {
   id: string;
   name: string;
@@ -432,6 +448,39 @@ export const api = {
   createAsset: (body: {
     customer_id: string; name: string; kind: string; identifier: string; exposure: string;
   }) => req<Asset>("/assets", { method: "POST", body: JSON.stringify(body) }),
+
+  // ── scan artifacts (.apk / .ipa uploads) ────────────────────────────────────────────────────────
+  assetArtifacts: (assetId: string) =>
+    req<ArtifactMeta[]>(`/assets/${assetId}/artifacts`),
+  deleteArtifact: (assetId: string, artifactId: string) =>
+    req<void>(`/assets/${assetId}/artifacts/${artifactId}`, { method: "DELETE" }),
+  // Multipart upload with progress. Uses XHR (fetch cannot report upload progress) but mirrors the
+  // JSON client: same Bearer token, and the server's own error message is surfaced, never swallowed.
+  uploadArtifact(
+    assetId: string, file: File, onProgress?: (fraction: number) => void,
+  ): Promise<ArtifactMeta> {
+    return new Promise<ArtifactMeta>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", `${API_BASE}/api/v1/assets/${assetId}/artifact`);
+      if (token) xhr.setRequestHeader("Authorization", `Bearer ${token}`);
+      xhr.upload.onprogress = (ev) => {
+        if (onProgress && ev.lengthComputable) onProgress(ev.loaded / ev.total);
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(JSON.parse(xhr.responseText) as ArtifactMeta);
+        } else {
+          reject(new ApiError(xhr.status, reason(xhr.status, xhr.responseText)));
+        }
+      };
+      xhr.onerror = () => reject(new ApiError(0,
+        "Could not reach the control plane to upload the file. If it has been idle it may be "
+        + "starting up — try again shortly."));
+      const fd = new FormData();
+      fd.append("file", file, file.name);
+      xhr.send(fd);
+    });
+  },
 
   // ── ownership ─────────────────────────────────────────────────────────────────────────────────
   verifications: () => req<Verification[]>("/verifications"),

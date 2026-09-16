@@ -30,6 +30,7 @@ from guardian_scanner.engines.base import EngineHealth, ScanContext
 from guardian_scanner.engines.secrets_engine import _PATTERNS as _SECRET_PATTERNS
 from guardian_scanner.engines.secrets_engine import _redact
 from guardian_scanner.mobile.ipa import IpaBundle, IpaError, load_plist, read_bundle
+from guardian_scanner.mobile.safezip import MAX_MEMBER_BYTES, MAX_METADATA_BYTES, read_bounded
 
 log = get_logger("guardian.engine.ios")
 
@@ -133,7 +134,7 @@ class IosEngine:
                     fw = after.split("/", 1)[0]
                     version = ""
                     try:
-                        plist = load_plist(zf.read(n))
+                        plist = load_plist(read_bounded(zf, n, MAX_METADATA_BYTES))
                         version = str(plist.get("CFBundleShortVersionString") or "")
                     except (KeyError, zipfile.BadZipFile, OSError):
                         version = ""
@@ -146,8 +147,7 @@ class IosEngine:
         ipa = self._locate_ipa(ctx)
         if ipa is None:
             raise IosInputError(
-                "no .ipa was provided (expected asset_config['ipa_path'] or a .ipa in the "
-                "workspace)")
+                "no .ipa was provided — upload the .ipa to this asset before scanning")
         try:
             zf = zipfile.ZipFile(ipa)
         except (zipfile.BadZipFile, OSError) as exc:
@@ -175,10 +175,11 @@ class IosEngine:
                 yield raw
 
     def _locate_ipa(self, ctx: ScanContext) -> str | None:
-        cfg = ctx.asset_config or {}
-        for key in ("ipa_path", "local_path", "artifact_path"):
-            if cfg.get(key) and Path(str(cfg[key])).is_file():
-                return str(cfg[key])
+        # ONLY server-owned inputs (see MobileEngine._locate_apk): the worker-materialized
+        # `artifact_path` from a validated, tenant-scoped upload, or a worker-prepared workspace. A
+        # tenant-controlled config path is never trusted here (AUD-P1-6).
+        if ctx.artifact_path and Path(ctx.artifact_path).is_file():
+            return ctx.artifact_path
         if ctx.workspace_path:
             root = Path(ctx.workspace_path)
             if root.is_file() and root.suffix.lower() == ".ipa":
@@ -297,7 +298,9 @@ class IosEngine:
                            ".otf", ".woff", ".woff2")):
                 continue
             try:
-                data = zf.read(n)[:budget]
+                # Bounded read: cap per-member inflation so a DEFLATE bomb in the .ipa cannot
+                # exhaust memory before the slice (AUD-P1-5).
+                data = read_bounded(zf, n, min(budget, MAX_MEMBER_BYTES))
             except (zipfile.BadZipFile, OSError):
                 continue
             budget -= len(data)

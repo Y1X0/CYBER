@@ -91,6 +91,20 @@ class AssetOut(BaseModel):
     created_at: dt.datetime
 
 
+class ArtifactOut(BaseModel):
+    """Metadata for an uploaded scan artifact. Never carries the bytes."""
+
+    id: uuid.UUID
+    asset_id: uuid.UUID
+    kind: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    sha256: str
+    status: str
+    created_at: dt.datetime
+
+
 # ── Scans ──
 class ScanCreate(BaseModel):
     asset_id: uuid.UUID

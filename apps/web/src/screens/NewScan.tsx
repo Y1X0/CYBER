@@ -3,10 +3,28 @@
 // exactly as the Assets screen does, then routes to the live scan.
 
 import { useState } from "react";
-import { Customer, api } from "../api";
+import { ARTIFACT_MAX_BYTES, Customer, api } from "../api";
 import { navigate } from "../router";
 import { SCAN_TYPES, ScanType } from "../scanCatalog";
 import { Async, Card, useAsync } from "../ui";
+
+function humanSize(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1 ? `${mb.toFixed(1)} MB` : `${(bytes / 1024).toFixed(0)} KB`;
+}
+
+// Client-side pre-check so an obviously-wrong file is caught before any upload. The server re-checks
+// authoritatively (type by content, size by hard cap), so this is UX, not the security boundary.
+function localArtifactError(file: File, upload: NonNullable<ScanType["upload"]>): string | null {
+  if (!file.name.toLowerCase().endsWith(`.${upload.ext}`)) {
+    return `This needs a .${upload.ext} file. That looks like a different kind of file.`;
+  }
+  if (file.size === 0) return "That file is empty.";
+  if (file.size > ARTIFACT_MAX_BYTES) {
+    return `That file is ${humanSize(file.size)}; the limit is ${humanSize(ARTIFACT_MAX_BYTES)}.`;
+  }
+  return null;
+}
 
 export function NewScanScreen({ preselect }: { preselect?: string | null }) {
   const customers = useAsync(() => api.customers(), []);
@@ -55,21 +73,40 @@ function ScanForm({ type, customers, onBack }:
   });
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [file, setFile] = useState<File | null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
+  const needsUpload = Boolean(type.upload);
+
+  function pickFile(f: File | null) {
+    setErr("");
+    if (f && type.upload) {
+      const problem = localArtifactError(f, type.upload);
+      if (problem) { setErr(problem); setFile(null); return; }
+    }
+    setFile(f);
+  }
 
   async function start(e: React.FormEvent) {
     e.preventDefault();
-    setBusy(true); setErr("");
+    if (needsUpload && !file) { setErr("Choose a file to upload first."); return; }
+    setBusy(true); setErr(""); setProgress(needsUpload ? 0 : null);
     try {
       const asset = await api.createAsset({
         customer_id: form.customer_id, name: form.name || type.label,
         kind: type.assetKind, identifier: form.identifier, exposure: form.exposure,
       });
+      // For an upload type the artifact must be attached before the scan will start (the server
+      // rejects a scan of an asset with no artifact), so upload first, then scan.
+      if (needsUpload && file) {
+        await api.uploadArtifact(asset.id, file, (frac) => setProgress(frac));
+      }
       const scan = await api.startScan(asset.id, type.engines);
       navigate(`scans/${scan.id}`);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   }
 
@@ -91,9 +128,31 @@ function ScanForm({ type, customers, onBack }:
                  placeholder={type.label} />
         </label>
         <label>{type.identifierLabel}
-          <input value={form.identifier} required placeholder={type.identifierPlaceholder}
+          <input value={form.identifier} required={!needsUpload}
+                 placeholder={type.identifierPlaceholder}
                  onChange={(e) => setForm({ ...form, identifier: e.target.value })} />
         </label>
+
+        {type.upload && (
+          <label>{type.upload.label}
+            <input type="file" accept={type.upload.accept} data-testid="artifact-file"
+                   onChange={(e) => pickFile(e.target.files?.[0] ?? null)} />
+            <span className="muted">
+              {file
+                ? `${file.name} — ${humanSize(file.size)}`
+                : `Select the ${type.upload.label} to analyse (up to `
+                  + `${humanSize(ARTIFACT_MAX_BYTES)}). It is read statically and never run.`}
+            </span>
+          </label>
+        )}
+
+        {progress !== null && (
+          <div className="upload-progress" role="progressbar" aria-valuemin={0} aria-valuemax={100}
+               aria-valuenow={Math.round(progress * 100)}>
+            <div className="upload-progress-bar" style={{ width: `${Math.round(progress * 100)}%` }} />
+            <span className="muted">Uploading… {Math.round(progress * 100)}%</span>
+          </div>
+        )}
         <label>Exposure
           <select value={form.exposure}
                   onChange={(e) => setForm({ ...form, exposure: e.target.value })}>
@@ -117,8 +176,11 @@ function ScanForm({ type, customers, onBack }:
         </div>
 
         {err && <p className="err" role="alert">{err}</p>}
-        <button type="submit" disabled={busy || !form.identifier}>
-          {busy ? "Starting…" : "Start scan"}
+        <button type="submit"
+                disabled={busy || (needsUpload ? !file : !form.identifier)}>
+          {busy
+            ? (needsUpload ? "Uploading…" : "Starting…")
+            : (needsUpload ? "Upload & scan" : "Start scan")}
         </button>
       </form>
     </Card>

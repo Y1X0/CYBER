@@ -15,6 +15,13 @@ export interface ScanType {
   inputHint: string;          // what to put in, in plain words
   exposure: string;           // sensible default exposure
   network: boolean;           // true = active network testing (needs authorization)
+  // Present only for asset types whose scan genuinely consumes an uploaded binary (Android/iOS).
+  // The guided flow shows a real file picker for these and uploads before starting the scan.
+  upload?: {
+    accept: string;           // the file picker's accept filter, e.g. ".apk"
+    ext: string;              // the required extension without the dot, e.g. "apk"
+    label: string;            // the control's label, e.g. "Android .apk"
+  };
 }
 
 export const SCAN_TYPES: ScanType[] = [
@@ -39,16 +46,23 @@ export const SCAN_TYPES: ScanType[] = [
     blurb: "An Android .apk, analysed statically.",
     assetKind: "mobile_app", engines: ["mobile"],
     identifierLabel: "App name or package", identifierPlaceholder: "com.acme.app",
-    inputHint: "Upload the .apk to the asset. Analysed offline — no emulator needed.",
+    inputHint: "Upload the .apk. Guardian analyses it statically — offline, no emulator, and the "
+      + "app is never run. The package name is just a label. When the upload finishes the scan "
+      + "starts automatically.",
     exposure: "isolated", network: false,
+    upload: { accept: ".apk,application/vnd.android.package-archive", ext: "apk",
+              label: "Android .apk" },
   },
   {
     id: "ios", icon: "🍎", label: "Mobile app — iOS",
     blurb: "An iOS .ipa, analysed statically.",
     assetKind: "ios_app", engines: ["ios"],
     identifierLabel: "App name or bundle id", identifierPlaceholder: "com.acme.app",
-    inputHint: "Upload the .ipa to the asset. Info.plist, entitlements and the binary are read.",
+    inputHint: "Upload the .ipa. Guardian reads Info.plist, entitlements and the binary statically "
+      + "— offline, and the app is never run. When the upload finishes the scan starts "
+      + "automatically.",
     exposure: "isolated", network: false,
+    upload: { accept: ".ipa", ext: "ipa", label: "iOS .ipa" },
   },
   {
     id: "network", icon: "📡", label: "Home network / Router",
@@ -79,7 +93,9 @@ export const SCAN_TYPES: ScanType[] = [
     blurb: "A Docker image — CVEs, config, and an SBOM.",
     assetKind: "container_image", engines: ["container", "sca", "secrets"],
     identifierLabel: "Image reference", identifierPlaceholder: "registry/acme/app:1.4.2",
-    inputHint: "Provide the image archive on the asset. Packages, Dockerfile and secrets are read.",
+    inputHint: "Image archives are ingested via the API (image tarballs are too large for a browser "
+      + "upload). Register the image reference here; attach the archive through the API to have "
+      + "packages, Dockerfile and secrets read.",
     exposure: "internal", network: false,
   },
   {

@@ -1,5 +1,6 @@
 """Import every model module so `Base.metadata` is fully populated (Alembic + create_all)."""
 
+from guardian_db.models.artifacts import ScanArtifact
 from guardian_db.models.assets import Asset, Authorization, DomainVerification, Engagement
 from guardian_db.models.audit import ApiKey, AuditLog
 from guardian_db.models.billing import Plan, PlanEntitlement, Subscription, UsageRecord
@@ -89,6 +90,7 @@ __all__ = [
     "Policy",
     "RemediationItem",
     "Report",
+    "ScanArtifact",
     "Schedule",
     "ReportApproval",
     "ReportSection",

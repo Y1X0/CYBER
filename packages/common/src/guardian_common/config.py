@@ -128,6 +128,14 @@ class Settings(BaseSettings):
     tenant_concurrent_scans: int = 10
     tenant_max_page_size: int = 200
 
+    # Maximum size of an uploaded scan artifact (.apk / .ipa), in bytes. The whole artifact is held
+    # in memory to store it and again in the worker to read it statically, so this bounds worker
+    # memory as much as storage. 100 MiB covers the vast majority of real app bundles while staying
+    # safe on a small (single-instance, concurrency-1) worker; raise it for a larger deployment. The
+    # upload endpoint refuses anything past this before the bytes are buffered, and the request body
+    # is capped at the same value + a small header allowance.
+    artifact_max_bytes: int = 100 * 1024 * 1024
+
     @property
     def apikey_pepper(self) -> str:
         return self.api_key_pepper or self.jwt_secret

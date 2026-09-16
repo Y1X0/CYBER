@@ -22,6 +22,12 @@ import struct
 import zipfile
 from dataclasses import dataclass, field
 
+from guardian_scanner.mobile.safezip import (
+    ArchiveMemberTooLarge,
+    read_bounded,
+    read_whole_capped,
+)
+
 
 class IpaError(RuntimeError):
     """The uploaded file is not a readable iOS .ipa."""
@@ -124,8 +130,8 @@ def read_bundle(zf: zipfile.ZipFile) -> IpaBundle:
     info_name = sorted(info_names, key=len)[0]
     app_dir = info_name[: -len("/Info.plist")]
     try:
-        info = load_plist(zf.read(info_name))
-    except (KeyError, zipfile.BadZipFile, OSError) as exc:
+        info = load_plist(read_whole_capped(zf, info_name))
+    except (KeyError, zipfile.BadZipFile, OSError, ArchiveMemberTooLarge) as exc:
         raise IpaError(f"could not read Info.plist: {exc}") from exc
 
     bundle = IpaBundle(app_dir=app_dir, info_plist=info,
@@ -134,15 +140,18 @@ def read_bundle(zf: zipfile.ZipFile) -> IpaBundle:
     prov = f"{app_dir}/embedded.mobileprovision"
     if prov in names:
         try:
-            bundle.entitlements = entitlements_from_mobileprovision(zf.read(prov))
-        except (KeyError, zipfile.BadZipFile, OSError):
+            bundle.entitlements = entitlements_from_mobileprovision(
+                read_whole_capped(zf, prov))
+        except (KeyError, zipfile.BadZipFile, OSError, ArchiveMemberTooLarge):
             bundle.entitlements = {}
 
     if bundle.executable_name:
         exe = f"{app_dir}/{bundle.executable_name}"
         if exe in names:
             try:
-                bundle.encrypted = macho_is_encrypted(zf.read(exe)[:8_000_000])
+                # Bounded read of the Mach-O head only — never inflate the whole (possibly bomb)
+                # executable before slicing (AUD-P1-5).
+                bundle.encrypted = macho_is_encrypted(read_bounded(zf, exe, 8_000_000))
             except (KeyError, zipfile.BadZipFile, OSError):
                 bundle.encrypted = False
     return bundle

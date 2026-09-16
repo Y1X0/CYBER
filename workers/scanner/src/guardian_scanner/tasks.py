@@ -201,8 +201,10 @@ def _prepare_workspace(asset: Asset) -> tuple[str | None, str | None, str | None
     cfg = asset.config or {}
     if cfg.get("inline_content"):
         return None, str(cfg["inline_content"]), None
-    if cfg.get("local_path"):
-        return str(cfg["local_path"]), None, None
+    # NOTE: a tenant-controlled `local_path` used to be honoured here as a workspace path, which
+    # let a staff user point an engine at any file on the worker (AUD-P1-6). It has been removed: a
+    # scan gets its bytes from a git clone (below) or from a validated uploaded artifact resolved by
+    # opaque id (`_materialize_artifact`), never from a free-form filesystem path in the config.
     if asset.kind == "repo" and asset.identifier.startswith(("http://", "https://", "git@")):
         host = _clone_host(asset.identifier)
         if not host:
@@ -233,6 +235,45 @@ def _prepare_workspace(asset: Asset) -> tuple[str | None, str | None, str | None
             shutil.rmtree(tmp, ignore_errors=True)
             raise RuntimeError(f"workspace preparation failed: {exc}") from exc
     return None, None, None
+
+
+def _materialize_artifact(session, asset: Asset) -> tuple[str | None, str | None]:
+    """Resolve the asset's uploaded artifact to a server-owned temp file: (artifact_path, cleanup).
+
+    The asset config carries only an opaque `artifact_id`. We resolve it to bytes through the
+    tenant-AND-asset-scoped store lookup (so an id smuggled in from another tenant/asset returns
+    nothing), then write those bytes to a fresh temp dir under a fixed, non-user-controlled name.
+    The engine receives that path via `ScanContext.artifact_path` and never sees the config — this
+    is the boundary that closes AUD-P1-6. Returns (None, None) when the asset has no artifact.
+    """
+    from guardian_db.artifact_store import load_artifact_content
+
+    cfg = asset.config or {}
+    raw_id = cfg.get("artifact_id")
+    if not raw_id:
+        return None, None
+    try:
+        artifact_id = uuid.UUID(str(raw_id))
+    except (ValueError, TypeError):
+        return None, None
+    record = load_artifact_content(
+        session, artifact_id=artifact_id, tenant_id=asset.tenant_id, asset_id=asset.id
+    )
+    if record is None:
+        # The pointer is dangling (deleted, or never belonged to this asset/tenant). The engine will
+        # raise its own "no artifact provided" and the scan fails clearly, which is correct.
+        return None, None
+    tmp = tempfile.mkdtemp(prefix="guardian_artifact_")
+    # Fixed, server-chosen filename with the artifact's own extension — never the uploader's name.
+    ext = "apk" if record.kind == "apk" else "ipa"
+    path = os.path.join(tmp, f"artifact.{ext}")
+    try:
+        with open(path, "wb") as fh:
+            fh.write(record.content)
+    except OSError:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    return path, tmp
 
 
 def _authorized(session, asset: Asset, *, engine_key: str) -> authz.Decision:
@@ -320,6 +361,9 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
         session.flush()
 
         workspace, inline, cleanup = None, None, None
+        # Resolved inside the try below so a failure writing it lands in the terminal-FAILED handler
+        # (never strands the claimed scan); cleaned up in the same `finally`.
+        artifact_path, artifact_cleanup = None, None
         engine_statuses: list[str] = []
         # Every issue already known for this asset, by fingerprint. A scan re-observing one folds
         # into it rather than filing a duplicate, so the row count tracks distinct issues and a
@@ -340,6 +384,7 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
         sbom_vulns: list = []
 
         try:
+            artifact_path, artifact_cleanup = _materialize_artifact(session, asset)
             for engine_key in scan.requested_engines or [EngineKey.SECRETS.value]:
                 run = ScanEngineRun(scan_id=scan.id, engine=engine_key, status="running")
                 session.add(run)
@@ -421,6 +466,7 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                     asset_kind=asset.kind,
                     asset_identifier=asset.identifier,
                     workspace_path=workspace,
+                    artifact_path=artifact_path,
                     inline_content=inline,
                     exposure=asset.exposure,
                     vuln_matcher=KbVulnMatcher(session),  # SCA matches against the local KB
@@ -522,6 +568,10 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
         finally:
             if cleanup:
                 shutil.rmtree(cleanup, ignore_errors=True)
+            # Always remove the materialized artifact temp dir — on success, engine failure, or a
+            # failure outside the per-engine guard. An uploaded binary must never linger on disk.
+            if artifact_cleanup:
+                shutil.rmtree(artifact_cleanup, ignore_errors=True)
 
         session.flush()
         scan.stats = severity_counts(list(observed.values()))

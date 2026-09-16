@@ -81,13 +81,13 @@ class ContainerEngine:
     def _image_path(self, ctx: ScanContext) -> str | None:
         """Where the image archive is, if there is one.
 
-        The path is taken from the asset's own config or from the workspace the task prepared —
-        never from a scan setting a caller supplies, which would let a scan request name any file on
-        the worker and have its contents reported back as evidence.
+        ONLY server-owned locations: the worker-materialized `artifact_path` (from a validated,
+        tenant-scoped upload) or a file the task prepared in the workspace. A path taken from the
+        asset's tenant-controlled config is never trusted — that would let a request name any file
+        on the worker and have its contents reported back as evidence (AUD-P1-6).
         """
-        candidate = (ctx.asset_config or {}).get("image_archive")
-        if isinstance(candidate, str) and candidate:
-            return candidate
+        if ctx.artifact_path and Path(ctx.artifact_path).is_file():
+            return ctx.artifact_path
         if ctx.workspace_path:
             root = Path(ctx.workspace_path)
             if root.is_file() and root.name.endswith(_IMAGE_SUFFIXES):
