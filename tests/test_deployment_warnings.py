@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import types
 
+import pytest
+from fastapi.testclient import TestClient
+from guardian_api.deps import get_current_identity
+from guardian_api.main import app
 from guardian_api.ratelimit import deployment_warnings, per_client_limiting_enabled
+from guardian_core.enums import StaffRole
 
 
 def _settings(*, env, count):
@@ -45,3 +50,30 @@ def test_disabled_and_warned_in_staging_without_a_hop_count():
     s = _settings(env="staging", count=0)
     assert per_client_limiting_enabled(s) is False
     assert deployment_warnings(s)[0]["severity"] == "error"
+
+
+# ── /health/details is OWNER-only ────────────────────────────────────────────────────────────────
+def _identity(role):
+    return types.SimpleNamespace(is_machine=False, staff_role=role)
+
+
+@pytest.fixture
+def health_client():
+    client = TestClient(app)
+    try:
+        yield client
+    finally:
+        app.dependency_overrides.pop(get_current_identity, None)
+
+
+def test_health_details_forbidden_for_a_non_owner(health_client):
+    app.dependency_overrides[get_current_identity] = lambda: _identity(StaffRole.ANALYST.value)
+    assert health_client.get("/health/details").status_code == 403
+
+
+def test_health_details_ok_for_an_owner(health_client):
+    app.dependency_overrides[get_current_identity] = lambda: _identity(StaffRole.OWNER.value)
+    resp = health_client.get("/health/details")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["service"] == "guardian-api" and "warnings" in body

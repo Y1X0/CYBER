@@ -191,9 +191,17 @@ def login(
     settings = get_settings()
     limiter = login_limiter()
     email = body.email.lower()
-    per_client = per_client_limiting_enabled(settings)
-    client_key = f"client:{client_bucket_key(ip)}" if per_client else None
     per_client_ceiling = settings.login_failed_per_client_per_minute
+    client_key: str | None = None
+    if per_client_limiting_enabled(settings):
+        bucket = client_bucket_key(ip)
+        if bucket is None:
+            # No reliable client IP (missing/unparseable): skip the per-client bucket for this
+            # request rather than key on a shared placeholder that would lock such requests out of
+            # each other. The account bucket still applies. Surfaced as a metric.
+            REGISTRY.inc("guardian_login_client_ip_unresolved_total")
+        else:
+            client_key = f"client:{bucket}"
 
     # Refuse an already-blocked client up front (peek — recorded only on failure below).
     if client_key is not None:

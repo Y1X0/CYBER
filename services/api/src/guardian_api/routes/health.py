@@ -9,7 +9,7 @@ from guardian_common.metrics import REGISTRY
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from guardian_api.deps import Identity, get_current_identity, get_db
+from guardian_api.deps import Identity, get_current_identity, get_db, require_owner
 from guardian_api.observability import collect_execution_metrics, evaluate_slos, overall
 
 router = APIRouter()
@@ -27,12 +27,13 @@ def ready(db: Session = Depends(get_db)) -> dict:
 
 
 @router.get("/health/details")
-def health_details(identity: Identity = Depends(get_current_identity)) -> dict:
+def health_details(identity: Identity = Depends(require_owner)) -> dict:
     """Deployment posture: liveness plus any misconfiguration warnings.
 
-    Authenticated because the warnings describe the deployment's security configuration (e.g. that
-    per-client login rate limiting is disabled because the trusted proxy hop count is unset). A
-    `degraded` status here means a warning is present, not that the process is down.
+    OWNER-only because the warnings describe the deployment's security configuration (e.g. that
+    per-client login rate limiting is disabled because the trusted proxy hop count is unset) — that
+    is operator information, not something every tenant user should read. A `degraded` status here
+    means a warning is present, not that the process is down.
     """
     from guardian_api.ratelimit import deployment_warnings
 

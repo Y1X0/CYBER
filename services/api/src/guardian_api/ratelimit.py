@@ -24,22 +24,34 @@ log = get_logger("guardian.ratelimit")
 _MAX_KEYS = 50_000  # soft cap on distinct keys tracked; eviction removes only EXPIRED entries
 
 
-def client_bucket_key(ip: str | None) -> str:
-    """A rate-limit bucket key for a resolved client IP.
+def client_bucket_key(ip: str | None) -> str | None:
+    """A rate-limit bucket key for a resolved client IP, or None when there is no reliable key.
 
-    IPv6 is normalized to its /64 prefix: a single client is routinely handed a whole /64, so keying
-    on the full address would let one host rotate through 2^64 addresses to dodge the limit. IPv4 is
-    keyed as-is. A non-IP / missing value falls back to a constant bucket rather than a fresh key
-    per request (which would defeat the limit).
+    Returns None for a missing or unparseable value: the caller must then SKIP the per-client bucket
+    (and rely on the account bucket) rather than key on a shared placeholder, which would let every
+    such request share one bucket and lock each other out.
+
+    An IPv6 address that actually carries an IPv4 client is unwrapped to that IPv4 and keyed on it —
+    IPv4-mapped (``::ffff:a.b.c.d``), 6to4 (``2002::/16``) and Teredo all collapse to ``::/64``
+    otherwise, which would put every IPv4 client behind a single global bucket. Only a real global
+    IPv6 address is keyed by its /64 (a single client is routinely handed a whole /64, so keying on
+    the full address would let one host rotate through 2^64 addresses to dodge the limit). IPv4 is
+    keyed as-is.
     """
     if not ip:
-        return "unknown"
+        return None
     try:
         addr = ipaddress.ip_address(ip)
     except ValueError:
-        return ip
+        return None
     if addr.version == 6:
-        return str(ipaddress.ip_network(f"{addr}/64", strict=False).network_address) + "/64"
+        embedded = addr.ipv4_mapped or addr.sixtofour
+        if embedded is None and addr.teredo is not None:
+            embedded = addr.teredo[1]          # Teredo: (server, CLIENT) — key on the client IPv4
+        if embedded is not None:
+            addr = embedded
+        else:
+            return str(ipaddress.ip_network(f"{addr}/64", strict=False).network_address) + "/64"
     return str(addr)
 
 

@@ -116,6 +116,33 @@ def test_correct_login_is_not_penalised_by_the_client_bucket(client):
                       password=_CORRECT).status_code == 200
 
 
+def test_no_client_ip_skips_per_client_and_does_not_lock_out(client, monkeypatch):
+    # When the client IP cannot be resolved, per-client limiting is SKIPPED (never keyed on a shared
+    # placeholder), so a flood of ip=None failures cannot block another ip=None correct login.
+    from guardian_api.deps import client_ip
+
+    metric = "guardian_login_client_ip_unresolved_total"
+    before = _counter_total(metric)
+    app.dependency_overrides[client_ip] = lambda: None
+    try:
+        for i in range(30):        # 30 distinct accounts so the account bucket never trips either
+            r = client.post("/api/v1/auth/login",
+                            json={"email": f"none{i}@example.com", "password": "wrong"})
+            assert r.status_code == 401
+        ok = client.post("/api/v1/auth/login",
+                         json={"email": "victim@example.com", "password": _CORRECT})
+        assert ok.status_code == 200, ok.text
+    finally:
+        app.dependency_overrides.pop(client_ip, None)
+    assert _counter_total(metric) - before == 31    # every unresolved-IP login is counted
+
+
+def _counter_total(name: str) -> float:
+    from guardian_common.metrics import REGISTRY
+    m = REGISTRY._metrics.get(name)
+    return sum(m.values.values()) if m else 0.0
+
+
 # ── IPv6 /64 keying ──────────────────────────────────────────────────────────────────────────────
 def test_two_ipv6_addresses_in_the_same_64_share_a_bucket():
     a = client_bucket_key("2001:db8:1:2::1")
@@ -125,6 +152,31 @@ def test_two_ipv6_addresses_in_the_same_64_share_a_bucket():
     # A different /64 is a different bucket, and IPv4 is keyed as-is.
     assert client_bucket_key("2001:db8:1:3::1") != a
     assert client_bucket_key("203.0.113.5") == "203.0.113.5"
+
+
+def test_ipv4_mapped_addresses_key_on_the_embedded_ipv4():
+    # Regression: mapped IPv4 used to collapse to ::/64, putting every IPv4 client in one bucket.
+    assert client_bucket_key("::ffff:1.2.3.4") == "1.2.3.4"
+    assert client_bucket_key("::ffff:5.6.7.8") == "5.6.7.8"
+    assert client_bucket_key("::ffff:1.2.3.4") != client_bucket_key("::ffff:5.6.7.8")
+    # The mapped form and the plain form of the same IPv4 land in the SAME bucket.
+    assert client_bucket_key("::ffff:1.2.3.4") == client_bucket_key("1.2.3.4") == "1.2.3.4"
+
+
+def test_6to4_and_teredo_unwrap_to_their_ipv4():
+    assert client_bucket_key("2002:0102:0304::1") == "1.2.3.4"                      # 6to4 → 1.2.3.4
+    assert client_bucket_key("2001:0000:4136:e378:8000:63bf:3fff:fdd2") == "192.0.2.45"  # Teredo client
+    # Distinct embedded clients stay distinct, and a real global IPv6 still uses its /64.
+    assert client_bucket_key("2002:0506:0708::1") == "5.6.7.8"
+    assert client_bucket_key("2001:db8:1:2::1").endswith("/64")
+
+
+def test_missing_or_unparseable_ip_has_no_bucket():
+    # None / garbage must NOT key on a shared placeholder — the caller skips per-client instead.
+    assert client_bucket_key(None) is None
+    assert client_bucket_key("") is None
+    assert client_bucket_key("not-an-ip") is None
+    assert client_bucket_key("999.999.999.999") is None
 
 
 # ── Issue 4: fail CLOSED for auth keys under a saturated table ────────────────────────────────────
