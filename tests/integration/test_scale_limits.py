@@ -393,8 +393,9 @@ def test_an_export_that_could_not_fit_every_finding_says_so():
     assert "shows 4 of 10 findings" in response.text
     assert "6 more are recorded" in response.text
     assert "not absent" in response.text
-    # And the document really contains four findings — the header row plus four.
-    assert response.text.count("<tr>") == 5
+    # And the document really renders exactly four findings. Findings are rendered as
+    # plain-language "<section class='finding'>" blocks (not table rows), so count those.
+    assert response.text.count("<section class='finding'>") == 4
 
 
 def test_a_complete_export_carries_no_truncation_notice():
