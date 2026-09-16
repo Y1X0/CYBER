@@ -121,6 +121,11 @@ jobs:
           push: ${{ inputs.mode == 'apply' }}
           load: ${{ inputs.mode != 'apply' }}
           tags: ghcr.io/y1x0/cyber-scanner:sha-${{ github.sha }}
+          # Stamp the source commit so a consumer can PROVE which code the image runs (AUD-P1-6): the
+          # burst worker refuses to run an image whose revision predates the worker file-read fix.
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |

@@ -10,6 +10,25 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 
 _ASSET_KINDS = {k.value for k in AssetKind}
 
+# Asset-config keys that would point the worker at a server-side filesystem path. Any key ending in
+# `_path` (local_path, apk_path, ipa_path, workspace_path, artifact_path, …) plus the explicitly
+# named `image_archive` are refused, on create and on any future update path, because an older
+# worker image honoured them and read arbitrary files off the worker (AUD-P1-6). Kept as a shared
+# function so every entry point that writes asset config enforces the same rule.
+_FORBIDDEN_CONFIG_KEYS = frozenset(
+    {"local_path", "apk_path", "ipa_path", "image_archive", "workspace_path", "artifact_path"}
+)
+
+
+def reject_path_config_keys(config: dict | None) -> list[str]:
+    """Return the sorted forbidden path-like keys present in ``config`` (empty list ⇒ clean)."""
+    if not isinstance(config, dict):
+        return []
+    return sorted(
+        k for k in config
+        if isinstance(k, str) and (k in _FORBIDDEN_CONFIG_KEYS or k.endswith("_path"))
+    )
+
 
 # ── Auth ──
 class LoginRequest(BaseModel):
@@ -78,6 +97,25 @@ class AssetCreate(BaseModel):
 
         if v is not None and len(json.dumps(v)) > 262_144:  # 256 KiB
             raise ValueError("field exceeds maximum size (256 KiB)")
+        return v
+
+    @field_validator("config")
+    @classmethod
+    def _no_filesystem_paths(cls, v: dict) -> dict:
+        # Reject any server-side filesystem path in the asset config. A tenant/staff-controlled
+        # path key used to be honoured by the worker as a workspace/artifact path (AUD-P1-6),
+        # letting a signed-up user point an engine at any file on the worker — which holds
+        # ENCRYPTION_KEY and JWT_SECRET. Current source ignores these keys, but they must never be
+        # stored: a stale worker image would still read them, so the API refuses them outright
+        # (defense in depth, independent of which image the worker runs). Scan inputs come from a
+        # git clone or an uploaded artifact id, never a free-form path in the config.
+        bad = reject_path_config_keys(v)
+        if bad:
+            raise ValueError(
+                "config may not contain filesystem-path keys (rejected: "
+                + ", ".join(bad)
+                + "); provide scan inputs via a repository URL or an uploaded artifact instead"
+            )
         return v
 
 

@@ -108,3 +108,25 @@ def test_no_sed_or_perl_rewrites_image_or_config_files():
         if stripped.startswith("sed -i"):
             assert stripped.endswith("/tmp/qdepth.py"), f"unexpected in-place edit: {stripped!r}"
     assert "perl -i" not in text and "perl -pi" not in text
+
+
+# ── D. the burst worker refuses an image that predates the AUD-P1-6 worker file-read fix ──────────
+_MIN_REVISION = "f65c09fc03ee1ee0ff34d6dafaf9822baa195465"  # AUD-P1-6 fix commit
+
+
+def test_burst_worker_guards_image_revision_against_audp1_6():
+    text = _BURST.read_text()
+    # A guard step must read the image's source revision and prove, against the checked-out history,
+    # that it is at or after the AUD-P1-6 fix — otherwise a stale image honouring a tenant-controlled
+    # local_path could drain the queue.
+    assert "org.opencontainers.image.revision" in text
+    assert _MIN_REVISION in text, "guard must pin the AUD-P1-6 minimum revision"
+    assert "git merge-base --is-ancestor" in text, "ancestry must be proved, not string-compared"
+    # The guard needs history, so the workflow checks the repo out with full depth.
+    assert "actions/checkout@" in text and "fetch-depth: 0" in text
+
+
+def test_deploy_worker_labels_image_with_source_revision():
+    text = _DEPLOY.read_text()
+    # The build must stamp the source commit so the burst-worker guard has something to verify.
+    assert "org.opencontainers.image.revision=${{ github.sha }}" in text

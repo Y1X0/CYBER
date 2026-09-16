@@ -71,6 +71,12 @@ jobs:
           echo "minutes=$mins" >> "$GITHUB_OUTPUT"
           echo "Burst length: ${mins} minute(s)"
 
+      # Full history so the revision-guard step below can prove ancestry with `git merge-base`.
+      - name: Check out repository (for the image-revision guard)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Log in to GHCR
         run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
 
@@ -95,6 +101,34 @@ jobs:
           IMAGE="ghcr.io/y1x0/cyber-scanner@sha256:80037347e22ee4574bc9ebfe5a557cfb0399d178049cf57a0c20be81102e61ac"
           echo "ref=$IMAGE" >> "$GITHUB_OUTPUT"
           docker pull "$IMAGE"
+
+      # AUD-P1-6 guard: refuse to run any scanner image whose source commit predates the worker
+      # file-read fix (f65c09f). The stale digest pinned above was built at a959396, which is BEFORE
+      # that fix and honours a tenant-controlled `local_path` — so this step fails until the image is
+      # rebuilt from current HEAD and the digest above is repinned (see the pull step's comment). The
+      # revision is read from the image's own org.opencontainers.image.revision label; ancestry is
+      # proved against this checkout, so no value is trusted that the repo cannot verify.
+      - name: Refuse a scanner image that predates the AUD-P1-6 fix
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          MIN_REVISION="f65c09fc03ee1ee0ff34d6dafaf9822baa195465"  # AUD-P1-6: worker arbitrary file read
+          REV="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE" 2>/dev/null || true)"
+          if [ -z "$REV" ] || [ "$REV" = "<no value>" ]; then
+            echo "##[error]scanner image has no org.opencontainers.image.revision label — cannot prove it postdates the AUD-P1-6 worker file-read fix. Rebuild + repin (see the 'Pull the verified scanner image' step)."
+            exit 1
+          fi
+          echo "Image source revision: $REV"
+          if ! git cat-file -e "${REV}^{commit}" 2>/dev/null; then
+            echo "##[error]image revision $REV is not a commit in this repository — refusing an image whose provenance cannot be verified."
+            exit 1
+          fi
+          if git merge-base --is-ancestor "$MIN_REVISION" "$REV"; then
+            echo "OK: image includes the AUD-P1-6 fix ($MIN_REVISION)."
+          else
+            echo "##[error]scanner image was built at $REV, which PREDATES the AUD-P1-6 worker file-read fix ($MIN_REVISION). This image honours a tenant-controlled local_path and must not consume the queue. Rebuild the image from current HEAD and repin the digest."
+            exit 1
+          fi
 
       # A missing setting must stop the run here. Started anyway, Celery connects to a broker URL of
       # "" and the burst reports success having consumed nothing — the failure that looks like an
