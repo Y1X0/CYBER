@@ -10,9 +10,15 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import lru_cache
 
 from guardian_common.config import get_settings
+from guardian_common.logging import get_logger
+from guardian_common.metrics import REGISTRY
+
+log = get_logger("guardian.ratelimit")
 
 _MAX_KEYS = 50_000  # soft cap on distinct keys tracked; eviction removes only EXPIRED entries
 
@@ -116,3 +122,73 @@ def hit_limited(key: str, *, limit: int) -> tuple[bool, float]:
 
 def reset_tenant_limiter() -> None:
     tenant_limiter.cache_clear()
+
+
+# ── Argon2 concurrency limiter (CPU protection that never blocks a specific user) ────────────────
+@lru_cache
+def _argon2_gate() -> threading.BoundedSemaphore:
+    """Process-wide cap on concurrent Argon2 verifications, sized from settings."""
+    return threading.BoundedSemaphore(max(get_settings().login_argon2_max_concurrency, 0) or 1)
+
+
+def reset_argon2_gate() -> None:
+    """Drop the cached semaphore (tests / config reload)."""
+    _argon2_gate.cache_clear()
+
+
+@contextmanager
+def argon2_verification_slot() -> Iterator[bool]:
+    """Acquire a slot for one Argon2 verification, or yield False if the process is saturated.
+
+    Bounds CPU exhaustion from a login flood WITHOUT blocking by source, so a correct password is
+    never denied beyond a short queue and no single client can lock others out. A caller that gets
+    False should shed the request with a retryable 503 rather than run the hash. Concurrency 0 in
+    settings means "unbounded" — the gate then always yields True.
+    """
+    if get_settings().login_argon2_max_concurrency <= 0:
+        yield True
+        return
+    timeout = get_settings().login_argon2_acquire_timeout_seconds
+    acquired = _argon2_gate().acquire(timeout=timeout)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            _argon2_gate().release()
+
+
+# ── alert-only failed-login breaker (detection, never blocking) ──────────────────────────────────
+@lru_cache
+def _failed_login_breaker() -> SlidingWindowLimiter:
+    return SlidingWindowLimiter(0, 60.0)  # ceiling supplied per call from settings
+
+
+def reset_failed_login_breaker() -> None:
+    _failed_login_breaker.cache_clear()
+
+
+def record_failed_login() -> None:
+    """Count one failed login; if the process-wide 60s threshold is crossed, alert (never block).
+
+    This exists purely for detection — it emits a metric and, on the rising edge of the threshold, a
+    log line. It MUST NOT gate the request: a global block would let one attacker deny login to
+    everyone, including users with the correct password.
+    """
+    REGISTRY.inc("guardian_login_failed_total")
+    ceiling = get_settings().global_login_breaker_per_minute
+    if ceiling <= 0:
+        return
+    allowed, _ = _failed_login_breaker().hit("global:login:failed", max_hits=ceiling)
+    if not allowed:
+        REGISTRY.inc("guardian_login_breaker_tripped_total")
+        # Rate the alert to once per window so a sustained flood does not flood the log too.
+        now = time.monotonic()
+        with _alert_lock:
+            global _last_breaker_alert  # noqa: PLW0603 - module-level throttle timestamp
+            if now - _last_breaker_alert >= 60.0:
+                _last_breaker_alert = now
+                log.warning("login_global_breaker_tripped", threshold_per_minute=ceiling)
+
+
+_alert_lock = threading.Lock()
+_last_breaker_alert = 0.0

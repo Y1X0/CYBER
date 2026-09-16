@@ -8,6 +8,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from guardian_common.config import get_settings
 from guardian_common.logging import get_logger
+from guardian_common.metrics import REGISTRY
 from guardian_common.security import (
     create_access_token,
     hash_password,
@@ -22,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from guardian_api.deps import Identity, client_ip, get_current_identity, get_db, require_owner
-from guardian_api.ratelimit import login_limiter
+from guardian_api.ratelimit import argon2_verification_slot, login_limiter, record_failed_login
 from guardian_api.schemas import LoginRequest, MeResponse, TokenResponse
 
 log = get_logger("guardian.api.auth")
@@ -168,42 +169,17 @@ def login(
     db: Session = Depends(get_db),
     ip: str | None = Depends(client_ip),
 ) -> TokenResponse:
-    # Rate limit BEFORE the Argon2 verify (P1-γ): bounds guessing + CPU-exhaustion from one source.
-    # Keyed by IP and by account; the 429 is identical whether or not the account exists (no
-    # user-enumeration signal). Counting every attempt is fine — interactive logins stay well under.
-    settings = get_settings()
+    # Abuse controls, in priority order (P1-γ). Deliberately NO per-source-IP or global BLOCK:
+    # behind a shared proxy the client IP is one value for everyone, so any block keyed on it (or a
+    # global one) lets a single attacker deny login to every user — including those with the correct
+    # password. Instead:
+    #   * the per-ACCOUNT bucket bounds brute force against one account (and only that account);
+    #   * an Argon2 concurrency limiter bounds CPU exhaustion by shedding excess load with a 503,
+    #     which a slow attacker cannot sustain and which never singles out a correct password;
+    #   * a failed-login breaker only ALERTS (metric + log), it never blocks.
+    # `ip` is recorded in the audit trail only — it is never used as a rate-limit key here.
     limiter = login_limiter()
     email = body.email.lower()
-
-    # When the app sits behind a proxy that terminates every connection but the trusted-hop count is
-    # not configured (Render free tier: trusted_proxy_count == 0 ⇒ client_ip is the socket peer =
-    # the shared proxy IP for EVERYONE), a per-IP hard block would let one attacker's failed logins
-    # lock out all users. In that case skip the per-IP block and rely on the per-account limit plus
-    # a process-wide breaker that bounds total Argon2 CPU-exhaustion and alerts. Off that path (a
-    # real client IP, or a configured hop count) the precise per-IP block stays.
-    shared_proxy_ip = settings.is_production and settings.trusted_proxy_count == 0
-    if shared_proxy_ip:
-        ok_global, retry_g = limiter.hit("global:login",
-                                         max_hits=settings.global_login_breaker_per_minute)
-        if not ok_global:
-            # No IPs logged — this is a process-wide flood signal, not a per-client event.
-            log.warning("login_global_breaker_tripped",
-                        limit_per_minute=settings.global_login_breaker_per_minute)
-            raise HTTPException(
-                status.HTTP_429_TOO_MANY_REQUESTS, "too many login attempts",
-                headers={"Retry-After": str(int(retry_g) + 1)},
-            )
-    else:
-        # Check the IP bucket FIRST and stop there if it is already blocked. Recording the account
-        # bucket afterwards (as this used to) let one blocked IP create an arbitrary account-key per
-        # attempt — churning distinct emails to grow the limiter's key set and (before the eviction
-        # fix) trigger a global reset. A refused request must not mutate any further limiter state.
-        ok_ip, retry_ip = limiter.hit(f"ip:{ip or 'unknown'}")
-        if not ok_ip:
-            raise HTTPException(
-                status.HTTP_429_TOO_MANY_REQUESTS, "too many login attempts",
-                headers={"Retry-After": str(int(retry_ip) + 1)},
-            )
 
     ok_acct, retry_acct = limiter.hit(f"acct:{email}")
     if not ok_acct:
@@ -213,16 +189,31 @@ def login(
         )
 
     user = db.query(User).filter(User.email == email).first()
-    # Constant-ish response regardless of which factor failed (avoid user enumeration).
-    # When the user is unknown, still run one Argon2 verification so the response time does
-    # not reveal whether the email exists (timing oracle).
-    if user is None or not user.password_hash:
-        verify_dummy(body.password)
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
-    if not verify_password(body.password, user.password_hash):
+    # Constant-ish response regardless of which factor failed (avoid user enumeration). When the
+    # user is unknown, still run one Argon2 verification so the response time does not reveal
+    # whether the email exists (timing oracle). Both verifications run under the concurrency slot.
+    with argon2_verification_slot() as slot:
+        if not slot:
+            # The process is saturated with in-flight verifications: shed THIS request with a
+            # retryable 503 rather than block anyone out or queue unboundedly.
+            REGISTRY.inc("guardian_login_argon2_shed_total")
+            raise HTTPException(
+                status.HTTP_503_SERVICE_UNAVAILABLE, "authentication is busy, please retry",
+                headers={"Retry-After": "1"},
+            )
+        if user is None or not user.password_hash:
+            verify_dummy(body.password)
+            password_ok = False
+        else:
+            password_ok = verify_password(body.password, user.password_hash)
+
+    if not password_ok:
+        record_failed_login()  # alert-only; never blocks
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
     if user.status != "active":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "account disabled")
+
+    settings = get_settings()
 
     token = create_access_token(
         subject=str(user.id),

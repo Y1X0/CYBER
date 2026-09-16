@@ -146,15 +146,22 @@ class Settings(BaseSettings):
     # gateway concern (this in-app limiter is per-process). 0 disables the limiter.
     auth_rate_limit_per_minute: int = 10
 
-    # Process-wide login circuit breaker (P1-γ, shared-proxy safe). Behind a proxy that terminates
-    # every connection (Render free tier, GUARDIAN_TRUSTED_PROXY_COUNT=0), the per-source-IP login
-    # limit would see one shared proxy IP for everyone, so a single attacker's failed logins would
-    # lock out ALL users. In that configuration the per-IP hard block is skipped in favour of the
-    # per-account limit plus THIS global breaker: once total login attempts in the 60s window cross
-    # this ceiling the process refuses further attempts (a high-flood backstop against Argon2
-    # CPU-exhaustion) and logs an alert. Sized well above any legitimate aggregate login rate. 0
-    # disables the breaker.
+    # Process-wide FAILED-login alert threshold (P1-γ). This is ALERT-ONLY and never blocks a login:
+    # a blocking global limit lets one attacker deny login to everyone (including users with the
+    # correct password), which is the DoS it must not become. When failed logins across the process
+    # cross this ceiling in the 60s window, `login_global_breaker_tripped` is logged and
+    # `guardian_login_breaker_tripped_total` increments — CPU is protected separately by the Argon2
+    # concurrency limiter below. Sized above any legitimate aggregate failure rate. 0 disables it.
     global_login_breaker_per_minute: int = 300
+
+    # Argon2 CPU protection (P1-γ). Password verification is deliberately expensive, so a flood of
+    # login attempts is a CPU-exhaustion vector. Rather than BLOCK by source (which discriminates
+    # against correct passwords and can lock out shared-IP users), bound the number of concurrent
+    # Argon2 verifications process-wide; an attempt that cannot acquire a slot within the timeout is
+    # shed with a retryable 503. A slow attacker cannot sustain saturation, and a correct password
+    # is never denied beyond a short queue. 0 disables the limiter (unbounded concurrency).
+    login_argon2_max_concurrency: int = 4
+    login_argon2_acquire_timeout_seconds: float = 2.0
 
     # Trusted reverse-proxy hop count (P1-①). X-Forwarded-For is client-spoofable, so by default (0)
     # the client IP used for audit + rate limiting is the SOCKET PEER and XFF is ignored entirely.

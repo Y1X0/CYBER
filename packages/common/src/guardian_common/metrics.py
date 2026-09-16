@@ -199,5 +199,14 @@ REGISTRY.counter("guardian_rate_limited_total", "Requests refused by the per-ten
 REGISTRY.counter("guardian_scan_admission_refused_total",
                  "Scans refused at submission because the tenant was at its concurrency limit.")
 
+# Login abuse signals. The failure counter is the raw rate; the breaker counter fires when failed
+# logins cross the process-wide alert threshold (detection only — it never blocks a login). The
+# argon2-shed counter counts requests that hit the concurrency limiter and were shed with a 503.
+REGISTRY.counter("guardian_login_failed_total", "Failed login attempts (wrong credentials).")
+REGISTRY.counter("guardian_login_breaker_tripped_total",
+                 "Times the process-wide failed-login alert threshold was crossed (alert only).")
+REGISTRY.counter("guardian_login_argon2_shed_total",
+                 "Login attempts shed with 503 because no Argon2 concurrency slot was available.")
+
 
 __all__ = ["DEFAULT_BUCKETS", "REGISTRY", "Registry", "escape_label"]
