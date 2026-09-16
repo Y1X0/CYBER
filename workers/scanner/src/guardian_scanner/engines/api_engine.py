@@ -24,8 +24,10 @@ from guardian_core.enums import EngineKey, Severity
 from guardian_core.evidence import Evidence, EvidenceKind
 from guardian_core.findings import RawFinding
 
+from guardian_scanner.apisec.discovery import probe_surface
 from guardian_scanner.apisec.scanner import ApiScanner, ApiScanResult, Issue, Principal
 from guardian_scanner.apisec.spec import Spec, parse
+from guardian_scanner.apisec.spec_audit import audit_spec
 from guardian_scanner.engines.base import EngineHealth, ScanContext
 
 log = get_logger("guardian.apisec.engine")
@@ -102,6 +104,9 @@ class ApiEngine:
             )
         spec = parse(document)
         findings = list(self._static(document, spec))
+        # Deep static analysis of the contract (scheme quality, unreferenced schemes, excessive
+        # exposure in response schemas, unbounded collections). Pure, offline, additive.
+        findings.extend(audit_spec(document, spec))
         findings.extend(self._active(ctx, spec))
         return findings
 
@@ -142,12 +147,26 @@ class ApiEngine:
         principals = self._principals(ctx)
         base = ctx.asset_identifier if ctx.asset_identifier.startswith(("http://", "https://")) \
             else (spec.servers[0] if spec.servers else "")
+        settings = ctx.settings or {}
+
+        # Spec-vs-reality probing (undocumented endpoints + unenforced authentication) needs a base
+        # URL but NO principals — it tests the absence of auth and the presence of shadow endpoints,
+        # not another user's data. GET-only and bounded, like the rest of the engine. The engine is
+        # authorization-gated (ACTIVE_ENGINES + requires_authorization), so this only runs for an
+        # asset the operator is authorized to assess.
+        if base:
+            yield from probe_surface(
+                base, spec, self._transport(),
+                max_requests=int(settings.get("api_probe_requests", 40)),
+                rate_per_second=float(settings.get("api_rate", 8.0)),
+                deadline_seconds=float(settings.get("api_deadline", 120.0)),
+            )
+
         if not principals or not base:
             if spec.operations:
                 yield self._not_tested(spec, base)
             return
 
-        settings = ctx.settings or {}
         scanner = ApiScanner(
             fetch=self._transport(), spec=spec, principals=principals, base_url=base,
             max_requests=int(settings.get("api_max_requests", 300)),
