@@ -13,6 +13,7 @@ from sqlalchemy import text
 from guardian_api.bodylimit import RequestBodySizeLimitMiddleware
 from guardian_api.observability import MetricsMiddleware
 from guardian_api.routes import api_router
+from guardian_api.security_headers import SecurityHeadersMiddleware
 
 log = get_logger("guardian.api")
 
@@ -79,6 +80,10 @@ def create_app() -> FastAPI:
     # parses/spools multipart to temp disk. This is the real protection for the artifact upload —
     # the endpoint's Content-Length dependency and read cap run only after parsing (Issue 3).
     app.add_middleware(RequestBodySizeLimitMiddleware)
+
+    # Added last ⇒ outermost: baseline security headers land on EVERY response, including the 413
+    # from the body-size limit and CORS preflights.
+    app.add_middleware(SecurityHeadersMiddleware)
 
     app.include_router(api_router)
 
