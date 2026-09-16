@@ -73,6 +73,9 @@ def client(monkeypatch):
     monkeypatch.setattr(s, "global_login_breaker_per_minute", 300)
     monkeypatch.setattr(s, "login_argon2_max_concurrency", 4)
     monkeypatch.setattr(s, "login_argon2_acquire_timeout_seconds", 2.0)
+    # This file covers the case where per-client limiting is OFF (shared proxy / operator-disabled):
+    # per-client behavior has its own suite (test_login_per_client_limit.py).
+    monkeypatch.setattr(s, "login_failed_per_client_per_minute", 0)
     # A correct password is only ever `_CORRECT`; the Argon2 cost is stubbed out for speed.
     monkeypatch.setattr("guardian_api.routes.auth.verify_password", lambda pw, h: pw == _CORRECT)
     monkeypatch.setattr("guardian_api.routes.auth.verify_dummy", lambda pw: None)

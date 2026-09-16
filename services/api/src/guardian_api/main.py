@@ -43,7 +43,18 @@ def _verify_rls_app_role(settings: Settings) -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):  # noqa: ANN202
-    _verify_rls_app_role(get_settings())
+    settings = get_settings()
+    _verify_rls_app_role(settings)
+    # Surface deployment misconfigurations loudly at startup (e.g. per-client login limiting
+    # disabled because the trusted proxy hop count is unset in production). Also exposed at
+    # /health/details so it is visible without reading logs.
+    from guardian_api.ratelimit import deployment_warnings
+
+    for warning in deployment_warnings(settings):
+        if warning["severity"] == "error":
+            log.error("deployment_warning", code=warning["code"], detail=warning["detail"])
+        else:
+            log.warning("deployment_warning", code=warning["code"], detail=warning["detail"])
     yield
 
 

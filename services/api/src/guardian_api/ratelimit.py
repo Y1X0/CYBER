@@ -8,6 +8,7 @@ deliberately out of the app's scope; this layer protects each process against si
 
 from __future__ import annotations
 
+import ipaddress
 import threading
 import time
 from collections.abc import Iterator
@@ -23,6 +24,54 @@ log = get_logger("guardian.ratelimit")
 _MAX_KEYS = 50_000  # soft cap on distinct keys tracked; eviction removes only EXPIRED entries
 
 
+def client_bucket_key(ip: str | None) -> str:
+    """A rate-limit bucket key for a resolved client IP.
+
+    IPv6 is normalized to its /64 prefix: a single client is routinely handed a whole /64, so keying
+    on the full address would let one host rotate through 2^64 addresses to dodge the limit. IPv4 is
+    keyed as-is. A non-IP / missing value falls back to a constant bucket rather than a fresh key
+    per request (which would defeat the limit).
+    """
+    if not ip:
+        return "unknown"
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if addr.version == 6:
+        return str(ipaddress.ip_network(f"{addr}/64", strict=False).network_address) + "/64"
+    return str(addr)
+
+
+def per_client_limiting_enabled(settings) -> bool:  # noqa: ANN001
+    """True when the resolved client IP is a trustworthy per-client value to key a limit on.
+
+    Enabled when a proxy hop count is configured (client_ip is then the real client) or on a
+    local/dev direct connection. Disabled behind a shared proxy with the count unset
+    (production/staging, trusted_proxy_count == 0), where client_ip would be one shared address —
+    keying a login limit there could lock everyone out. That misconfiguration is surfaced as a
+    startup error and in /health/details rather than silently keying on a shared IP.
+    """
+    return settings.trusted_proxy_count > 0 or settings.is_local_or_dev
+
+
+def deployment_warnings(settings) -> list[dict]:  # noqa: ANN001
+    """Operational misconfigurations worth surfacing at startup and in /health/details."""
+    warnings: list[dict] = []
+    if not per_client_limiting_enabled(settings):
+        warnings.append({
+            "code": "per_client_login_limiting_disabled",
+            "severity": "error",
+            "detail": (
+                "GUARDIAN_TRUSTED_PROXY_COUNT is 0 outside local/dev, so the client IP is an "
+                "untrusted shared value and per-client login rate limiting is DISABLED. Password "
+                "spraying is only bounded per-account until the proxy hop count is set. Confirm it "
+                "via GET /api/v1/auth/proxy-diagnostic and set GUARDIAN_TRUSTED_PROXY_COUNT."
+            ),
+        })
+    return warnings
+
+
 class SlidingWindowLimiter:
     """Allow at most ``max_hits`` events per ``window_seconds`` per key. Thread-safe."""
 
@@ -33,13 +82,19 @@ class SlidingWindowLimiter:
         self._hits: dict[str, list[float]] = {}
         self._lock = threading.Lock()
 
-    def hit(self, key: str, *, max_hits: int | None = None) -> tuple[bool, float]:
+    def hit(self, key: str, *, max_hits: int | None = None,
+            fail_closed: bool = False) -> tuple[bool, float]:
         """Record an attempt for ``key``. Returns (allowed, retry_after_seconds).
 
         ``max_hits`` overrides the limiter's ceiling for this key only, so one shared window can
         serve callers with different limits (WP-G2: a tenant may be allowed fewer requests than the
         platform default). It is passed per call rather than stored, because a ceiling mutated on a
         shared object is a race between two tenants' requests.
+
+        ``fail_closed`` decides what happens to a brand-new key when the table is full of ACTIVE
+        blocks: an authentication key (``acct:`` / ``client:``) must be REFUSED there (Issue 4 —
+        an attacker who fills the table must not thereby win an unlimited-guessing window), while a
+        best-effort quota key stays fail-open so a full table never denies legitimate traffic.
         """
         ceiling = self._max if max_hits is None else max_hits
         if ceiling <= 0:
@@ -51,19 +106,40 @@ class SlidingWindowLimiter:
                 # blocks and let an attacker reset every lockout by churning arbitrary keys. Evict
                 # only entries whose entire window has expired — those hold no live limit.
                 self._evict_expired(now)
-                if len(self._hits) >= _MAX_KEYS:
-                    # Still full — every remaining key is an ACTIVE block. Admit this brand-new key
-                    # WITHOUT tracking it rather than evict a live block: existing limits stay
-                    # intact and memory stays bounded. Fail-open applies only to a never-seen key
-                    # under a table full of active blocks, a state made near-unreachable by the
-                    # login flow no longer creating account keys once an IP is already blocked.
-                    return True, 0.0
+                if len(self._hits) >= _MAX_KEYS and key not in self._hits:
+                    # Still full — every remaining key is an ACTIVE block. An auth key fails CLOSED
+                    # (refuse this untracked attempt) so a saturated table cannot become an
+                    # unlimited-guessing bypass; a best-effort quota key stays fail-open so a full
+                    # table never denies legitimate traffic.
+                    return (False, self._window) if fail_closed else (True, 0.0)
             recent = [t for t in self._hits.get(key, ()) if now - t < self._window]
             if len(recent) >= ceiling:
                 self._hits[key] = recent
                 return False, max(0.0, self._window - (now - recent[0]))
             recent.append(now)
             self._hits[key] = recent
+            return True, 0.0
+
+    def check(self, key: str, *, max_hits: int | None = None,
+              fail_closed: bool = False) -> tuple[bool, float]:
+        """Peek whether ``key`` is currently allowed WITHOUT recording an attempt.
+
+        Used to refuse an already-blocked client before spending an expensive Argon2 verification on
+        it, while the attempt itself is recorded only on failure. Same fail-open/closed rule as
+        ``hit`` for a brand-new key under a saturated table.
+        """
+        ceiling = self._max if max_hits is None else max_hits
+        if ceiling <= 0:
+            return True, 0.0
+        now = self._clock()
+        with self._lock:
+            if len(self._hits) >= _MAX_KEYS and key not in self._hits:
+                self._evict_expired(now)
+                if len(self._hits) >= _MAX_KEYS and key not in self._hits:
+                    return (False, self._window) if fail_closed else (True, 0.0)
+            recent = [t for t in self._hits.get(key, ()) if now - t < self._window]
+            if len(recent) >= ceiling:
+                return False, max(0.0, self._window - (now - recent[0]))
             return True, 0.0
 
     def _evict_expired(self, now: float) -> None:

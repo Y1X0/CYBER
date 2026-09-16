@@ -108,15 +108,23 @@ services:
       # reports only the X-Forwarded-For hop COUNT and the socket peer (never client IP values), then
       # set GUARDIAN_TRUSTED_PROXY_COUNT to that count.
       #
-      # LOGIN-LOCKOUT SAFETY regardless of this value: the login endpoint never blocks on the client
-      # IP or on any global counter, because behind a shared proxy that would let one attacker lock
-      # out every user (including those with the correct password). Login abuse is bounded by (1) a
-      # per-ACCOUNT rate limit — only ever affecting the targeted account; (2) an Argon2 concurrency
-      # limiter (GUARDIAN_LOGIN_ARGON2_MAX_CONCURRENCY, default 4) that sheds excess load with a
-      # retryable 503 instead of blocking anyone; and (3) an ALERT-ONLY failed-login breaker
-      # (GUARDIAN_GLOBAL_LOGIN_BREAKER_PER_MINUTE, default 300) that logs `login_global_breaker_tripped`
-      # and increments guardian_login_breaker_tripped_total but never returns 429. Setting the proxy
-      # count correctly restores precise per-client attribution for audit; it is not needed for safety.
+      # SET THIS: until it is set, per-client login rate limiting is DISABLED (the client IP is a
+      # shared proxy value that cannot be keyed on safely), so password spraying is only bounded
+      # per-account. The API logs a startup ERROR and reports it at GET /health/details while this
+      # is the case. Setting the count from the diagnostic turns per-client limiting on.
+      #
+      # LOGIN ABUSE MODEL (no block is ever keyed on a value many users share, so one client can
+      # never deny login to another who has the correct password):
+      #   * a per-CLIENT bucket counts FAILED logins per resolved client IP (IPv6 by /64) and 429s a
+      #     client over GUARDIAN_LOGIN_FAILED_PER_CLIENT_PER_MINUTE (default 20) — bounding spraying.
+      #     Active only when the client IP is trustworthy (this count set, or local/dev); otherwise
+      #     off (see the startup ERROR above).
+      #   * a per-ACCOUNT limit bounds brute force against one account (only that account);
+      #   * an Argon2 concurrency limiter (GUARDIAN_LOGIN_ARGON2_MAX_CONCURRENCY, default 4) sheds
+      #     excess load with a retryable 503 instead of blocking anyone (short acquire timeout so a
+      #     shed request never holds a worker thread long);
+      #   * an ALERT-ONLY failed-login breaker (GUARDIAN_GLOBAL_LOGIN_BREAKER_PER_MINUTE, default 300)
+      #     logs `login_global_breaker_tripped` and increments a metric but never returns 429.
 
 databases:
   - name: guardian-db

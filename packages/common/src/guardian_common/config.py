@@ -159,9 +159,19 @@ class Settings(BaseSettings):
     # against correct passwords and can lock out shared-IP users), bound the number of concurrent
     # Argon2 verifications process-wide; an attempt that cannot acquire a slot within the timeout is
     # shed with a retryable 503. A slow attacker cannot sustain saturation, and a correct password
-    # is never denied beyond a short queue. 0 disables the limiter (unbounded concurrency).
+    # is never denied beyond a short queue. The timeout is kept short so a shed request never holds
+    # a worker thread for long (thread-starvation guard). 0 disables the limiter (unbounded).
     login_argon2_max_concurrency: int = 4
-    login_argon2_acquire_timeout_seconds: float = 2.0
+    login_argon2_acquire_timeout_seconds: float = 0.5
+
+    # Per-CLIENT failed-login limit (P1-γ). Counts FAILED logins from one resolved client IP (IPv6
+    # keyed by /64) across all accounts, so password spraying — one password against many emails —
+    # is bounded even though no single account bucket trips. A client over this in the 60s window
+    # gets 429; correct logins from OTHER clients are unaffected, so it cannot become a global
+    # lockout. Active ONLY when the client IP is trustworthy (GUARDIAN_TRUSTED_PROXY_COUNT set, or a
+    # local/dev direct connection) — behind a shared proxy with the count unset it is disabled
+    # (see the startup check) so it can never key on one shared IP. 0 disables it.
+    login_failed_per_client_per_minute: int = 20
 
     # Trusted reverse-proxy hop count (P1-①). X-Forwarded-For is client-spoofable, so by default (0)
     # the client IP used for audit + rate limiting is the SOCKET PEER and XFF is ignored entirely.

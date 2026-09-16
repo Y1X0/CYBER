@@ -26,6 +26,25 @@ def ready(db: Session = Depends(get_db)) -> dict:
     return {"status": "ready", "database": "ok"}
 
 
+@router.get("/health/details")
+def health_details(identity: Identity = Depends(get_current_identity)) -> dict:
+    """Deployment posture: liveness plus any misconfiguration warnings.
+
+    Authenticated because the warnings describe the deployment's security configuration (e.g. that
+    per-client login rate limiting is disabled because the trusted proxy hop count is unset). A
+    `degraded` status here means a warning is present, not that the process is down.
+    """
+    from guardian_api.ratelimit import deployment_warnings
+
+    del identity
+    warnings = deployment_warnings(get_settings())
+    return {
+        "status": "degraded" if any(w["severity"] == "error" for w in warnings) else "ok",
+        "service": "guardian-api",
+        "warnings": warnings,
+    }
+
+
 def _operator(x_metrics_token: str | None = Header(default=None),
               identity: Identity | None = None) -> None:
     """Metrics are operator-only.

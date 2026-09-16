@@ -23,7 +23,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from guardian_api.deps import Identity, client_ip, get_current_identity, get_db, require_owner
-from guardian_api.ratelimit import argon2_verification_slot, login_limiter, record_failed_login
+from guardian_api.ratelimit import (
+    argon2_verification_slot,
+    client_bucket_key,
+    login_limiter,
+    per_client_limiting_enabled,
+    record_failed_login,
+)
 from guardian_api.schemas import LoginRequest, MeResponse, TokenResponse
 
 log = get_logger("guardian.api.auth")
@@ -169,19 +175,38 @@ def login(
     db: Session = Depends(get_db),
     ip: str | None = Depends(client_ip),
 ) -> TokenResponse:
-    # Abuse controls, in priority order (P1-γ). Deliberately NO per-source-IP or global BLOCK:
-    # behind a shared proxy the client IP is one value for everyone, so any block keyed on it (or a
-    # global one) lets a single attacker deny login to every user — including those with the correct
-    # password. Instead:
+    # Abuse controls, in priority order (P1-γ). No BLOCK is ever keyed on a value that many users
+    # share, so no request pattern from one client can deny login to another who has the correct
+    # password:
+    #   * a per-CLIENT bucket counts FAILED logins from one resolved client IP and refuses a client
+    #     over the limit BEFORE spending an Argon2 slot — bounding password spraying (one password
+    #     across many emails). It is keyed on the client IP ONLY when that IP is trustworthy (a
+    #     configured proxy hop count, or a local/dev direct connection); behind a shared proxy with
+    #     the count unset it is disabled (per_client_limiting_enabled) so it can never lock everyone
+    #     out on one shared IP.
     #   * the per-ACCOUNT bucket bounds brute force against one account (and only that account);
-    #   * an Argon2 concurrency limiter bounds CPU exhaustion by shedding excess load with a 503,
-    #     which a slow attacker cannot sustain and which never singles out a correct password;
+    #   * an Argon2 concurrency limiter bounds CPU exhaustion by shedding excess load with a 503;
     #   * a failed-login breaker only ALERTS (metric + log), it never blocks.
-    # `ip` is recorded in the audit trail only — it is never used as a rate-limit key here.
+    # Auth keys fail CLOSED under a saturated limiter table (Issue 4). `ip` is also kept for audit.
+    settings = get_settings()
     limiter = login_limiter()
     email = body.email.lower()
+    per_client = per_client_limiting_enabled(settings)
+    client_key = f"client:{client_bucket_key(ip)}" if per_client else None
+    per_client_ceiling = settings.login_failed_per_client_per_minute
 
-    ok_acct, retry_acct = limiter.hit(f"acct:{email}")
+    # Refuse an already-blocked client up front (peek — recorded only on failure below).
+    if client_key is not None:
+        ok_client, retry_client = limiter.check(
+            client_key, max_hits=per_client_ceiling, fail_closed=True)
+        if not ok_client:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS,
+                "too many failed login attempts from this client",
+                headers={"Retry-After": str(int(retry_client) + 1)},
+            )
+
+    ok_acct, retry_acct = limiter.hit(f"acct:{email}", fail_closed=True)
     if not ok_acct:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS, "too many login attempts",
@@ -208,12 +233,13 @@ def login(
             password_ok = verify_password(body.password, user.password_hash)
 
     if not password_ok:
+        # Record the failure against the client bucket (spraying control) and the alert breaker.
+        if client_key is not None:
+            limiter.hit(client_key, max_hits=per_client_ceiling, fail_closed=True)
         record_failed_login()  # alert-only; never blocks
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid credentials")
     if user.status != "active":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "account disabled")
-
-    settings = get_settings()
 
     token = create_access_token(
         subject=str(user.id),
