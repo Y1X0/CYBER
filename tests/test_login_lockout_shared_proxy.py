@@ -168,11 +168,11 @@ def test_xff_cannot_be_spoofed_when_count_configured(monkeypatch):
     from guardian_api.deps import client_ip
 
     monkeypatch.setattr(get_settings(), "trusted_proxy_count", 1)
-    # With 1 trusted hop the client is the entry just before it (parts[-2]). An attacker can only
-    # PREPEND entries, which land LEFT of that position — so the result is identical with or without
-    # the injected spoof: the source cannot be forged.
-    legit = client_ip(_xff_req("203.0.113.9, 172.16.0.1"))
-    attacked = client_ip(_xff_req("6.6.6.6, 203.0.113.9, 172.16.0.1"))
+    # With 1 trusted hop the proxy appends the real client as the LAST entry, so the client is
+    # parts[-1]. An attacker can only PREPEND entries, which land LEFT of that position — so the
+    # result is identical with or without the injected spoof: the source cannot be forged.
+    legit = client_ip(_xff_req("203.0.113.9"))
+    attacked = client_ip(_xff_req("6.6.6.6, 203.0.113.9"))
     assert legit == attacked == "203.0.113.9"
     assert attacked != "6.6.6.6"
 

@@ -22,7 +22,6 @@ from guardian_api.ratelimit import SlidingWindowLimiter, client_bucket_key
 from guardian_common.config import get_settings
 
 _CORRECT = "correct-horse-battery-staple"
-_PROXY = "10.0.0.1"        # the trusted proxy hop appended to X-Forwarded-For
 
 
 class _FakeUser:
@@ -75,8 +74,10 @@ def client(monkeypatch):
 
 
 def _login(client, client_ip, email, password="wrong"):
+    # trusted_proxy_count == 1, so the proxy appends the client as the LAST X-Forwarded-For entry:
+    # the client is parts[-1], i.e. the value we put here.
     return client.post("/api/v1/auth/login",
-                       headers={"X-Forwarded-For": f"{client_ip}, {_PROXY}"},
+                       headers={"X-Forwarded-For": client_ip},
                        json={"email": email, "password": password})
 
 
@@ -114,6 +115,36 @@ def test_correct_login_is_not_penalised_by_the_client_bucket(client):
     for _ in range(50):
         assert _login(client, "203.0.113.5", "victim@example.com",
                       password=_CORRECT).status_code == 200
+
+
+def test_attacker_prefix_cannot_pick_a_bucket(client):
+    # count=1: an attacker prepends a chosen XFF, the proxy appends their real client, so parts[-1]
+    # is their real IP. Two "clients" whose only difference is the prepended spoof share ONE bucket.
+    for i in range(25):
+        client.post("/api/v1/auth/login",
+                    headers={"X-Forwarded-For": f"spoof{i}.0.0.1, 203.0.113.5"},
+                    json={"email": f"u{i}@example.com", "password": "wrong"})
+    blocked = client.post("/api/v1/auth/login",
+                          headers={"X-Forwarded-For": "9.9.9.9, 203.0.113.5"},
+                          json={"email": "x@example.com", "password": _CORRECT})
+    assert blocked.status_code == 429       # keyed on the real client 203.0.113.5, spoof ignored
+
+
+def test_malformed_trusted_position_skips_per_client_and_counts(client, monkeypatch):
+    # count=1 with a non-IP at parts[-1] ⇒ untrusted ⇒ per-client skipped, so a flood of such
+    # requests cannot block a correct login that is also untrusted.
+    metric = "guardian_login_client_ip_unresolved_total"
+    before = _counter_total(metric)
+    for i in range(30):
+        r = client.post("/api/v1/auth/login",
+                        headers={"X-Forwarded-For": "not-an-ip"},
+                        json={"email": f"none{i}@example.com", "password": "wrong"})
+        assert r.status_code == 401
+    ok = client.post("/api/v1/auth/login",
+                     headers={"X-Forwarded-For": "not-an-ip"},
+                     json={"email": "victim@example.com", "password": _CORRECT})
+    assert ok.status_code == 200, ok.text
+    assert _counter_total(metric) - before == 31
 
 
 def test_no_client_ip_skips_per_client_and_does_not_lock_out(client, monkeypatch):

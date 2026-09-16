@@ -1,8 +1,11 @@
 """Trusted client-IP derivation (P1-①) — no network.
 
-X-Forwarded-For is client-spoofable. The rate limiter must key on a trusted IP so an attacker cannot
-change their bucket by setting the header. Default (trusted_proxy_count=0) uses the socket peer and
-ignores XFF; a configured count N trusts only the last N hops.
+X-Forwarded-For is client-spoofable. Each trusted proxy APPENDS the address of the peer it received
+the connection from, so for `client → P1 → … → PN → app` the header ends `…, client, P1, …, P(N-1)`
+and the real client is `parts[-N]` (NOT `parts[-(N+1)]`). Everything to its LEFT is attacker-supplied;
+everything to its right is a trusted proxy hop. `resolve_client_ip` also reports whether the value is
+trustworthy enough to key a per-client rate limit on: a short or malformed X-Forwarded-For (hop count
+misconfigured) yields the socket peer for audit but is marked UNTRUSTED so per-client limiting skips.
 """
 
 from __future__ import annotations
@@ -29,10 +32,10 @@ def _with_count(monkeypatch, n):
 # ── default (count=0): socket peer only, XFF ignored ─────────────────────────────────────────────
 def test_default_uses_socket_peer_and_ignores_xff(monkeypatch):
     _with_count(monkeypatch, 0)
-    # Even with a spoofed XFF, the result is the socket peer — the attacker cannot change the bucket.
     assert deps.client_ip(_req("198.51.100.7", xff="1.2.3.4, 5.6.7.8")) == "198.51.100.7"
     assert deps.client_ip(_req("198.51.100.7", xff="9.9.9.9")) == "198.51.100.7"
     assert deps.client_ip(_req("198.51.100.7")) == "198.51.100.7"
+    assert deps.resolve_client_ip(_req("198.51.100.7"))[1] is True   # direct connection is trusted
 
 
 def test_spoofed_xff_never_changes_the_key(monkeypatch):
@@ -42,31 +45,57 @@ def test_spoofed_xff_never_changes_the_key(monkeypatch):
     assert keys == {peer}                       # one bucket regardless of the header
 
 
-# ── configured trusted proxies: real client is the hop before the trusted ones ───────────────────
-def test_one_trusted_proxy_takes_hop_before_it(monkeypatch):
+# ── configured trusted proxies: the client is parts[-n] (the proxy appends the client) ───────────
+def test_one_trusted_proxy_takes_the_last_appended_entry(monkeypatch):
     _with_count(monkeypatch, 1)
-    # our proxy appended the real peer (198.51.100.9) as the last entry; client is parts[-2].
-    assert deps.client_ip(_req("10.0.0.1", xff="203.0.113.5, 198.51.100.9")) == "203.0.113.5"
+    # The single proxy appended the client (203.0.113.7) as the LAST entry ⇒ parts[-1].
+    ip, trusted = deps.resolve_client_ip(_req("10.0.0.9", xff="203.0.113.7"))
+    assert ip == "203.0.113.7" and trusted is True
 
 
 def test_attacker_prepended_xff_is_not_trusted(monkeypatch):
     _with_count(monkeypatch, 1)
-    # Attacker sets XFF: "169.254.169.254" — our proxy appends the true peer, so the spoof lands to
-    # the LEFT and is never selected; parts[-2] is the attacker's own real client IP.
-    ip = deps.client_ip(_req("10.0.0.1", xff="169.254.169.254, 203.0.113.5, 198.51.100.9"))
-    assert ip == "203.0.113.5" and ip != "169.254.169.254"
+    # Attacker sets XFF "1.1.1.1"; the proxy appends the true client, so the spoof lands to the LEFT
+    # and parts[-1] is the attacker's own real client IP.
+    ip = deps.client_ip(_req("10.0.0.9", xff="1.1.1.1, 203.0.113.7"))
+    assert ip == "203.0.113.7" and ip != "1.1.1.1"
 
 
-def test_two_trusted_proxies(monkeypatch):
+def test_two_trusted_proxies_take_parts_minus_n(monkeypatch):
     _with_count(monkeypatch, 2)
-    assert deps.client_ip(_req("10.0.0.1", xff="203.0.113.5, 198.51.100.9, 198.51.100.10")) \
-        == "203.0.113.5"
+    # client → P1 → P2 → app: XFF = "<attacker>, client, P1"; client = parts[-2].
+    assert deps.client_ip(_req("10.0.0.9", xff="a-spoof, 203.0.113.7, 10.1.1.1")) == "203.0.113.7"
 
 
-def test_short_header_falls_back_to_peer(monkeypatch):
+def test_distinct_real_clients_get_distinct_buckets(monkeypatch):
+    _with_count(monkeypatch, 1)
+    a = deps.client_ip(_req("10.0.0.9", xff="203.0.113.7"))
+    b = deps.client_ip(_req("10.0.0.9", xff="198.51.100.4"))
+    assert a == "203.0.113.7" and b == "198.51.100.4" and a != b
+
+
+# ── misconfiguration: short / malformed header ⇒ peer for audit, UNTRUSTED for rate limiting ─────
+def test_short_header_is_peer_for_audit_but_untrusted(monkeypatch):
     _with_count(monkeypatch, 2)
-    # Fewer entries than expected ⇒ fail-safe to the socket peer, never an attacker-controlled value.
-    assert deps.client_ip(_req("10.0.0.1", xff="203.0.113.5")) == "10.0.0.1"
+    ip, trusted = deps.resolve_client_ip(_req("10.0.0.9", xff="203.0.113.7"))   # only 1 entry, need 2
+    assert ip == "10.0.0.9"        # audit falls back to the socket peer…
+    assert trusted is False        # …but it is NOT keyed on for per-client limiting
+
+
+def test_missing_header_is_peer_for_audit_but_untrusted(monkeypatch):
+    _with_count(monkeypatch, 1)
+    ip, trusted = deps.resolve_client_ip(_req("10.0.0.9"))
+    assert ip == "10.0.0.9" and trusted is False
+
+
+def test_malformed_value_at_the_trusted_position_is_untrusted(monkeypatch):
+    _with_count(monkeypatch, 1)
+    # A non-IP at parts[-1] means the hop count is misconfigured: peer for audit, untrusted.
+    ip, trusted = deps.resolve_client_ip(_req("10.0.0.9", xff="not-an-ip"))
+    assert ip == "10.0.0.9" and trusted is False
+    # But a valid IP at parts[-1] with attacker garbage to the LEFT is still trusted (garbage ignored).
+    ip2, trusted2 = deps.resolve_client_ip(_req("10.0.0.9", xff="garbage, 203.0.113.7"))
+    assert ip2 == "203.0.113.7" and trusted2 is True
 
 
 def test_no_client_and_no_header(monkeypatch):
@@ -74,31 +103,9 @@ def test_no_client_and_no_header(monkeypatch):
     assert deps.client_ip(_req(None)) is None
 
 
-# ── Issue 2: granularity vs global bucket, and no spoof bypass through a configured chain ─────────
-def test_default_zero_puts_all_clients_in_one_bucket(monkeypatch):
-    # With count=0 behind a proxy, the socket peer is the proxy for every request, so distinct real
-    # clients collapse to ONE rate-limit key. This is safe against spoofing (unspoofable) but coarse
-    # — it documents exactly the global-bucket behaviour that a correct proxy count fixes.
-    _with_count(monkeypatch, 0)
-    proxy_peer = "10.0.0.1"
-    a = deps.client_ip(_req(proxy_peer, xff="203.0.113.5, 198.51.100.9"))
-    b = deps.client_ip(_req(proxy_peer, xff="203.0.113.99, 198.51.100.9"))
-    assert a == b == proxy_peer                         # one shared bucket
-
-
-def test_configured_count_gives_distinct_clients_distinct_buckets(monkeypatch):
-    # With the hop count set correctly (here 1), two different real clients behind the same proxy
-    # resolve to DIFFERENT keys — rate limiting is per-client, not accidentally global.
-    _with_count(monkeypatch, 1)
-    a = deps.client_ip(_req("10.0.0.1", xff="203.0.113.5, 198.51.100.9"))
-    b = deps.client_ip(_req("10.0.0.1", xff="203.0.113.99, 198.51.100.9"))
-    assert a == "203.0.113.5" and b == "203.0.113.99" and a != b
-
-
 def test_spoofed_client_cannot_pick_an_arbitrary_bucket(monkeypatch):
-    # Even with a configured chain, an attacker prepending a chosen X-Forwarded-For value cannot
-    # select it: the true peer is appended to the RIGHT of anything they send, so parts[-(n+1)] is
-    # always their own real client IP (203.0.113.5), never the spoofed 9.9.9.9.
     _with_count(monkeypatch, 1)
-    ip = deps.client_ip(_req("10.0.0.1", xff="9.9.9.9, 203.0.113.5, 198.51.100.9"))
-    assert ip == "203.0.113.5" and ip != "9.9.9.9"
+    # The true client is appended to the RIGHT of anything the attacker sends, so parts[-1] is always
+    # their own real client IP (203.0.113.7), never the spoofed 9.9.9.9.
+    ip = deps.client_ip(_req("10.0.0.9", xff="9.9.9.9, 203.0.113.7"))
+    assert ip == "203.0.113.7" and ip != "9.9.9.9"

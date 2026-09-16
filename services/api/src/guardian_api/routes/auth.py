@@ -22,7 +22,14 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from guardian_api.deps import Identity, client_ip, get_current_identity, get_db, require_owner
+from guardian_api.deps import (
+    Identity,
+    client_ip,
+    get_current_identity,
+    get_db,
+    require_owner,
+    resolve_client_ip,
+)
 from guardian_api.ratelimit import (
     argon2_verification_slot,
     client_bucket_key,
@@ -173,17 +180,16 @@ def login(
     body: LoginRequest,
     request: Request,
     db: Session = Depends(get_db),
-    ip: str | None = Depends(client_ip),
 ) -> TokenResponse:
     # Abuse controls, in priority order (P1-γ). No BLOCK is ever keyed on a value that many users
     # share, so no request pattern from one client can deny login to another who has the correct
     # password:
     #   * a per-CLIENT bucket counts FAILED logins from one resolved client IP and refuses a client
     #     over the limit BEFORE spending an Argon2 slot — bounding password spraying (one password
-    #     across many emails). It is keyed on the client IP ONLY when that IP is trustworthy (a
-    #     configured proxy hop count, or a local/dev direct connection); behind a shared proxy with
-    #     the count unset it is disabled (per_client_limiting_enabled) so it can never lock everyone
-    #     out on one shared IP.
+    #     across many emails). It is keyed on the client IP ONLY when that IP is TRUSTWORTHY (a
+    #     configured proxy hop count that resolved to a valid client, or a local/dev direct
+    #     connection); a short/malformed X-Forwarded-For, or a shared proxy with the count unset, is
+    #     never keyed on — so it can never lock everyone out on one shared IP.
     #   * the per-ACCOUNT bucket bounds brute force against one account (and only that account);
     #   * an Argon2 concurrency limiter bounds CPU exhaustion by shedding excess load with a 503;
     #   * a failed-login breaker only ALERTS (metric + log), it never blocks.
@@ -192,13 +198,15 @@ def login(
     limiter = login_limiter()
     email = body.email.lower()
     per_client_ceiling = settings.login_failed_per_client_per_minute
+    ip, ip_trusted = resolve_client_ip(request)
     client_key: str | None = None
     if per_client_limiting_enabled(settings):
-        bucket = client_bucket_key(ip)
+        bucket = client_bucket_key(ip) if ip_trusted else None
         if bucket is None:
-            # No reliable client IP (missing/unparseable): skip the per-client bucket for this
-            # request rather than key on a shared placeholder that would lock such requests out of
-            # each other. The account bucket still applies. Surfaced as a metric.
+            # No trustworthy client IP (untrusted XFF position, or missing/unparseable): skip the
+            # per-client bucket for this request rather than key on a shared placeholder that would
+            # lock such requests out of each other. The account bucket still applies. Surfaced as a
+            # metric so a misconfigured hop count is visible.
             REGISTRY.inc("guardian_login_client_ip_unresolved_total")
         else:
             client_key = f"client:{bucket}"
@@ -264,14 +272,17 @@ def login(
 
 class ProxyDiagnostic(BaseModel):
     """What an owner needs to confirm GUARDIAN_TRUSTED_PROXY_COUNT — and nothing that identifies a
-    client. `xff_entry_count` is how many hops arrived in X-Forwarded-For; the correct trusted count
-    is the number of proxies YOUR platform prepends (typically that count). `socket_peer` is the
-    direct TCP peer (your load balancer), included so the topology is unambiguous."""
+    client. Each trusted proxy APPENDS the peer it received from, so with N trusted hops the real
+    client is `X-Forwarded-For[-N]`. `xff_entry_count` is how many entries arrived. `socket_peer` is
+    the direct TCP peer (your load balancer), included so the topology is unambiguous. `guidance`
+    states the rule: send a request that carries NO client-supplied X-Forwarded-For (e.g. from a
+    trusted network path) and set the count to the resulting `xff_entry_count`."""
 
     xff_entry_count: int
     socket_peer: str | None
     trusted_proxy_count_configured: int
     resolved_client_ip_source: str
+    guidance: str
 
 
 @router.get("/proxy-diagnostic", response_model=ProxyDiagnostic)
@@ -286,12 +297,18 @@ def proxy_diagnostic(
     xff = request.headers.get("x-forwarded-for", "")
     count = len([p for p in xff.split(",") if p.strip()])
     n = settings.trusted_proxy_count
-    source = "socket_peer (XFF ignored)" if n <= 0 else f"XFF[-{n + 1}] (trusted_proxy_count={n})"
+    source = "socket_peer (XFF ignored)" if n <= 0 else f"XFF[-{n}] (trusted_proxy_count={n})"
     return ProxyDiagnostic(
         xff_entry_count=count,
         socket_peer=request.client.host if request.client else None,
         trusted_proxy_count_configured=n,
         resolved_client_ip_source=source,
+        guidance=(
+            "Each trusted proxy appends one X-Forwarded-For entry, so the client is XFF[-N]. Make "
+            "this request WITHOUT a client-supplied X-Forwarded-For header (so every entry present "
+            f"was added by your infrastructure): the correct GUARDIAN_TRUSTED_PROXY_COUNT then "
+            f"equals xff_entry_count, i.e. {count}."
+        ),
     )
 
 

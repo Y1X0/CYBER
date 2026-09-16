@@ -9,6 +9,7 @@ cross-tenant read or write even if a handler forgets to filter.
 from __future__ import annotations
 
 import datetime as dt
+import ipaddress
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -317,21 +318,48 @@ def require_reviewer(identity: Identity = Depends(get_current_identity)) -> Iden
     return identity
 
 
-def client_ip(request: Request) -> str | None:
-    """Client IP for audit + rate limiting, from a TRUSTED source (P1-①).
+def _is_ip_literal(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return True
 
-    X-Forwarded-For is client-spoofable. By default (GUARDIAN_TRUSTED_PROXY_COUNT=0) we use the
-    socket peer and IGNORE the header — an attacker cannot change their bucket by setting XFF. When
-    the app sits behind N trusted proxies that append XFF, set the count to N: the real client is
-    the entry just before those N trusted hops. An attacker can only PREPEND entries (to the left of
-    that position), so the selected IP cannot be forged. A header shorter than expected falls back
-    to the peer (fail-safe, never to an attacker-controlled value)."""
+
+def resolve_client_ip(request: Request) -> tuple[str | None, bool]:
+    """Resolve the client IP and whether it is TRUSTED enough to key a per-client rate limit (P1-①).
+
+    Returns ``(ip_for_audit, trusted)``.
+
+    X-Forwarded-For is client-spoofable. Each trusted proxy APPENDS the address of the peer it
+    received the connection from, so for ``client → P1 → … → PN → app`` the header ends
+    ``…, client, P1, …, P(N-1)`` and the real client is ``parts[-N]``; everything to its LEFT is
+    attacker-supplied and everything to its right is a trusted proxy hop. So with N trusted proxies
+    the client is ``parts[-n]`` (NOT ``parts[-(n+1)]``).
+
+      * count == 0: direct connection — the socket peer IS the client (trusted).
+      * count == n: return ``parts[-n]`` when it is present AND parses as an IP (trusted). A header
+        shorter than n, or a non-IP value at the trusted position, means the hop count is
+        misconfigured: return the socket peer for the AUDIT trail but mark it UNTRUSTED, so the
+        caller skips per-client limiting rather than key it on the shared proxy peer.
+    """
     peer = request.client.host if request.client else None
     n = get_settings().trusted_proxy_count
     if n <= 0:
-        return peer
-    xff = request.headers.get("x-forwarded-for")
-    if not xff:
-        return peer
+        return peer, True
+    xff = request.headers.get("x-forwarded-for") or ""
     parts = [p.strip() for p in xff.split(",") if p.strip()]
-    return parts[-(n + 1)] if len(parts) >= n + 1 else peer
+    if len(parts) >= n:
+        candidate = parts[-n]
+        if _is_ip_literal(candidate):
+            return candidate, True
+        return peer, False       # malformed value at the trusted position ⇒ misconfigured
+    return peer, False           # header shorter than the hop count ⇒ misconfigured
+
+
+def client_ip(request: Request) -> str | None:
+    """Client IP for the audit trail (best effort). The rate limiter uses `resolve_client_ip`, which
+    also reports whether the value is trustworthy enough to key a per-client bucket on."""
+    return resolve_client_ip(request)[0]
