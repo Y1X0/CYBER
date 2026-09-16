@@ -11,8 +11,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from guardian_core.enums import EngineKey, Severity
 from guardian_scanner.engines import secrets_engine as se
 from guardian_scanner.engines.secrets_engine import SecretsEngine

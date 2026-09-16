@@ -68,7 +68,8 @@ def test_a_failed_check_becomes_a_finding(monkeypatch, tmp_path):
 
 
 def test_missing_severity_defaults_to_medium(monkeypatch, tmp_path):
-    check = dict(_FAILED); check["severity"] = None
+    check = dict(_FAILED)
+    check["severity"] = None
     _fake_checkov(monkeypatch, {"check_type": "terraform",
                                 "results": {"failed_checks": [check]}})
     assert _findings(tmp_path)[0].base_severity == Severity.MEDIUM

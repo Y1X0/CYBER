@@ -169,15 +169,16 @@ def render_notice(registry: dict[str, Entry]) -> str:
 
 # Every runtime image that ships tools. Both must be gated: the scanner image installs the SCA and
 # secrets binaries, and the worker-tools image installs the network-plane binaries (nftables today,
-# nmap/naabu tomorrow). Gating only the first — the previous behaviour — left the second able to ship
-# a blocked binary with no CI catching it (Phase-0 audit P1-2).
+# nmap/naabu tomorrow). Gating only the first — the previous behaviour — left the second able
+# to ship a blocked binary with no CI catching it (Phase-0 audit P1-2).
 _DEFAULT_IMAGES = ("infra/docker/Dockerfile.scanner", "infra/docker/Dockerfile")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", action="append", type=Path,
-                        help="a runtime image to gate; repeatable. Defaults to every shipping image.")
+                        help="a runtime image to gate; repeatable. Defaults to every shipping "
+                             "image.")
     parser.add_argument("--notice", action="store_true", help="print a NOTICE file and exit")
     args = parser.parse_args(argv)
 
