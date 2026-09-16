@@ -99,6 +99,75 @@ def test_streamed_body_without_content_length_is_capped(monkeypatch):
     assert consumed["n"] <= limit
 
 
+def test_downstream_that_swallows_the_abort_still_yields_413(monkeypatch):
+    # Residual guard: FastAPI wraps body parsing in a broad `except Exception` and turns any error
+    # (including our internal abort) into its own response — historically a misleading 400 "error
+    # parsing the body" instead of 413. Simulate that downstream: an app that drains `receive`,
+    # catches whatever it raises, and emits its own 400. The middleware must override that with 413.
+    monkeypatch.setattr(get_settings(), "artifact_max_bytes", 1000)
+
+    async def swallowing_inner(scope, receive, send):  # noqa: ANN001
+        try:
+            while True:
+                m = await receive()
+                if m["type"] != "http.request" or not m.get("more_body"):
+                    break
+        except Exception:  # noqa: BLE001 — mimic FastAPI's broad body-parse guard
+            pass
+        # The app has no idea the stream was aborted; it proceeds to emit its own (wrong) response.
+        await send({"type": "http.response.start", "status": 400,
+                    "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b'{"detail":"bad body"}'})
+
+    send = _Send()
+    chunks = [(b"x" * 20_000, True) for _ in range(9)] + [(b"x" * 20_000, False)]
+    _run(RequestBodySizeLimitMiddleware(swallowing_inner)(_scope({}), _receiver(chunks), send))
+    assert send.status == 413
+    body = b"".join(m.get("body", b"") for m in send.messages if m["type"] == "http.response.body")
+    assert body == b'{"detail":"request body too large"}'  # the app's 400 body was suppressed
+
+
+def test_real_app_returns_413_for_oversized_body_without_content_length(monkeypatch):
+    # End-to-end proof through the REAL FastAPI stack that a streamed/chunked body with NO
+    # Content-Length (which a normal httpx TestClient cannot send) is rejected with 413 — not the
+    # 400 that FastAPI's body-parse guard used to produce — and that the downstream parser never
+    # receives the whole hostile body (the DoS the later 100 MiB read-cap could not prevent).
+    from guardian_api.main import app
+
+    monkeypatch.setattr(get_settings(), "artifact_max_bytes", 1000)
+    limit = 1000 + _ENVELOPE_ALLOWANCE
+    fed = {"n": 0}
+    chunks = [(b"x" * 20_000, True) for _ in range(9)] + [(b"x" * 20_000, False)]
+    it = iter(chunks)
+
+    async def receive():
+        try:
+            body, more = next(it)
+            fed["n"] += len(body)
+            return {"type": "http.request", "body": body, "more_body": more}
+        except StopIteration:
+            return {"type": "http.disconnect"}
+
+    sent: list[dict] = []
+
+    async def send(message):  # noqa: ANN001
+        sent.append(message)
+
+    scope = {
+        "type": "http", "http_version": "1.1", "method": "POST",
+        "path": "/api/v1/auth/login", "raw_path": b"/api/v1/auth/login", "query_string": b"",
+        "root_path": "", "scheme": "http", "server": ("testserver", 80),
+        "client": ("1.2.3.4", 5555),
+        "headers": [(b"content-type", b"application/json")],  # deliberately NO content-length
+    }
+    _run(app(scope, receive, send))
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    assert status == 413
+    # The parser aborted mid-stream: at most the limit (+ one in-flight chunk) was ever fed down,
+    # never the full ~200 KiB body.
+    assert fed["n"] <= limit + 20_000
+
+
 def test_small_body_passes_through(monkeypatch):
     monkeypatch.setattr(get_settings(), "artifact_max_bytes", 100 * 1024 * 1024)
     ran = {"v": False}

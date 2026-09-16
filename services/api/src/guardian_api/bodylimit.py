@@ -62,19 +62,33 @@ class RequestBodySizeLimitMiddleware:
 
         received = 0
         response_started = False
+        overflow_before_response = False
 
         async def counting_receive() -> Message:
-            nonlocal received
+            nonlocal received, overflow_before_response
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
                 if received > limit:
-                    # Stop before the downstream parser can buffer more than `limit` (+ this chunk).
+                    # Record that the overflow was detected before any response bytes went out, then
+                    # stop before the downstream parser can buffer more than `limit` (+ this chunk).
+                    if not response_started:
+                        overflow_before_response = True
                     raise _BodyTooLarge
             return message
 
         async def watching_send(message: Message) -> None:
             nonlocal response_started
+            # When the overflow fired before any output, the downstream stack may CATCH our sentinel
+            # during body parsing (FastAPI wraps `request.json()` / `request.form()` in a broad
+            # `except Exception` and turns it into a 400 "error parsing the body") and then emit its
+            # own, misleading response. Substitute a clean 413 for whatever it attempts and swallow
+            # the rest, so an oversized body yields a consistent 413 on every code path.
+            if overflow_before_response:
+                if not response_started:
+                    response_started = True
+                    await self._reject(send)
+                return
             if message["type"] == "http.response.start":
                 response_started = True
             await send(message)
@@ -82,9 +96,10 @@ class RequestBodySizeLimitMiddleware:
         try:
             await self.app(scope, counting_receive, watching_send)
         except _BodyTooLarge:
-            # The body is consumed during request/form parsing, before the endpoint produces a
-            # response, so we can still emit a clean 413. If a response had already begun (it should
-            # not on the upload path), re-raise rather than corrupt the stream.
+            # The sentinel propagated uncaught (the downstream never produced a response). The body
+            # is consumed during request/form parsing, before the endpoint produces a response, so
+            # we can still emit a clean 413. If a response had already begun, re-raise rather than
+            # corrupt the stream.
             if response_started:
                 raise
             await self._reject(send)

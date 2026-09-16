@@ -16,9 +16,12 @@ from __future__ import annotations
 import ipaddress
 import socket
 import ssl
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+from guardian_scanner import sandbox
 from guardian_scanner.discovery.technologies import Technology, fingerprint, page_title
 
 MAX_REDIRECTS = 5
@@ -164,6 +167,39 @@ def _insecure_cookies(set_cookies: list[str], url: str) -> list[str]:
 
 
 # ── live fetching ─────────────────────────────────────────────────────────────────────────────────
+@contextmanager
+def _pinned_egress() -> Iterator[None]:
+    """Pin every outbound connection in the enclosed block to a pre-validated PUBLIC IP.
+
+    Discovery's web probe runs in the PARENT worker process, not inside `run_in_sandbox`, so the
+    fork sandbox's `create_connection` egress pin is NOT active here. Without this,
+    `_is_public_address` is a validate-then-reconnect TOCTOU: it resolves the host to check it is
+    public, but the httpx client (and `tls_details`) then reconnect BY HOSTNAME and re-resolve, so a
+    DNS record that flips to 169.254.169.254 / an internal address between the two resolutions
+    defeats the check (DNS rebinding).
+
+    We intercept `socket.create_connection` — the chokepoint httpx/httpcore and `tls_details` both
+    use — and at connect time resolve+validate the actual host via `sandbox._resolve_public_address`
+    (blocks private/loopback/link-local/metadata and IPv4-mapped-IPv6, fails closed on a
+    multi-record rebind) and connect to THAT IP. No second resolution ⇒ rebinding cannot redirect
+    the socket; TLS
+    SNI/Host stay the hostname, so certificate validation is unaffected. This mirrors the pinned
+    egress the DAST engine already uses (`engines/dast_engine._pinned_egress`).
+    """
+    real_create_connection = socket.create_connection
+
+    def _pinned(address, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        host, port = address[0], address[1]
+        address = (sandbox._resolve_public_address(host, port), port)  # validate + pin each connect
+        return real_create_connection(address, *args, **kwargs)
+
+    socket.create_connection = _pinned  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        socket.create_connection = real_create_connection  # type: ignore[assignment]
+
+
 def _is_public_address(host: str) -> bool:
     try:
         infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
@@ -192,38 +228,42 @@ def probe(  # pragma: no cover - network
     origin_host = (urlparse(url).hostname or "").lower()
 
     try:
-        with httpx.Client(follow_redirects=False, timeout=timeout,
-                          headers={"user-agent": "guardian-discovery"}) as client:
-            for _hop in range(MAX_REDIRECTS + 1):
-                host = (urlparse(current).hostname or "").lower()
-                if not host or not _is_public_address(host):
-                    return WebObservation(url=url, error=f"refused non-public host {host!r}")
+        # Pin every connect (httpx AND tls_details) to a validated public IP for the whole fetch,
+        # so the per-hop `_is_public_address` guard below cannot be defeated by a DNS rebind between
+        # the check and the connection (this runs outside the fork sandbox's egress pin).
+        with _pinned_egress():
+            with httpx.Client(follow_redirects=False, timeout=timeout,
+                              headers={"user-agent": "guardian-discovery"}) as client:
+                for _hop in range(MAX_REDIRECTS + 1):
+                    host = (urlparse(current).hostname or "").lower()
+                    if not host or not _is_public_address(host):
+                        return WebObservation(url=url, error=f"refused non-public host {host!r}")
 
-                response = client.get(current)
-                chain.append(current)
+                    response = client.get(current)
+                    chain.append(current)
 
-                if 300 <= response.status_code < 400 and "location" in response.headers:
-                    target = str(response.url.join(response.headers["location"]))
-                    target_host = (urlparse(target).hostname or "").lower()
-                    if target_host != origin_host and not allow_offsite_redirects:
-                        # The response chose a host outside the authorized target. Recorded, not
-                        # followed: following it is how a scanner is aimed at somebody else.
-                        left_scope = True
-                        chain.append(target)
-                        break
-                    current = target
-                    continue
-                break
+                    if 300 <= response.status_code < 400 and "location" in response.headers:
+                        target = str(response.url.join(response.headers["location"]))
+                        target_host = (urlparse(target).hostname or "").lower()
+                        if target_host != origin_host and not allow_offsite_redirects:
+                            # The response chose a host outside the authorized target. Recorded, not
+                            # followed: following it is how a scanner is aimed at somebody else.
+                            left_scope = True
+                            chain.append(target)
+                            break
+                        current = target
+                        continue
+                    break
 
-        body = response.text[:MAX_BODY_BYTES]
-        set_cookies = response.headers.get_list("set-cookie") \
-            if hasattr(response.headers, "get_list") else []
-        return analyze(
-            url, response.status_code, dict(response.headers), body,
-            set_cookies=list(set_cookies), redirect_chain=chain, left_scope=left_scope,
-            tls=tls_details(urlparse(current).hostname or "", urlparse(current).port or 443)
-            if current.lower().startswith("https://") else None,
-        )
+            body = response.text[:MAX_BODY_BYTES]
+            set_cookies = response.headers.get_list("set-cookie") \
+                if hasattr(response.headers, "get_list") else []
+            return analyze(
+                url, response.status_code, dict(response.headers), body,
+                set_cookies=list(set_cookies), redirect_chain=chain, left_scope=left_scope,
+                tls=tls_details(urlparse(current).hostname or "", urlparse(current).port or 443)
+                if current.lower().startswith("https://") else None,
+            )
     except Exception as exc:  # noqa: BLE001 - an unreachable service is a result, not a crash
         return WebObservation(url=url, error=f"{type(exc).__name__}: {exc}"[:200])
 
