@@ -71,7 +71,44 @@ hold no DB credentials.
 > choices requiring an account. The repo ships the self-hosted reference + the requirements; the
 > managed provisioning is an operator step.
 
-## 6. Verification
+## 6. Periodic scheduler (Celery beat)
+
+The recurring work — stranded-scan recovery, tenant-schedule sweeps, webhook-delivery retries, and
+vulnerability-feed sync — is driven by **Celery beat**, configured in `celery_app.py`
+(`beat_schedule`). Beat only *publishes* these tasks on a cadence; the standing worker executes them.
+All four route to the `default` queue (§5), so `worker-default` (compose) / the single Render worker
+runs them.
+
+| Beat entry | Task | Cadence |
+|------------|------|---------|
+| `sweep-schedules` | `guardian.sweep_schedules` | 5 min |
+| `retry-webhook-deliveries` | `guardian.sweep_webhook_deliveries` | 1 min |
+| `recover-stranded-scans` | `guardian.sweep_stranded_scans` | 5 min |
+| `sync-vulnerability-feeds` | `guardian.sync_feeds` | daily |
+
+**Exactly one scheduler per deployment — this is the load-bearing rule.** N beats fire every
+periodic job N times, so beat is never scaled and never embedded on a worker that scales:
+
+- **Compose (`docker-compose.yml` / `.prod.yml`):** a dedicated single `beat` service
+  (`celery -A guardian_scanner.celery_app.celery_app beat`). Do **not** set `replicas`, and never add
+  `--beat`/`-B` to the scalable `worker-default`.
+- **Single Render instance (`infra/render/start.sh`):** the one worker embeds beat with
+  `worker --beat`. This is correct *only* because that deployment runs exactly one worker on one
+  instance, so one embedded scheduler needs no coordination. The instance is kept awake by the
+  `/health` keepalive (`.github/workflows/guardian-keepalive.yml`, every 10 min) so beat keeps firing.
+
+**Restart behaviour.** Beat persists its last-run state to a shelve at `GUARDIAN_BEAT_SCHEDULE_FILE`
+(default `/tmp/guardian-celerybeat-schedule`), pinned to a writable path because the project dir can
+be read-only. Every scheduled task is idempotent / cadence-tolerant, so a lost state file at worst
+re-fires one cheap sweep — it never duplicates destructive work. `beat_max_loop_interval=60` bounds
+how long a restart takes to pick the schedule back up.
+
+**Without a running beat**, all of the above silently never fires: stranded scans are never
+recovered, feeds go stale, webhook retries stop, and tenant schedules never fire — while every other
+service looks healthy. That failure was the sole P0 of the production audit; this section documents
+the fix.
+
+## 7. Verification
 
 ```bash
 # redis.conf boots and enables AOF + noeviction (native, throwaway dir/port):
@@ -79,4 +116,10 @@ redis-server infra/redis/redis.conf --dir /tmp/rtest --port 63799 --requirepass 
 redis-cli -p 63799 -a t CONFIG GET appendonly        # → yes
 redis-cli -p 63799 -a t CONFIG GET maxmemory-policy  # → noeviction
 redis-cli -p 63799 -a t shutdown nosave
+```
+
+```bash
+# The beat schedule is loadable, and every scheduled task is registered + routes to `default`
+# (i.e. usable, not merely defined). The full check is tests/test_celery_beat.py:
+python -m pytest tests/test_celery_beat.py -q
 ```

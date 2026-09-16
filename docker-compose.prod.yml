@@ -196,6 +196,26 @@ services:
       retries: 3
       start_period: 30s
 
+  # ── Periodic scheduler (Celery beat) ────────────────────────────────────────────────────────────
+  # The ONE scheduler. It only PUBLISHES the four periodic tasks (all routed to `default`); the
+  # standing worker-default executes them. It is a dedicated single service — NEVER `--beat` on
+  # worker-default, which is scalable, and N beats would fire every periodic job N times. Do not set
+  # `replicas` on this service. Without it: stranded-scan recovery, feed sync, webhook retries and
+  # scheduled scans never run. Control-plane env (it enqueues by task name and reads settings), but
+  # it opens no external socket and runs no engine.
+  beat:
+    image: *app-image
+    environment: *control-env
+    command: ["celery", "-A", "guardian_scanner.celery_app.celery_app", "beat", "--loglevel=info"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [backend]
+    restart: unless-stopped
+    # No Celery-ping healthcheck: beat is a producer, not a consumer, so it does not answer
+    # `inspect ping`. Liveness is the process: a crash restarts under `unless-stopped` and shows in
+    # the container state, rather than a green service hiding a dead scheduler.
+
   # ── Execution planes (DB-less, secret-minimal; joined ONLY to recon-cache) ──────────────────────
   worker-recon:
     image: *app-image

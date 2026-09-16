@@ -51,10 +51,14 @@
 - [ ] `... up -d api` (replicas start only after seed completed).
 - [ ] `... up -d ingress`.
 
-## 10. Worker deployment — docs 04 / 08
-- [ ] `... up -d worker-default worker-recon worker-tools`.
+## 10. Worker + scheduler deployment — docs 04 / 06 / 08
+- [ ] `... up -d worker-default worker-recon worker-tools beat`.
 - [ ] Confirm each worker consumes its queue (`default` / `recon` / `tools`) and holds only its
       allowed secrets (recon: none; tools: seal + public key).
+- [ ] Confirm **exactly one** `beat` scheduler is running (never scale it, never `--beat` on a
+      scalable worker) and that periodic tasks appear in the `worker-default` log within a few
+      minutes (`sweep-schedules`, `retry-webhook-deliveries`, `recover-stranded-scans`,
+      `sync-vulnerability-feeds`). See docs 06 §6.
 
 ## 11. Health / readiness verification — docs 08
 - [ ] `curl -fsS https://<host>/health` → ok; `.../health/ready` → database ok.

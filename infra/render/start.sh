@@ -36,8 +36,15 @@ log "seed"
 # Idempotent — it creates the bootstrap tenant and knowledge base only when they are absent.
 python -m guardian_api.seed
 
-log "worker"
-celery -A guardian_scanner.celery_app.celery_app worker \
+log "worker + beat"
+# `--beat` embeds the periodic scheduler in THIS one worker process. It is the correct form here and
+# only here: this deployment runs exactly one worker on one instance, so embedding beat yields
+# exactly one scheduler with no coordination needed. (The compose topology can scale workers, so it
+# runs beat as a separate single service instead — never `--beat` on a scalable worker, which would
+# fire every periodic job N times.) Without this, stranded-scan recovery, feed sync, webhook retries
+# and scheduled scans never run. The instance is kept awake by the /health keepalive
+# (.github/workflows/guardian-keepalive.yml, every 10m); beat fires while the instance is awake.
+celery -A guardian_scanner.celery_app.celery_app worker --beat \
   --queues default --concurrency 1 --loglevel INFO &
 WORKER_PID=$!
 

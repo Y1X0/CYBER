@@ -21,6 +21,7 @@ Source: `services/api/src/guardian_api/routes/health.py:14-22`, mounted at the r
 | `worker-default` | `unless-stopped` | `celery inspect ping` | 120 s |
 | `worker-recon` | `unless-stopped` | `celery inspect ping` | 120 s |
 | `worker-tools` | `unless-stopped` | `celery inspect ping` | 120 s |
+| `beat` | `unless-stopped` | — (producer; see below) | 30 s |
 | `db` / `redis` | `unless-stopped` | `pg_isready` / `redis-cli ping` | — |
 | `migrate` / `seed` | `no` (one-shot; must exit 0) | — | — |
 
@@ -31,7 +32,7 @@ replica is pulled from rotation without being killed.
 ## 3. Startup ordering & failure behaviour
 
 ```
-db healthy ──▶ migrate (exit 0) ──▶ seed (exit 0) ──▶ api ×N + worker-default
+db healthy ──▶ migrate (exit 0) ──▶ seed (exit 0) ──▶ api ×N + worker-default + beat
                      │ nonzero            │ nonzero
                      ▼                     ▼
               deploy fails-closed:  api never starts (gates on service_completed_successfully)
@@ -45,6 +46,13 @@ db healthy ──▶ migrate (exit 0) ──▶ seed (exit 0) ──▶ api ×N 
 - **Worker health:** `celery inspect ping` over the broker confirms the worker is consuming; a lost
   worker is safe because `task_acks_late` + `task_reject_on_worker_lost` redeliver its in-flight task
   (idempotent). `stop_grace_period` allows a warm drain; a hard stop is still safe.
+- **Scheduler (`beat`) health:** beat is a *producer*, not a queue consumer, so `celery inspect ping`
+  does not apply. It restarts `unless-stopped`; on restart it reads its persisted schedule file
+  (`GUARDIAN_BEAT_SCHEDULE_FILE`) and resumes — a lost file at worst re-fires one cheap idempotent
+  sweep. Exactly one beat runs (a dedicated single service in compose; embedded as `worker --beat`
+  on the single Render instance), because N schedulers would fire every periodic job N times. See
+  docs 06 §6. Confirm liveness from what it publishes: the periodic tasks appear in the worker log
+  and stranded-scan recovery / feed sync advance.
 
 ## 4. Kubernetes probe mapping
 

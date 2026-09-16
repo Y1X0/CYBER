@@ -154,4 +154,11 @@ celery_app.conf.update(
     # Beat's own bookkeeping. Without a persistent schedule file a restarted beat re-fires
     # everything it thinks it missed.
     beat_max_loop_interval=60,
+    # Where beat persists its last-run state (PersistentScheduler's shelve). Pinned to a writable
+    # path so it works both embedded in the single Render worker (whose project dir may be
+    # read-only) and in the dedicated compose `beat` service, and overridable per environment.
+    # The scheduled tasks are all idempotent/cadence-tolerant, so a lost state file at worst
+    # re-fires a cheap sweep once — never duplicates destructive work.
+    beat_schedule_filename=os.environ.get(
+        "GUARDIAN_BEAT_SCHEDULE_FILE", "/tmp/guardian-celerybeat-schedule"),  # noqa: S108
 )
