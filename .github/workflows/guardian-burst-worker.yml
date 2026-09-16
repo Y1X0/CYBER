@@ -76,7 +76,19 @@ jobs:
 
       # Pinned by digest, not by tag: this is the exact artifact step 8 of run 32039299600 executed
       # each tool inside. A floating tag would let the thing that runs in production drift away from
-      # the thing that was verified.
+      # the thing that was verified. (Immutability is enforced by tests/test_scanner_image_supply_chain.py.)
+      #
+      # SECURITY STALENESS — repin owed. This digest was built at `a959396` (17 Aug 2026), which
+      # PREDATES the scanner security hardening on this branch: the secure artifact-upload path
+      # (f65c09f — AUD-P1-5 zip-bomb bounds, AUD-P1-6 tenant/asset-scoped artifact resolution that
+      # stops the engine reading a config-supplied filesystem path, AUD-P1-7), the mobile/iOS engines,
+      # and `celery_redis_url` (0317a86 — see the broker-URL step below). So a scan this burst worker
+      # executes runs OLDER engine code. The fix is a rebuild + repin, NOT a code edit here:
+      #   1. Run guardian-deploy-worker.yml (mode: plan) to build ghcr.io/y1x0/cyber-scanner from
+      #      current HEAD and read the new immutable @sha256 digest it prints.
+      #   2. Replace the digest below with that verified digest.
+      #   3. Delete the "Normalise the broker URL" step — a current image normalises it in-process.
+      # This requires GHCR push credentials + running in CI; it is a release-pipeline action.
       - name: Pull the verified scanner image
         id: image
         run: |
