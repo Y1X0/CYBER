@@ -15,8 +15,11 @@ from __future__ import annotations
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from guardian_core.enums import NodeType
 from guardian_db.graph_read import DbGraphProjector
+from guardian_db.models import GraphNode
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from guardian_api.deps import Identity, get_current_identity, get_db
@@ -36,6 +39,58 @@ def _staff(identity: Identity = Depends(get_current_identity)) -> Identity:
     if not identity.is_staff:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "graph analysis requires a staff role")
     return identity
+
+
+class ServiceOut(BaseModel):
+    id: str
+    host: str
+    port: int | None
+    service: str | None
+    product: str | None
+    sensitive: str | None  # e.g. "admin interface", "database" for a SENSITIVE_PORTS hit
+    exposure_score: int
+    state: str             # active | shadow | inactive — shadow = discovered but never declared
+    last_seen_at: str | None
+
+
+class ServicesOut(BaseModel):
+    services: list[ServiceOut]
+    count: int
+
+
+@router.get("/services", response_model=ServicesOut)
+def get_services(
+    identity: Identity = Depends(_staff),
+    db: Session = Depends(get_db),
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> ServicesOut:
+    """The exposed services (open ports) discovery has observed, worst exposure first.
+
+    A service node is an open, internet-reachable port; a port that is closed or filtered is not a
+    node, so this is the honest 'what is open' view. `state = shadow` marks a live service the
+    customer never declared — the highest-value exposure signal.
+    """
+    rows = db.execute(
+        select(GraphNode)
+        .where(GraphNode.tenant_id == identity.tenant_id,
+               GraphNode.node_type == NodeType.SERVICE.value)
+        .order_by(GraphNode.exposure_score.desc(), GraphNode.last_seen_at.desc().nullslast())
+        .limit(limit)
+    ).scalars().all()
+    services: list[ServiceOut] = []
+    for n in rows:
+        m = n.metadata_ or {}
+        host = n.canonical_key.rsplit(":", 1)[0] if ":" in n.canonical_key else n.canonical_key
+        port = m.get("port")
+        services.append(ServiceOut(
+            id=str(n.id), host=host,
+            port=int(port) if isinstance(port, int) else None,
+            service=m.get("service"), product=m.get("product"),
+            sensitive=m.get("sensitive_service"),
+            exposure_score=n.exposure_score, state=n.state,
+            last_seen_at=n.last_seen_at.isoformat() if n.last_seen_at else None,
+        ))
+    return ServicesOut(services=services, count=len(services))
 
 
 @router.get("/exposure-paths", response_model=ExposurePathsOut)

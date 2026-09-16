@@ -172,6 +172,23 @@ export interface FindingDossier {
   }[];
 }
 
+export interface Service {
+  id: string;
+  host: string;
+  port: number | null;
+  service: string | null;
+  product: string | null;
+  sensitive: string | null;
+  exposure_score: number;
+  state: string;
+  last_seen_at: string | null;
+}
+
+export interface ServicesResp {
+  services: Service[];
+  count: number;
+}
+
 export interface ProofOfVulnerability {
   finding_id: string;
   created_at: string | null;
@@ -492,6 +509,7 @@ export const api = {
   // ── analysis ──────────────────────────────────────────────────────────────────────────────────
   attackChains: (maxLength = 4) =>
     req<AttackChains>(`/graph/attack-chains?max_length=${maxLength}`),
+  services: () => req<ServicesResp>("/graph/services"),
   compliance: (framework?: string) =>
     req<Compliance>(`/compliance${framework ? `?framework=${framework}` : ""}`),
   dashboard: (customerId?: string) =>

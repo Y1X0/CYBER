@@ -12,6 +12,7 @@ export function DiscoveryScreen() {
   const runs = useAsync(() => api.discoveryRuns(), []);
   const customers = useAsync(() => api.customers(), []);
   const queue = useAsync(() => api.queueHealth(), []);
+  const services = useAsync(() => api.services(), []);
   const [domains, setDomains] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -79,6 +80,50 @@ export function DiscoveryScreen() {
                         ? JSON.stringify(r.stats)
                         : (r.status === "queued" ? "not started" : "—")}
                     </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </Async>
+      </Card>
+
+      <Card title="Exposed services (open ports)">
+        <p className="muted">
+          Open, internet-reachable ports discovery has observed, worst exposure first. A port that
+          is closed or filtered is not listed — this is the honest "what is open" view. A{" "}
+          <StatusPill tone="bad">shadow</StatusPill> service is live but was never declared: the
+          highest-value exposure to look at first.
+        </p>
+        <Async
+          loader={services}
+          empty={<EmptyState title="No exposed services recorded"
+                             body="Active service discovery has not run, or nothing was found open."
+          />}
+        >
+          {(data) => data.services.length === 0 ? (
+            <p className="muted">No open services have been observed.</p>
+          ) : (
+            <table>
+              <thead><tr><th>Host</th><th>Port</th><th>Service</th><th>Exposure</th>
+                  <th>State</th><th>Last seen</th></tr></thead>
+              <tbody>
+                {data.services.map((s) => (
+                  <tr key={s.id}>
+                    <td className="mono">{s.host}</td>
+                    <td className="mono">{s.port ?? "—"}</td>
+                    <td>
+                      {[s.product, s.service].filter(Boolean).join(" · ") || "—"}
+                      {s.sensitive && <> <StatusPill tone="bad">{s.sensitive}</StatusPill></>}
+                    </td>
+                    <td>
+                      <StatusPill tone={s.exposure_score >= 70 ? "bad"
+                        : s.exposure_score >= 40 ? "warn" : "ok"}>{s.exposure_score}</StatusPill>
+                    </td>
+                    <td>{s.state === "shadow"
+                      ? <StatusPill tone="bad">shadow</StatusPill>
+                      : <span className="muted">{s.state}</span>}</td>
+                    <td className="muted">{when(s.last_seen_at)}</td>
                   </tr>
                 ))}
               </tbody>
