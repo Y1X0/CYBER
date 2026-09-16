@@ -102,10 +102,18 @@ services:
       #
       # To get per-client granularity, set this to the NUMBER OF TRUSTED PROXY HOPS that append to
       # X-Forwarded-For between the real client and this service (see deps.client_ip). That number
-      # MUST be verified against what Render actually sends — inspect a real request's
-      # X-Forwarded-For on this deployment — NOT guessed: setting it too high lets a client PREPEND
-      # X-Forwarded-For entries and forge its source IP (defeating the rate limit). Leave it unset
-      # (0) until the hop count is confirmed; a coarse-but-unspoofable limit is the safe default.
+      # MUST be verified against what Render actually sends — NOT guessed: setting it too high lets a
+      # client PREPEND X-Forwarded-For entries and forge its source IP (defeating the rate limit).
+      # Confirm the hop count with the OWNER-only diagnostic GET /api/v1/auth/proxy-diagnostic, which
+      # reports only the X-Forwarded-For hop COUNT and the socket peer (never client IP values), then
+      # set GUARDIAN_TRUSTED_PROXY_COUNT to that count.
+      #
+      # LOGIN-LOCKOUT SAFETY while this stays at 0: the login endpoint detects the shared-proxy case
+      # (production + trusted_proxy_count == 0) and does NOT hard-block on the per-IP bucket — which
+      # would let one attacker lock out every user through the shared proxy IP. It relies instead on
+      # the per-ACCOUNT limit plus a process-wide breaker (GUARDIAN_GLOBAL_LOGIN_BREAKER_PER_MINUTE,
+      # default 300) that bounds total Argon2 CPU-exhaustion and logs `login_global_breaker_tripped`.
+      # Once GUARDIAN_TRUSTED_PROXY_COUNT is set correctly, the precise per-client IP limit resumes.
 
 databases:
   - name: guardian-db

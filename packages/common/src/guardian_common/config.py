@@ -146,6 +146,16 @@ class Settings(BaseSettings):
     # gateway concern (this in-app limiter is per-process). 0 disables the limiter.
     auth_rate_limit_per_minute: int = 10
 
+    # Process-wide login circuit breaker (P1-γ, shared-proxy safe). Behind a proxy that terminates
+    # every connection (Render free tier, GUARDIAN_TRUSTED_PROXY_COUNT=0), the per-source-IP login
+    # limit would see one shared proxy IP for everyone, so a single attacker's failed logins would
+    # lock out ALL users. In that configuration the per-IP hard block is skipped in favour of the
+    # per-account limit plus THIS global breaker: once total login attempts in the 60s window cross
+    # this ceiling the process refuses further attempts (a high-flood backstop against Argon2
+    # CPU-exhaustion) and logs an alert. Sized well above any legitimate aggregate login rate. 0
+    # disables the breaker.
+    global_login_breaker_per_minute: int = 300
+
     # Trusted reverse-proxy hop count (P1-①). X-Forwarded-For is client-spoofable, so by default (0)
     # the client IP used for audit + rate limiting is the SOCKET PEER and XFF is ignored entirely.
     # When the app runs behind N trusted proxies that append XFF, set this to N: the real client is

@@ -280,6 +280,13 @@ def require_staff_write(identity: Identity = Depends(get_current_identity)) -> I
     return identity
 
 
+def require_owner(identity: Identity = Depends(get_current_identity)) -> Identity:
+    """OWNER-only. Used for tenant-level operational diagnostics that no lesser role should see."""
+    if identity.is_machine or identity.staff_role != StaffRole.OWNER.value:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "this action requires the owner role")
+    return identity
+
+
 def require_scope(scope: str):  # noqa: ANN201 - FastAPI dependency factory
     """Require a scope for API-key callers; humans are governed by their role as before.
 

@@ -21,7 +21,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from guardian_api.deps import Identity, client_ip, get_current_identity, get_db
+from guardian_api.deps import Identity, client_ip, get_current_identity, get_db, require_owner
 from guardian_api.ratelimit import login_limiter
 from guardian_api.schemas import LoginRequest, MeResponse, TokenResponse
 
@@ -171,18 +171,40 @@ def login(
     # Rate limit BEFORE the Argon2 verify (P1-γ): bounds guessing + CPU-exhaustion from one source.
     # Keyed by IP and by account; the 429 is identical whether or not the account exists (no
     # user-enumeration signal). Counting every attempt is fine — interactive logins stay well under.
+    settings = get_settings()
     limiter = login_limiter()
     email = body.email.lower()
-    # Check the IP bucket FIRST and stop there if it is already blocked. Recording the account
-    # bucket afterwards (as this used to) let one blocked IP create an arbitrary account-key per
-    # attempt — churning distinct emails to grow the limiter's key set and (before the eviction
-    # fix) trigger a global reset. A refused request must not mutate any further limiter state.
-    ok_ip, retry_ip = limiter.hit(f"ip:{ip or 'unknown'}")
-    if not ok_ip:
-        raise HTTPException(
-            status.HTTP_429_TOO_MANY_REQUESTS, "too many login attempts",
-            headers={"Retry-After": str(int(retry_ip) + 1)},
-        )
+
+    # When the app sits behind a proxy that terminates every connection but the trusted-hop count is
+    # not configured (Render free tier: trusted_proxy_count == 0 ⇒ client_ip is the socket peer =
+    # the shared proxy IP for EVERYONE), a per-IP hard block would let one attacker's failed logins
+    # lock out all users. In that case skip the per-IP block and rely on the per-account limit plus
+    # a process-wide breaker that bounds total Argon2 CPU-exhaustion and alerts. Off that path (a
+    # real client IP, or a configured hop count) the precise per-IP block stays.
+    shared_proxy_ip = settings.is_production and settings.trusted_proxy_count == 0
+    if shared_proxy_ip:
+        ok_global, retry_g = limiter.hit("global:login",
+                                         max_hits=settings.global_login_breaker_per_minute)
+        if not ok_global:
+            # No IPs logged — this is a process-wide flood signal, not a per-client event.
+            log.warning("login_global_breaker_tripped",
+                        limit_per_minute=settings.global_login_breaker_per_minute)
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS, "too many login attempts",
+                headers={"Retry-After": str(int(retry_g) + 1)},
+            )
+    else:
+        # Check the IP bucket FIRST and stop there if it is already blocked. Recording the account
+        # bucket afterwards (as this used to) let one blocked IP create an arbitrary account-key per
+        # attempt — churning distinct emails to grow the limiter's key set and (before the eviction
+        # fix) trigger a global reset. A refused request must not mutate any further limiter state.
+        ok_ip, retry_ip = limiter.hit(f"ip:{ip or 'unknown'}")
+        if not ok_ip:
+            raise HTTPException(
+                status.HTTP_429_TOO_MANY_REQUESTS, "too many login attempts",
+                headers={"Retry-After": str(int(retry_ip) + 1)},
+            )
+
     ok_acct, retry_acct = limiter.hit(f"acct:{email}")
     if not ok_acct:
         raise HTTPException(
@@ -202,7 +224,6 @@ def login(
     if user.status != "active":
         raise HTTPException(status.HTTP_403_FORBIDDEN, "account disabled")
 
-    settings = get_settings()
     token = create_access_token(
         subject=str(user.id),
         secret=settings.jwt_secret,
@@ -214,6 +235,39 @@ def login(
     )
     db.commit()
     return TokenResponse(access_token=token, expires_in=settings.access_token_ttl_minutes * 60)
+
+
+class ProxyDiagnostic(BaseModel):
+    """What an owner needs to confirm GUARDIAN_TRUSTED_PROXY_COUNT — and nothing that identifies a
+    client. `xff_entry_count` is how many hops arrived in X-Forwarded-For; the correct trusted count
+    is the number of proxies YOUR platform prepends (typically that count). `socket_peer` is the
+    direct TCP peer (your load balancer), included so the topology is unambiguous."""
+
+    xff_entry_count: int
+    socket_peer: str | None
+    trusted_proxy_count_configured: int
+    resolved_client_ip_source: str
+
+
+@router.get("/proxy-diagnostic", response_model=ProxyDiagnostic)
+def proxy_diagnostic(
+    request: Request,
+    identity: Identity = Depends(require_owner),
+) -> ProxyDiagnostic:
+    """OWNER-only. Report ONLY the X-Forwarded-For hop COUNT and the socket peer so the
+    trusted-proxy count can be confirmed against the live edge. The XFF entry VALUES (client IPs)
+    are never returned or logged — only their count."""
+    settings = get_settings()
+    xff = request.headers.get("x-forwarded-for", "")
+    count = len([p for p in xff.split(",") if p.strip()])
+    n = settings.trusted_proxy_count
+    source = "socket_peer (XFF ignored)" if n <= 0 else f"XFF[-{n + 1}] (trusted_proxy_count={n})"
+    return ProxyDiagnostic(
+        xff_entry_count=count,
+        socket_peer=request.client.host if request.client else None,
+        trusted_proxy_count_configured=n,
+        resolved_client_ip_source=source,
+    )
 
 
 @router.get("/me", response_model=MeResponse)
