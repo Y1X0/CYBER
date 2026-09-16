@@ -60,6 +60,10 @@ class EngineKey(str, Enum):
     # Mobile app static analysis: Android APK manifest/permissions/exported-components/cleartext/
     # secrets/crypto (Phase 1, offline — no emulator; dynamic analysis is a documented host need).
     MOBILE = "mobile"
+    # iOS app static analysis: Info.plist (ATS, URL schemes, privacy usage), provisioning-profile
+    # entitlements (get-task-allow), and Mach-O/bundle secrets/indicators (offline — no device,
+    # no macOS/Xcode; FairPlay-encrypted store binaries limit string analysis, documented).
+    IOS = "ios"
     # Authorized host/network posture assessed from an allowlisted local-agent submission (no
     # cloud-to-LAN scanning): home-network device/service posture and Linux server hardening.
     HOST_POSTURE = "host_posture"
@@ -86,6 +90,8 @@ class AssetKind(str, Enum):
     CLOUD_RESOURCE = "cloud_resource"
     # An uploaded mobile app package (Android .apk) analysed statically (Phase 1).
     MOBILE_APP = "mobile_app"
+    # An uploaded iOS app package (.ipa) analysed statically — Info.plist/entitlements/Mach-O.
+    IOS_APP = "ios_app"
     # A device/host assessed via an authorized local agent's allowlisted posture submission
     # (home-network device or Linux server) — never scanned directly from the cloud (Phase 2/3).
     NETWORK_HOST = "network_host"

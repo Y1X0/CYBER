@@ -13,6 +13,8 @@ const KINDS = [
   { value: "host", label: "Host", hint: "A hostname or address" },
   { value: "mobile_app", label: "Mobile app (Android)",
     hint: "Upload an Android .apk — analysed statically (no emulator)" },
+  { value: "ios_app", label: "Mobile app (iOS)",
+    hint: "Upload an iOS .ipa — analysed statically (Info.plist, entitlements, binary)" },
   { value: "network_host", label: "Home network / Router",
     hint: "Run the local agent and submit its posture report (see docs/LOCAL_AGENT.md)" },
   { value: "server_host", label: "Server (Linux)",
@@ -33,6 +35,7 @@ const ENGINES = [
   { key: "dast", label: "Dynamic web testing", network: true },
   { key: "api", label: "API testing", network: true },
   { key: "mobile", label: "Mobile app (APK)", network: false },
+  { key: "ios", label: "Mobile app (iOS IPA)", network: false },
   { key: "host_posture", label: "Host / network posture (agent)", network: false },
 ];
 

@@ -22,7 +22,8 @@ Status legend:
 |---|---|---|---|---|---|
 | 1 | Website | `web` | `dast`, `web_checks`, `web_tls` | IMPLEMENTED (passive) + REQUIRES NETWORK AUTHORIZATION (active DAST) | Headers, cookies, CORS, CSP/HSTS, TLS/cert, sensitive-file exposure, nuclei-format template library (30 templates incl. new `security-txt-missing`). |
 | 2 | API | `api` | `api`, `web_checks` | IMPLEMENTED + REQUIRES NETWORK AUTHORIZATION (active) | OpenAPI ingestion, BOLA/BFLA authorization checks, auth/transport hygiene. |
-| 3 | Mobile app (Android) | `mobile_app` | `mobile` | **STATIC ONLY** | APK unzip + binary-AXML manifest decode + DEX string scan. Debuggable, allowBackup, cleartext, exported components, dangerous perms, hardcoded secrets, WebView/TLS-trust/crypto indicators. No emulator, no dynamic instrumentation, no iOS — documented in docs/MOBILE_SCANNER.md. |
+| 3 | Mobile app (Android) | `mobile_app` | `mobile` | **STATIC ONLY** | APK unzip + binary-AXML manifest decode + DEX string scan. Debuggable, allowBackup, cleartext, exported components, dangerous perms, hardcoded secrets, WebView/TLS-trust/crypto indicators. No emulator, no dynamic instrumentation — documented in docs/MOBILE_SCANNER.md. |
+| 3b | Mobile app (iOS) | `ios_app` | `ios` | **STATIC ONLY** | IPA unzip + Info.plist (binary/XML via stdlib plistlib) + provisioning-profile entitlements + Mach-O string scan. ATS weakening, get-task-allow (debuggable), URL schemes, file sharing, privacy usage, hardcoded secrets, deprecated/weak-crypto/TLS-trust indicators; FairPlay encryption detected and reported. No device, no macOS/Xcode, no dynamic — documented in docs/MOBILE_SCANNER.md. |
 | 4 | Router / Home network | `network_host` | `host_posture` | **REQUIRES LOCAL AGENT** | Cleartext HTTP mgmt, WAN-exposed mgmt (CRITICAL), UPnP, telnet/ftp on LAN hosts. Assessed from an authorized agent report; never cloud-to-LAN scanning. |
 | 5 | Server (Linux) | `server_host` | `host_posture` | **REQUIRES LOCAL AGENT** | SSH root/password/protocol-1, host firewall, EOL OS, insecure services, passwordless sudo, exposed Docker daemon (CRITICAL), privileged containers. Package→CVE reuse of SCA when an inventory is submitted. |
 | 6 | Cloud (CSPM) | `cloud` | `cspm` | IMPLEMENTED | Assessed from a collector export (no standing cloud creds in the platform). |
@@ -37,7 +38,8 @@ Status legend:
 | `ml_model` | earlier this session | automated | detector-only (health degrades when ModelScan absent → INCONCLUSIVE, never resolves) | no | no |
 | `cicd` | earlier this session | automated | deterministic | no | no |
 | `ai_discovery` | earlier this session | **ai_assisted** | non-deterministic → always `degraded` (empty ⇒ INCONCLUSIVE); every finding verified against source, unverified capped to low confidence | no (LLM call only) | no |
-| `mobile` | **this task (Phase 1)** | automated | deterministic, static | no | no |
+| `mobile` | earlier this session (Phase 1) | automated | deterministic, static | no | no |
+| `ios` | **this task** | automated | deterministic, static | no | no |
 | `host_posture` | **this task (Phase 2/3)** | automated | deterministic | no (assesses a submitted report) | **refuses a report that does not assert `authorized: true`** |
 
 ## Security model — what Guardian will NOT do (NOT SUPPORTED, by design)

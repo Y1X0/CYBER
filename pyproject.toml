@@ -70,6 +70,7 @@ ml_model = "guardian_scanner.engines.ml_model_engine:MlModelEngine"
 cicd = "guardian_scanner.engines.cicd_engine:CicdEngine"
 ai_discovery = "guardian_scanner.engines.ai_discovery_engine:AiDiscoveryEngine"
 mobile = "guardian_scanner.engines.mobile_engine:MobileEngine"
+ios = "guardian_scanner.engines.ios_engine:IosEngine"
 host_posture = "guardian_scanner.engines.host_posture_engine:HostPostureEngine"
 
 # EASM discovery collectors (Phase 6) — same plugin pattern as scanners. Passive providers first.

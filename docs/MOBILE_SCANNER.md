@@ -1,8 +1,8 @@
-# Mobile app scanner (Android APK)
+# Mobile app scanner (Android APK + iOS IPA)
 
-**Status: STATIC ONLY — production-quality static analysis of Android `.apk`. Dynamic Android
-instrumentation is NOT implemented (documented deployment requirement). iOS `.ipa` is NOT SUPPORTED
-in this phase.**
+**Status: STATIC ONLY — production-quality static analysis of Android `.apk` (`mobile` engine) and
+iOS `.ipa` (`ios` engine). Dynamic instrumentation (Android or iOS) is NOT implemented (documented
+deployment requirement).**
 
 ## What it does
 
@@ -27,6 +27,30 @@ binary XML manifest — required because a real APK never ships a text manifest.
 (used by some tooling and by tests) is also accepted. Code-level items are labelled **indicators**:
 the symbol is present in the package; a reviewer confirms the call site.
 
+## iOS `.ipa` (the `ios` engine)
+
+`IosEngine` (`guardian.scanner_plugins` → `ios`, `EngineKey.IOS`) analyses an uploaded iOS `.ipa`
+entirely offline through the **same** canonical pipeline. An `.ipa` is a zip whose
+`Payload/<App>.app/` holds `Info.plist`, the Mach-O executable, and `embedded.mobileprovision`.
+Unlike Android's binary XML, no custom decoder is needed: stdlib **`plistlib` reads both binary
+(`bplist00`) and XML plists** (`guardian_scanner/mobile/ipa.py`).
+
+| Area | Checks | Detection |
+|---|---|---|
+| App Transport Security | global `NSAllowsArbitraryLoads` (CWE-319), per-domain insecure-HTTP exceptions, weak `NSExceptionMinimumTLSVersion` (CWE-326), web-content/media exceptions | Info.plist |
+| Build config | development-signed / debuggable `get-task-allow` (CWE-489), wildcard App ID (CWE-284), development APS environment | `embedded.mobileprovision` entitlements |
+| Attack surface | custom URL schemes as an unauthenticated entry point (CWE-939), iTunes file sharing exposing Documents (CWE-200) | Info.plist |
+| Privacy | `NS*UsageDescription` sensitive-data inventory (CWE-359) | Info.plist |
+| Secrets | hardcoded keys/tokens/private keys — **reuses the platform's secret patterns + redaction** (CWE-798) | Mach-O + bundle string scan |
+| Weak APIs | deprecated `UIWebView` (CWE-477), TLS-trust-all (`allowsAnyHTTPSCertificate`, CWE-295), DES/3DES/MD5/SHA-1 (CWE-327/328) | Mach-O string indicators |
+| Cleartext | `http://` endpoints referenced (CWE-319) | Mach-O + bundle string scan |
+
+The provisioning profile is a signed CMS blob, but the entitlements plist sits in the clear inside
+it; the reader extracts the `<plist>…</plist>` span (no signature verification — posture is read,
+not trusted). A light Mach-O load-command scan reports **FairPlay encryption** (`cryptid`): an
+App-Store binary is encrypted and yields no readable strings, so the engine says so in an `info`
+finding rather than falsely reporting "no secrets".
+
 ## Security model
 
 - Static only: the APK is never executed. Zip reads are bounded (`_MAX_SECRET_BYTES`,
@@ -37,11 +61,18 @@ the symbol is present in the package; a reviewer confirms the call site.
 
 ## How to run it
 
+**Android:**
 1. Create an asset of kind `mobile_app` (`AssetKind.MOBILE_APP`).
 2. Make the APK available to the worker: set the asset config `local_path` / `apk_path` to the
    uploaded `.apk`, or place the file in the scan workspace. (The engine also accepts a workspace
    directory and picks the first `*.apk`.)
 3. Create a scan requesting `engines: ["mobile"]`.
+
+**iOS:**
+1. Create an asset of kind `ios_app` (`AssetKind.IOS_APP`).
+2. Make the IPA available: set the asset config `local_path` / `ipa_path` to the uploaded `.ipa`,
+   or place it in the scan workspace (the engine picks the first `*.ipa`).
+3. Create a scan requesting `engines: ["ios"]`.
 
 ## Known limitations / deployment requirements
 
@@ -52,8 +83,13 @@ the symbol is present in the package; a reviewer confirms the call site.
 - **APK upload plumbing** (multipart upload → object storage → asset config `local_path`) is the one
   integration a production deployment must provide so the worker can read the file; the engine and
   orchestration are complete.
-- **iOS `.ipa`: NOT SUPPORTED** this phase.
-- **DEX bytecode dataflow** is not performed — code-level items are high-signal *string indicators*,
-  deliberately labelled as such rather than presented as confirmed call-site findings.
+- **iOS dynamic analysis: NOT IMPLEMENTED** — it needs a device/jailbroken host and macOS tooling
+  the cloud does not have. iOS static analysis of `.ipa` **is** implemented (above).
+- **FairPlay-encrypted App-Store binaries (iOS):** their `__TEXT` is encrypted, so string analysis
+  of the main binary is limited — the engine detects this and says so; Info.plist and entitlement
+  checks are unaffected. Submit a decrypted build for full binary analysis.
+- **DEX bytecode dataflow (Android)** / **Mach-O symbol dataflow (iOS)** is not performed —
+  code-level items are high-signal *string indicators*, deliberately labelled as such rather than
+  presented as confirmed call-site findings.
 - `resources.arsc` reference resolution is not performed; a `@ref` attribute is detected as present
   (enough for "a network security config is declared") but not resolved to its value.
