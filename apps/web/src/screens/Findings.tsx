@@ -87,7 +87,8 @@ export function FindingsScreen() {
                       <tr key={f.id}>
                         <td><SeverityBadge severity={f.severity} /></td>
                         <td>{f.risk_score}</td>
-                        <td>{f.title}</td>
+                        <td>{f.title}{f.source === "ai_assisted"
+                          && <> <ProvenanceBadge source={f.source} /></>}</td>
                         <td>{f.status}</td>
                         <td className="muted">
                           {[f.cwe_id, f.owasp_ref].filter(Boolean).join(" · ") || "—"}
@@ -135,10 +136,17 @@ export function FindingDetailScreen({ id }: { id: string }) {
                   : "—"}
               </dd>
               <dt>Found by</dt>
-              <dd>{d.engine ?? "—"}{d.scan.id && <> in scan{" "}
-                <button className="link" onClick={() => navigate(`scans/${d.scan.id}`)}>
-                  {String(d.scan.id).slice(0, 8)}
-                </button></>}</dd>
+              <dd>
+                {d.engine ?? "—"} <ProvenanceBadge source={d.finding.source} />
+                {d.finding.confidence
+                  && <span className="muted"> · {d.finding.confidence} confidence</span>}
+                {d.finding.evidence?.location_verified === true
+                  && <> <StatusPill tone="ok">location verified ✔</StatusPill></>}
+                {d.scan.id && <> in scan{" "}
+                  <button className="link" onClick={() => navigate(`scans/${d.scan.id}`)}>
+                    {String(d.scan.id).slice(0, 8)}
+                  </button></>}
+              </dd>
               <dt>Standards</dt>
               <dd>{[d.finding.cwe_id, d.finding.owasp_ref].filter(Boolean).join(" · ") || "—"}</dd>
             </dl>
@@ -255,6 +263,14 @@ export function FindingDetailScreen({ id }: { id: string }) {
       )}
     </Async>
   );
+}
+
+function ProvenanceBadge({ source }: { source?: string }) {
+  if (source === "ai_assisted")
+    return <StatusPill tone="warn">AI-discovered</StatusPill>;
+  if (source === "manual")
+    return <StatusPill tone="ok">analyst</StatusPill>;
+  return <StatusPill tone="ok">automated</StatusPill>;
 }
 
 function ProofCard({ id }: { id: string }) {

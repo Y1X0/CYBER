@@ -137,6 +137,8 @@ export interface Finding {
   risk_score: number;
   status: string;
   category?: string;
+  confidence?: string;
+  source?: string;
   cwe_id: string | null;
   owasp_ref: string | null;
   evidence: Record<string, unknown>;
