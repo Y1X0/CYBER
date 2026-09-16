@@ -10,6 +10,7 @@ from guardian_common.config import Settings, get_settings
 from guardian_common.logging import configure_logging, get_logger
 from sqlalchemy import text
 
+from guardian_api.bodylimit import RequestBodySizeLimitMiddleware
 from guardian_api.observability import MetricsMiddleware
 from guardian_api.routes import api_router
 
@@ -73,6 +74,11 @@ def create_app() -> FastAPI:
     # Added after CORS so it wraps every request including the preflight ones, and records the
     # failures: a request that raises is exactly the one worth graphing.
     app.add_middleware(MetricsMiddleware)
+
+    # Outermost (added last): reject an oversized request body at the ASGI layer, before Starlette
+    # parses/spools multipart to temp disk. This is the real protection for the artifact upload —
+    # the endpoint's Content-Length dependency and read cap run only after parsing (Issue 3).
+    app.add_middleware(RequestBodySizeLimitMiddleware)
 
     app.include_router(api_router)
 

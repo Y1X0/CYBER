@@ -93,6 +93,20 @@ services:
       - key: GUARDIAN_SANDBOX_ENGINES
         value: "true"
 
+      # ── client IP / rate-limit granularity ───────────────────────────────────────────────────
+      # GUARDIAN_TRUSTED_PROXY_COUNT is intentionally NOT set here, so it stays at the fail-safe
+      # default 0: the app then keys audit + login rate limiting on the SOCKET PEER and ignores
+      # X-Forwarded-For entirely, which cannot be spoofed. Behind Render's edge the socket peer is
+      # Render's proxy, so at 0 every user shares one login-rate-limit bucket — safe against a
+      # brute-force *bypass* (it only makes the limit coarser), but poor per-user granularity.
+      #
+      # To get per-client granularity, set this to the NUMBER OF TRUSTED PROXY HOPS that append to
+      # X-Forwarded-For between the real client and this service (see deps.client_ip). That number
+      # MUST be verified against what Render actually sends — inspect a real request's
+      # X-Forwarded-For on this deployment — NOT guessed: setting it too high lets a client PREPEND
+      # X-Forwarded-For entries and forge its source IP (defeating the rate limit). Leave it unset
+      # (0) until the hop count is confirmed; a coarse-but-unspoofable limit is the safe default.
+
 databases:
   - name: guardian-db
     plan: free

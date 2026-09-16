@@ -72,3 +72,33 @@ def test_short_header_falls_back_to_peer(monkeypatch):
 def test_no_client_and_no_header(monkeypatch):
     _with_count(monkeypatch, 0)
     assert deps.client_ip(_req(None)) is None
+
+
+# ── Issue 2: granularity vs global bucket, and no spoof bypass through a configured chain ─────────
+def test_default_zero_puts_all_clients_in_one_bucket(monkeypatch):
+    # With count=0 behind a proxy, the socket peer is the proxy for every request, so distinct real
+    # clients collapse to ONE rate-limit key. This is safe against spoofing (unspoofable) but coarse
+    # — it documents exactly the global-bucket behaviour that a correct proxy count fixes.
+    _with_count(monkeypatch, 0)
+    proxy_peer = "10.0.0.1"
+    a = deps.client_ip(_req(proxy_peer, xff="203.0.113.5, 198.51.100.9"))
+    b = deps.client_ip(_req(proxy_peer, xff="203.0.113.99, 198.51.100.9"))
+    assert a == b == proxy_peer                         # one shared bucket
+
+
+def test_configured_count_gives_distinct_clients_distinct_buckets(monkeypatch):
+    # With the hop count set correctly (here 1), two different real clients behind the same proxy
+    # resolve to DIFFERENT keys — rate limiting is per-client, not accidentally global.
+    _with_count(monkeypatch, 1)
+    a = deps.client_ip(_req("10.0.0.1", xff="203.0.113.5, 198.51.100.9"))
+    b = deps.client_ip(_req("10.0.0.1", xff="203.0.113.99, 198.51.100.9"))
+    assert a == "203.0.113.5" and b == "203.0.113.99" and a != b
+
+
+def test_spoofed_client_cannot_pick_an_arbitrary_bucket(monkeypatch):
+    # Even with a configured chain, an attacker prepending a chosen X-Forwarded-For value cannot
+    # select it: the true peer is appended to the RIGHT of anything they send, so parts[-(n+1)] is
+    # always their own real client IP (203.0.113.5), never the spoofed 9.9.9.9.
+    _with_count(monkeypatch, 1)
+    ip = deps.client_ip(_req("10.0.0.1", xff="9.9.9.9, 203.0.113.5, 198.51.100.9"))
+    assert ip == "203.0.113.5" and ip != "9.9.9.9"

@@ -173,12 +173,21 @@ def login(
     # user-enumeration signal). Counting every attempt is fine — interactive logins stay well under.
     limiter = login_limiter()
     email = body.email.lower()
+    # Check the IP bucket FIRST and stop there if it is already blocked. Recording the account
+    # bucket afterwards (as this used to) let one blocked IP create an arbitrary account-key per
+    # attempt — churning distinct emails to grow the limiter's key set and (before the eviction
+    # fix) trigger a global reset. A refused request must not mutate any further limiter state.
     ok_ip, retry_ip = limiter.hit(f"ip:{ip or 'unknown'}")
-    ok_acct, retry_acct = limiter.hit(f"acct:{email}")
-    if not (ok_ip and ok_acct):
+    if not ok_ip:
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS, "too many login attempts",
-            headers={"Retry-After": str(int(max(retry_ip, retry_acct)) + 1)},
+            headers={"Retry-After": str(int(retry_ip) + 1)},
+        )
+    ok_acct, retry_acct = limiter.hit(f"acct:{email}")
+    if not ok_acct:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS, "too many login attempts",
+            headers={"Retry-After": str(int(retry_acct) + 1)},
         )
 
     user = db.query(User).filter(User.email == email).first()

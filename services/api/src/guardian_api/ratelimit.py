@@ -14,7 +14,7 @@ from functools import lru_cache
 
 from guardian_common.config import get_settings
 
-_MAX_KEYS = 50_000  # crude memory bound: distinct keys tracked in a window before a hard reset
+_MAX_KEYS = 50_000  # soft cap on distinct keys tracked; eviction removes only EXPIRED entries
 
 
 class SlidingWindowLimiter:
@@ -40,8 +40,18 @@ class SlidingWindowLimiter:
             return True, 0.0                          # limiter disabled
         now = self._clock()
         with self._lock:
-            if len(self._hits) > _MAX_KEYS:
-                self._hits.clear()                    # bound memory; brief accuracy loss is fine
+            if len(self._hits) >= _MAX_KEYS and key not in self._hits:
+                # Memory pressure. NEVER clear the whole map: that would erase active IP/account
+                # blocks and let an attacker reset every lockout by churning arbitrary keys. Evict
+                # only entries whose entire window has expired — those hold no live limit.
+                self._evict_expired(now)
+                if len(self._hits) >= _MAX_KEYS:
+                    # Still full — every remaining key is an ACTIVE block. Admit this brand-new key
+                    # WITHOUT tracking it rather than evict a live block: existing limits stay
+                    # intact and memory stays bounded. Fail-open applies only to a never-seen key
+                    # under a table full of active blocks, a state made near-unreachable by the
+                    # login flow no longer creating account keys once an IP is already blocked.
+                    return True, 0.0
             recent = [t for t in self._hits.get(key, ()) if now - t < self._window]
             if len(recent) >= ceiling:
                 self._hits[key] = recent
@@ -49,6 +59,17 @@ class SlidingWindowLimiter:
             recent.append(now)
             self._hits[key] = recent
             return True, 0.0
+
+    def _evict_expired(self, now: float) -> None:
+        """Drop keys whose every timestamp is older than the window. Caller holds the lock.
+
+        Removes only stale entries, so an active IP/account block is never evicted by capacity
+        pressure driven by unrelated key churn.
+        """
+        stale = [k for k, ts in self._hits.items()
+                 if not ts or now - ts[-1] >= self._window]
+        for k in stale:
+            del self._hits[k]
 
     def reset(self) -> None:
         with self._lock:

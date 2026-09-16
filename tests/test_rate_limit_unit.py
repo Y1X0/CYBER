@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from guardian_api import ratelimit
 from guardian_api.ratelimit import SlidingWindowLimiter
 
 
@@ -71,3 +72,44 @@ def test_reset_clears_state():
 def test_zero_limit_disables_the_limiter():
     lim = SlidingWindowLimiter(0, 60.0)
     assert all(lim.hit("k")[0] for _ in range(100))    # disabled ⇒ always allowed
+
+
+# ── capacity-pressure eviction (must NEVER erase active blocks) ──────────────────────────────────
+def test_active_block_survives_capacity_pressure_from_key_churn(monkeypatch):
+    # An attacker churning many arbitrary keys must not be able to reset an unrelated active block.
+    # The old code called `self._hits.clear()` at the cap, wiping every lockout; this proves it does
+    # not (requirements 1 and 3).
+    monkeypatch.setattr(ratelimit, "_MAX_KEYS", 5)
+    c = _Clock()
+    lim = SlidingWindowLimiter(1, 60.0, clock=c)
+    assert lim.hit("victim")[0] is True
+    assert lim.hit("victim")[0] is False               # victim is now blocked
+    for i in range(100):                               # churn well past the cap with active keys
+        lim.hit(f"junk{i}")
+    assert lim.hit("victim")[0] is False               # the block is intact, not erased
+
+
+def test_expired_entries_are_reclaimed_under_pressure(monkeypatch):
+    # Memory is bounded by evicting only entries whose whole window has expired (requirement 4/5).
+    monkeypatch.setattr(ratelimit, "_MAX_KEYS", 5)
+    c = _Clock()
+    lim = SlidingWindowLimiter(1, 60.0, clock=c)
+    for i in range(5):
+        lim.hit(f"old{i}")                             # 5 keys at t=1000
+    c.t += 61                                          # every window has now expired
+    lim.hit("fresh")                                   # pressure → evict the 5 stale, keep 'fresh'
+    assert set(lim._hits) == {"fresh"}
+
+
+def test_table_full_of_active_blocks_admits_new_key_without_evicting(monkeypatch):
+    # When the table is full of ACTIVE blocks, a brand-new key is admitted untracked rather than an
+    # active block being evicted — existing limits stay intact and memory stays bounded (req 3).
+    monkeypatch.setattr(ratelimit, "_MAX_KEYS", 3)
+    c = _Clock()
+    lim = SlidingWindowLimiter(1, 60.0, clock=c)
+    for k in ("a", "b", "c"):
+        assert lim.hit(k)[0] is True
+        assert lim.hit(k)[0] is False                  # three active blocks; table full
+    assert lim.hit("d")[0] is True                     # new key admitted, not blocked, not tracked
+    assert set(lim._hits) == {"a", "b", "c"}           # no active block was evicted
+    assert lim.hit("a")[0] is False                    # existing blocks still enforced

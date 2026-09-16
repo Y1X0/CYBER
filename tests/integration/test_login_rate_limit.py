@@ -84,3 +84,19 @@ def test_reset_restores_access(client_and_limiter):
     assert _login(client, "203.0.113.11").status_code == 429
     lim.reset()
     assert _login(client, "203.0.113.11").status_code == 401     # legitimate login flow works again
+
+
+def test_a_blocked_ip_does_not_create_account_keys(client_and_limiter):
+    # Issue 1 (amplification): once an IP is blocked, further attempts from it must NOT record an
+    # account bucket per attempted email. The route now checks the IP bucket first and refuses
+    # before touching the account bucket, so an attacker cannot churn arbitrary account keys (which
+    # both grows memory and, before the eviction fix, could trigger a global reset).
+    client, lim = client_and_limiter
+    for _ in range(3):                                   # exhaust the peer's IP bucket (threshold 3)
+        _login(client, "203.0.113.20", email="a@example.com")
+    for i in range(5):                                   # more attempts, each a fresh email
+        assert _login(client, "203.0.113.20", email=f"churn{i}@example.com").status_code == 429
+    # None of the churned emails created an account bucket…
+    assert [k for k in lim._hits if k.startswith("acct:churn")] == []
+    # …while the email used before the block was recorded (account keying itself still works).
+    assert "acct:a@example.com" in lim._hits
