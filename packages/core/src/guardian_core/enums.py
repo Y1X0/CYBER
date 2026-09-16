@@ -57,6 +57,12 @@ class EngineKey(str, Enum):
     # pattern engines miss (logic/authz/complex injection). Its output is HYPOTHESES — persisted as
     # source=ai_assisted, always non-exhaustive, so its silence never resolves a finding.
     AI_DISCOVERY = "ai_discovery"
+    # Mobile app static analysis: Android APK manifest/permissions/exported-components/cleartext/
+    # secrets/crypto (Phase 1, offline — no emulator; dynamic analysis is a documented host need).
+    MOBILE = "mobile"
+    # Authorized host/network posture assessed from an allowlisted local-agent submission (no
+    # cloud-to-LAN scanning): home-network device/service posture and Linux server hardening.
+    HOST_POSTURE = "host_posture"
 
 
 # Engines that actively probe a live target and therefore REQUIRE an authorization record
@@ -78,6 +84,12 @@ class AssetKind(str, Enum):
     NETBLOCK = "netblock"
     SERVICE = "service"
     CLOUD_RESOURCE = "cloud_resource"
+    # An uploaded mobile app package (Android .apk) analysed statically (Phase 1).
+    MOBILE_APP = "mobile_app"
+    # A device/host assessed via an authorized local agent's allowlisted posture submission
+    # (home-network device or Linux server) — never scanned directly from the cloud (Phase 2/3).
+    NETWORK_HOST = "network_host"
+    SERVER_HOST = "server_host"
 
 
 class NodeType(str, Enum):
