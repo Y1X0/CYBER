@@ -4,11 +4,14 @@ import { defineConfig, type Plugin } from "vite";
 // The fetch-directive half of the production CSP, kept in sync with public/_headers. Injected into
 // the BUILT index.html only (never the dev server, whose HMR needs an inline preamble that
 // script-src 'self' would block). frame-ancestors is header-only, so it stays in _headers.
+// connect-src lists 'self' plus the EXACT API origin (the SPA is a separate origin from the API on
+// Render); no wildcard. frame-ancestors is header-only, so it stays in render.yaml / _headers.
 const CSP =
   "default-src 'self'; script-src 'self'; " +
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
   "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; " +
-  "connect-src 'self'; base-uri 'self'; object-src 'none'; form-action 'self'";
+  "connect-src 'self' https://guardian-api-s1jd.onrender.com; " +
+  "base-uri 'self'; object-src 'none'; form-action 'self'";
 
 // Defence in depth for a static host that ignores _headers: stamp the CSP into the built HTML as a
 // <meta http-equiv>. Build-only (`apply: "build"`) so the dev server keeps working.

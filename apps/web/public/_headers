@@ -9,11 +9,15 @@
 #   style-src ... 'unsafe-inline' https://fonts.googleapis.com
 #                           — the Google Fonts stylesheet, plus React's inline style attributes.
 #   font-src https://fonts.gstatic.com — the Google Fonts files.
-#   connect-src 'self'      — the API is same-origin (the SPA is served behind the same host that
-#                             proxies /api). A SPLIT-ORIGIN deployment must add the API origin here.
+#   connect-src 'self' + the API origin — the SPA is deployed as a Render static site, a SEPARATE
+#                             origin from guardian-api, so the exact API origin is listed (no
+#                             wildcard). 'self' is kept for same-origin dev/preview. NOTE: the
+#                             AUTHORITATIVE production headers are in render.yaml's `headers:` for the
+#                             guardian-web static site — Render does NOT read this _headers file (it
+#                             is the Netlify/Cloudflare convention, kept only as a fallback host).
 #   frame-ancestors 'none'  — not framable (clickjacking); header-only, so it lives here not in meta.
 /*
-  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://guardian-api-s1jd.onrender.com; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
   X-Frame-Options: DENY

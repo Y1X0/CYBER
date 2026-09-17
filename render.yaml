@@ -95,6 +95,15 @@ services:
       - key: GUARDIAN_SANDBOX_ENGINES
         value: "true"
 
+      # CORS allowlist for the browser SPA. The web dashboard (guardian-web static site below) is a
+      # SEPARATE origin from this API, so its exact origin must be listed here or the browser blocks
+      # every cross-origin call. Set this to the guardian-web site's URL once Render assigns it
+      # (e.g. https://guardian-web-xxxx.onrender.com), comma-separated for multiple. sync:false so it
+      # is provided in the dashboard rather than guessed here. NEVER use "*" — that plus credentials
+      # is refused by the app, and even for bearer-token calls a wildcard is needless exposure.
+      - key: GUARDIAN_CORS_ORIGINS
+        sync: false
+
       # ── client IP / rate-limit granularity ───────────────────────────────────────────────────
       # GUARDIAN_TRUSTED_PROXY_COUNT is intentionally NOT set here, so it stays at the fail-safe
       # default 0: the app then keys audit + login rate limiting on the SOCKET PEER and ignores
@@ -127,6 +136,52 @@ services:
       #     shed request never holds a worker thread long);
       #   * an ALERT-ONLY failed-login breaker (GUARDIAN_GLOBAL_LOGIN_BREAKER_PER_MINUTE, default 300)
       #     logs `login_global_breaker_tripped` and increments a metric but never returns 429.
+
+  # ── Web dashboard (SPA) ──────────────────────────────────────────────────────────────────────────
+  # The React/Vite SPA in apps/web, deployed as a Render STATIC SITE. It is a SEPARATE ORIGIN from
+  # guardian-api, so: (a) VITE_API_BASE points the SPA at the API origin (its default "" would call
+  # its own static origin, which has no API); (b) the CSP connect-src lists that exact API origin;
+  # (c) the API's GUARDIAN_CORS_ORIGINS (above) must list THIS site's origin.
+  #
+  # The security headers are set HERE, in Render's own `headers:` mechanism — a static host does not
+  # honour apps/web/public/_headers (that is the Netlify/Cloudflare convention, kept only as a
+  # fallback), and frame-ancestors / X-Frame-Options are header-only (a <meta> CSP cannot carry
+  # them). curl -I https://<this-site> must show them.
+  - type: web
+    name: guardian-web
+    runtime: static
+    plan: free
+    branch: claude/security-guardian-architecture-p1315d  # cutover to main — docs/deployment/11-branch-cutover.md
+    buildCommand: cd apps/web && npm ci && npm run build
+    staticPublishPath: apps/web/dist
+    pullRequestPreviewsEnabled: false
+    envVars:
+      # Call the API cross-origin. Update if the API's URL changes; keep it EXACT (no trailing slash).
+      - key: VITE_API_BASE
+        value: https://guardian-api-s1jd.onrender.com
+    routes:
+      # SPA fallback: serve index.html for client-side routes (never for real asset paths).
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      - path: /*
+        name: Content-Security-Policy
+        # default-src 'self'; no inline scripts / eval; API calls limited to 'self' + the exact API
+        # origin; Google Fonts allowed; not framable. Keep in sync with apps/web/public/_headers.
+        value: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://guardian-api-s1jd.onrender.com; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'"
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
+      - path: /*
+        name: Referrer-Policy
+        value: no-referrer
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: Permissions-Policy
+        value: geolocation=(), camera=(), microphone=(), browsing-topics=()
 
 databases:
   - name: guardian-db

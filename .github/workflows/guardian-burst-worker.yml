@@ -84,7 +84,7 @@ jobs:
       # pushed from HEAD. A floating tag would let the thing that runs in production drift away from
       # the thing that was verified. (Immutability is enforced by tests/test_scanner_image_supply_chain.py.)
       #
-      # Built at `b4f67ff` by guardian-deploy-worker.yml (mode: publish, run 35250074392). This commit
+      # Built at `feb75c5` by guardian-deploy-worker.yml (mode: publish, run 35278363451). This commit
       # POSTDATES the scanner security hardening on this branch: the secure artifact-upload path
       # (f65c09f — AUD-P1-5 zip-bomb bounds, AUD-P1-6 tenant/asset-scoped artifact resolution that
       # stops the engine reading a config-supplied filesystem path, AUD-P1-7), the mobile/iOS engines,
@@ -97,12 +97,12 @@ jobs:
       - name: Pull the verified scanner image
         id: image
         run: |
-          IMAGE="ghcr.io/y1x0/cyber-scanner@sha256:10ea534cd8367a01e0103865064492d5ec3fa861acdb52fb6471ef16fd2cfe8b"
+          IMAGE="ghcr.io/y1x0/cyber-scanner@sha256:c2a09b39713a51e018fc5e1201d71f1eca7e59c4395d07ad9b7dfd7fcef8f26b"
           echo "ref=$IMAGE" >> "$GITHUB_OUTPUT"
           docker pull "$IMAGE"
 
       # AUD-P1-6 guard: refuse to run any scanner image whose source commit predates the worker
-      # file-read fix (f65c09f). The digest pinned above was built at b4f67ff, a descendant of that
+      # file-read fix (f65c09f). The digest pinned above was built at feb75c5, a descendant of that
       # fix, so this guard passes; it stays as a tripwire against a future repin to a stale digest.
       # The revision is read from the image's own org.opencontainers.image.revision label; ancestry is
       # proved against this checkout, so no value is trusted that the repo cannot verify.
