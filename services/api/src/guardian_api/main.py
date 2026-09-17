@@ -62,12 +62,18 @@ def create_app() -> FastAPI:
     settings = get_settings()
     configure_logging(settings.log_level)
 
+    # The interactive API explorer and the machine-readable schema enumerate every route, request
+    # shape, and auth scheme — useful in dev, needless attack-surface and recon in production. Serve
+    # them only in local/dev-class environments; staging is production-grade (like the rest of the
+    # config's gates) and hides them too.
+    expose_docs = settings.is_local_or_dev
     app = FastAPI(
         title="Security Guardian Platform API",
         version="0.1.0",
         description="AI Security Operations Platform — control plane (Phase 1 Foundation)",
-        docs_url="/docs",
-        openapi_url="/openapi.json",
+        docs_url="/docs" if expose_docs else None,
+        redoc_url="/redoc" if expose_docs else None,
+        openapi_url="/openapi.json" if expose_docs else None,
         lifespan=_lifespan,
     )
 
@@ -100,7 +106,10 @@ def create_app() -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def root() -> dict:
-        return {"name": "Security Guardian Platform", "status": "ok", "docs": "/docs"}
+        info = {"name": "Security Guardian Platform", "status": "ok"}
+        if expose_docs:
+            info["docs"] = "/docs"
+        return info
 
     return app
 
