@@ -160,23 +160,31 @@ class TestSignup:
         })
         assert response.status_code == 422, response.text
 
-    def test_sign_up_is_rate_limited(self):
+    def test_sign_up_is_rate_limited(self, monkeypatch):
         """An unbounded tenant-creation endpoint fills a database from one laptop."""
         from guardian_api.ratelimit import login_limiter
         from guardian_common.config import get_settings
 
+        settings = get_settings()
+        # Sign-up is per-CLIENT limited only when the client IP is trustworthy. Simulate one trusted
+        # proxy hop so the resolved client (X-Forwarded-For[-1]) is a real value the limiter keys on;
+        # without a trusted IP the flood is counted and alerted, not blocked (that is the shared-proxy
+        # safety, covered in tests/test_signup_per_client_limit.py).
+        monkeypatch.setattr(settings, "trusted_proxy_count", 1)
         login_limiter().reset()
         client = _client()
-        ceiling = get_settings().auth_rate_limit_per_minute
+        ceiling = settings.auth_rate_limit_per_minute
         codes = [
-            client.post("/api/v1/auth/signup", json={
-                "organization": f"Flood {i}",
-                "email": f"flood-{uuid.uuid4().hex[:10]}@example.com",
-                "password": "a-long-enough-password",
-            }).status_code
+            client.post("/api/v1/auth/signup",
+                        headers={"X-Forwarded-For": "203.0.113.77"},
+                        json={
+                            "organization": f"Flood {i}",
+                            "email": f"flood-{uuid.uuid4().hex[:10]}@example.com",
+                            "password": "a-long-enough-password",
+                        }).status_code
             for i in range(ceiling + 2)
         ]
-        assert 429 in codes, f"{ceiling + 2} sign-ups from one address were all accepted: {codes}"
+        assert 429 in codes, f"{ceiling + 2} sign-ups from one client were all accepted: {codes}"
         login_limiter().reset()
 
     def test_a_deployment_can_turn_self_service_off(self):

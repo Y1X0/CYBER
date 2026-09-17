@@ -164,6 +164,13 @@ class Settings(BaseSettings):
     login_argon2_max_concurrency: int = 4
     login_argon2_acquire_timeout_seconds: float = 0.5
 
+    # Alert threshold for sign-ups whose client IP is untrusted (a shared proxy with the hop count
+    # unset, or a short/malformed X-Forwarded-For). Those are NOT per-client rate limited — keying a
+    # shared value would let one source block everyone's sign-up — so instead they are counted, and
+    # when they cross this per-minute ceiling `signup_global_breaker_tripped` is logged. Alert only;
+    # never blocks. 0 disables the alert.
+    global_signup_breaker_per_minute: int = 100
+
     # Per-CLIENT failed-login limit (P1-γ). Counts FAILED logins from one resolved client IP (IPv6
     # keyed by /64) across all accounts, so password spraying — one password against many emails —
     # is bounded even though no single account bucket trips. A client over this in the 60s window

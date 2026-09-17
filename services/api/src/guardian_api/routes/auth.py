@@ -24,7 +24,6 @@ from sqlalchemy.orm import Session
 
 from guardian_api.deps import (
     Identity,
-    client_ip,
     get_current_identity,
     get_db,
     require_owner,
@@ -36,6 +35,7 @@ from guardian_api.ratelimit import (
     login_limiter,
     per_client_limiting_enabled,
     record_failed_login,
+    record_untrusted_signup,
 )
 from guardian_api.schemas import LoginRequest, MeResponse, TokenResponse
 
@@ -78,7 +78,6 @@ def signup(
     body: SignupRequest,
     request: Request,
     db: Session = Depends(get_db),
-    ip: str | None = Depends(client_ip),
 ) -> SignupResponse:
     """Create an organization and its first owner.
 
@@ -98,11 +97,25 @@ def signup(
             "self-service sign-up is disabled on this deployment; an operator provisions tenants",
         )
 
+    # Sign-up is rate-limited PER CLIENT, on the same trusted-IP basis as login: key on the resolved
+    # client IP only when it is trustworthy (a configured hop count that resolved to a valid client,
+    # or a local/dev direct connection). Behind a shared proxy with the count unset, or on a short/
+    # malformed X-Forwarded-For, the IP is untrusted — keying a shared value there would let one
+    # source block EVERYONE's sign-up, so those are counted and alerted on instead of blocked.
     limiter = login_limiter()
-    ok_ip, retry = limiter.hit(f"signup:{ip or 'unknown'}")
-    if not ok_ip:
-        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "too many sign-up attempts",
-                            headers={"Retry-After": str(int(retry) + 1)})
+    ip, ip_trusted = resolve_client_ip(request)
+    signup_key: str | None = None
+    if per_client_limiting_enabled(settings) and ip_trusted:
+        bucket = client_bucket_key(ip)
+        if bucket is not None:
+            signup_key = f"signup:{bucket}"
+    if signup_key is not None:
+        ok_ip, retry = limiter.hit(signup_key, fail_closed=True)
+        if not ok_ip:
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "too many sign-up attempts",
+                                headers={"Retry-After": str(int(retry) + 1)})
+    else:
+        record_untrusted_signup()  # alert-only; never blocks
 
     email = body.email.lower()
     if db.query(User).filter(User.email == email).first() is not None:

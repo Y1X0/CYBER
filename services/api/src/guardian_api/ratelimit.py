@@ -280,3 +280,35 @@ def record_failed_login() -> None:
 
 _alert_lock = threading.Lock()
 _last_breaker_alert = 0.0
+
+
+# ── alert-only untrusted-signup counter (detection, never blocking) ──────────────────────────────
+@lru_cache
+def _untrusted_signup_breaker() -> SlidingWindowLimiter:
+    return SlidingWindowLimiter(0, 60.0)
+
+
+def reset_untrusted_signup_breaker() -> None:
+    _untrusted_signup_breaker.cache_clear()
+
+
+def record_untrusted_signup() -> None:
+    """Count one sign-up from an untrusted client IP; alert (never block) if the flood threshold is
+    crossed. A per-client sign-up limit cannot be keyed on an untrusted/shared IP without risking a
+    global lockout, so the shared-IP case is made visible here instead of enforced."""
+    REGISTRY.inc("guardian_signup_untrusted_ip_total")
+    ceiling = get_settings().global_signup_breaker_per_minute
+    if ceiling <= 0:
+        return
+    allowed, _ = _untrusted_signup_breaker().hit("global:signup:untrusted", max_hits=ceiling)
+    if not allowed:
+        REGISTRY.inc("guardian_signup_breaker_tripped_total")
+        now = time.monotonic()
+        with _alert_lock:
+            global _last_signup_alert  # noqa: PLW0603 - module-level throttle timestamp
+            if now - _last_signup_alert >= 60.0:
+                _last_signup_alert = now
+                log.warning("signup_global_breaker_tripped", threshold_per_minute=ceiling)
+
+
+_last_signup_alert = 0.0

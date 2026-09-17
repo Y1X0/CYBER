@@ -209,6 +209,10 @@ REGISTRY.counter("guardian_login_argon2_shed_total",
                  "Login attempts shed with 503 because no Argon2 concurrency slot was available.")
 REGISTRY.counter("guardian_login_client_ip_unresolved_total",
                  "Logins whose client IP was missing/unparseable; per-client limiting was skipped.")
+REGISTRY.counter("guardian_signup_untrusted_ip_total",
+                 "Sign-ups whose client IP was untrusted; per-client sign-up limiting was skipped.")
+REGISTRY.counter("guardian_signup_breaker_tripped_total",
+                 "Times untrusted-sign-up volume crossed the alert threshold (alert only).")
 
 
 __all__ = ["DEFAULT_BUCKETS", "REGISTRY", "Registry", "escape_label"]
