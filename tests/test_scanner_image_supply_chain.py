@@ -104,6 +104,22 @@ def test_queue_depth_reads_normalise_via_the_image_function():
         assert "celery_redis_url(os.environ[" in run
 
 
+def test_consume_step_passes_every_setting_the_worker_validates():
+    # The scanner image's Settings() validates BOOTSTRAP_ADMIN_PASSWORD unconditionally on every
+    # plane (worker included), so a burst that does not hand the worker that secret dies at import
+    # before consuming anything. The stale image predated that validation and masked the gap; the
+    # repin surfaced it. Assert the consume step supplies it both as a step env and to `docker run`,
+    # and that the preflight fails fast on its absence.
+    consume = _step(_BURST, "Consume the default queue")
+    assert "GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD" in (consume.get("env") or {}), \
+        "consume step must expose GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD to the container env"
+    assert "-e GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD" in consume["run"], \
+        "consume step's docker run must forward GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD into the image"
+    preflight = _step(_BURST, "Check required settings are present")
+    assert "GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD" in preflight["run"], \
+        "preflight must fail fast when GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD is missing"
+
+
 # ── C. no fragile image/config runtime patching ──────────────────────────────────────────────────
 def test_no_sed_or_perl_rewrites_image_or_config_files():
     text = _BURST.read_text()
