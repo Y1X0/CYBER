@@ -36,6 +36,20 @@ log "seed"
 # Idempotent — it creates the bootstrap tenant and knowledge base only when they are absent.
 python -m guardian_api.seed
 
+log "scan plane"
+# ISSUE-3: untrusted engine execution runs on a SEPARATE worker consuming the `scan` queue, which
+# must hold NEITHER the KMS master NOR the JWT secret — so a malicious customer file that reaches
+# code execution inside an engine cannot read the key that decrypts every tenant's credentials.
+# `env -u` strips both secrets from THIS worker's environment (config refuses to start a scan_plane
+# that still carries either), and GUARDIAN_SCAN_PLANE=true marks it. It stays DB-less and needs only
+# the broker-seal key (already in the environment) to unseal its job + sealed per-scan creds and
+# seal its findings back. The control-plane worker below sets GUARDIAN_SCAN_OFFLOAD=true so run_scan
+# hands engine execution here rather than running it in-process next to the master key.
+env -u GUARDIAN_JWT_SECRET -u GUARDIAN_ENCRYPTION_KEY GUARDIAN_SCAN_PLANE=true \
+  celery -A guardian_scanner.celery_app.celery_app worker \
+  --queues scan --concurrency 1 --loglevel INFO &
+SCAN_PID=$!
+
 log "worker + beat"
 # `--beat` embeds the periodic scheduler in THIS one worker process. It is the correct form here and
 # only here: this deployment runs exactly one worker on one instance, so embedding beat yields
@@ -44,7 +58,9 @@ log "worker + beat"
 # fire every periodic job N times.) Without this, stranded-scan recovery, feed sync, webhook retries
 # and scheduled scans never run. The instance is kept awake by the /health keepalive
 # (.github/workflows/guardian-keepalive.yml, every 10m); beat fires while the instance is awake.
-celery -A guardian_scanner.celery_app.celery_app worker --beat \
+# GUARDIAN_SCAN_OFFLOAD=true routes untrusted engine execution to the scan worker above.
+GUARDIAN_SCAN_OFFLOAD=true \
+  celery -A guardian_scanner.celery_app.celery_app worker --beat \
   --queues default --concurrency 1 --loglevel INFO &
 WORKER_PID=$!
 
@@ -57,14 +73,16 @@ API_PID=$!
 # forever — BLOCKER-1 reappearing as a green service, which is the failure mode this project
 # treats as the worst kind: a system that cannot report that it stopped working.
 #
-# `wait -n` returns when EITHER child exits; whichever it was, we tear the other down and exit
-# non-zero so Render restarts the instance.
+# `wait -n` returns when ANY of the three children (control worker, API, scan worker) exits;
+# whichever it was, we tear the others down and exit non-zero so Render restarts the instance. The
+# scan worker is load-bearing now: with offload on, a scan blocks on it, so its death must restart
+# the instance just like the control worker's.
 # `|| code=$?` is required, not defensive. Under `set -e` a bare `wait -n` returning non-zero
 # terminates the shell immediately — before the log line and before the sibling is killed. The
 # container would still exit, but with no reason in the logs and a stray process behind it: a
 # failure path that cannot describe itself. Caught by running it, not by reading it.
 code=0
-wait -n "${WORKER_PID}" "${API_PID}" || code=$?
+wait -n "${WORKER_PID}" "${API_PID}" "${SCAN_PID}" || code=$?
 log "a child process exited (status ${code}) — stopping the container so Render restarts it"
-kill "${WORKER_PID}" "${API_PID}" 2>/dev/null || true
+kill "${WORKER_PID}" "${API_PID}" "${SCAN_PID}" 2>/dev/null || true
 exit "${code:-1}"

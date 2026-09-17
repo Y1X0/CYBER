@@ -114,11 +114,24 @@ def test_dev_compose_runs_exactly_one_dedicated_beat():
 
 def test_render_single_worker_embeds_beat_exactly_once():
     start = (_ROOT / "infra/render/start.sh").read_text()
-    # The Render free tier runs one worker on one instance; embedding beat there is the one correct
-    # scheduler. Assert exactly one celery worker invocation and that it carries --beat.
+    # The Render free tier runs on one instance. Since ISSUE-3 it runs TWO celery workers there — the
+    # control-plane worker (queue `default`) and the isolated scan-plane worker (queue `scan`) — but
+    # embedding beat is still the one correct scheduler and must sit on EXACTLY ONE of them.
+    # Exactly one embedded scheduler across both workers. Count --beat only on celery worker command
+    # lines (the file's comments mention --beat too). The `worker --beat` token sits on one line.
     worker_lines = re.findall(r"celery[^\n]*\bworker\b[^\n]*", start)
-    assert len(worker_lines) == 1, f"expected 1 celery worker line in start.sh, got {worker_lines}"
-    assert "--beat" in worker_lines[0], "the single Render worker must embed beat (--beat)"
+    assert len([ln for ln in worker_lines if "--beat" in ln]) == 1, "exactly one worker embeds --beat"
+    assert "--queues default" in start, "start.sh must run the control-plane (default) worker"
+    assert "--queues scan" in start, "start.sh must run a dedicated scan-plane worker (ISSUE-3)"
+
+    # The scheduler rides the control-plane worker: the `worker --beat` command drains `default`,
+    # not `scan` (the queue name is on the continuation line right after `worker --beat`).
+    after_beat = start[start.index("worker --beat"):][:180]
+    assert "--queues default" in after_beat, "the embedded scheduler must ride the default worker"
+    assert "--queues scan" not in after_beat, "beat must not ride the scan worker"
+    # The scan worker's command carries no --beat (look at the command that drains `scan`).
+    around_scan = start[start.index("--queues scan") - 180:start.index("--queues scan") + 40]
+    assert "--beat" not in around_scan, "the scan worker must not embed beat"
     # And it must not spawn a *separate* standalone beat process (that would double-schedule on one
     # instance). A standalone beat is a celery line running the `beat` subcommand with no `worker`
     # on it; the embedded scheduler above is `worker --beat`, which carries `worker` and is excluded.

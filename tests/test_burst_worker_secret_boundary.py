@@ -97,21 +97,53 @@ def test_burst_worker_is_not_marked_an_execution_plane():
         assert f"{marker}=true" not in run and f"-e {marker}=true" not in run
 
 
-def test_burst_worker_only_forwards_control_plane_secrets():
-    # The container env is constructed explicitly with `-e` flags. Assert it forwards exactly the
-    # control-plane secret set and nothing else secret-shaped (no stray API-only material). In
-    # particular the SEEDING credential GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD must NOT be forwarded — the
-    # scanner container parses untrusted customer files and never seeds.
+def _control_worker_invocation() -> str:
+    """The `docker run` that starts the control-plane (`--queues default`) worker in the burst."""
     run = _consume_step()["run"]
+    start = run.index("docker run --rm")
+    return run[start:run.index("--queues default", start)]
+
+
+def _scan_worker_invocation() -> str:
+    """The `docker run -d` that starts the isolated scan-plane (`--queues scan`) worker."""
+    run = _consume_step()["run"]
+    start = run.index("docker run -d --name guardian-scan")
+    return run[start:run.index("--queues scan", start)]
+
+
+def test_control_worker_only_forwards_control_plane_secrets():
+    # The control worker's container env is constructed explicitly with `-e` flags. Assert it
+    # forwards exactly the control-plane secret set and nothing else secret-shaped. In particular the
+    # SEEDING credential GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD must NOT be forwarded.
+    invocation = _control_worker_invocation()
     expected = {
         "GUARDIAN_DATABASE_URL", "GUARDIAN_APP_DATABASE_URL", "GUARDIAN_REDIS_URL",
         "GUARDIAN_JWT_SECRET", "GUARDIAN_ENCRYPTION_KEY", "GUARDIAN_BROKER_SEAL_KEY",
     }
-    forwarded = {tok for line in run.splitlines() for tok in line.split()
+    forwarded = {tok for line in invocation.splitlines() for tok in line.split()
                  if tok.startswith("GUARDIAN_") and tok.isupper()}
-    # Every secret-ish var forwarded is one the control-plane worker genuinely needs.
     stray = forwarded - expected - {"GUARDIAN_ENV"}
-    assert stray == set(), f"unexpected vars forwarded to the scanner container: {stray}"
+    assert stray == set(), f"unexpected vars forwarded to the control worker: {stray}"
+
+
+def test_scan_plane_container_holds_no_master_keys():
+    # ISSUE-3: the untrusted-engine (scan) plane must receive NEITHER the KMS master NOR the JWT
+    # secret NOR a DB URL — only the broker-seal key — and must be marked a scan plane so config
+    # refuses to boot it with a master key.
+    invocation = _scan_worker_invocation()
+    for forbidden in ("GUARDIAN_JWT_SECRET", "GUARDIAN_ENCRYPTION_KEY",
+                      "GUARDIAN_DATABASE_URL", "GUARDIAN_APP_DATABASE_URL"):
+        assert f"-e {forbidden}" not in invocation, \
+            f"the scan plane must not receive {forbidden}"
+    assert "GUARDIAN_SCAN_PLANE=true" in invocation, "scan container must be marked a scan plane"
+    assert "-e GUARDIAN_BROKER_SEAL_KEY" in invocation, "scan plane needs the broker-seal key"
+
+
+def test_burst_worker_enables_offload_to_the_scan_plane():
+    # The control worker must actually route engine execution to the scan plane, or the split is
+    # inert and untrusted engines would still run next to the master key.
+    invocation = _control_worker_invocation()
+    assert "GUARDIAN_SCAN_OFFLOAD=true" in invocation
 
 
 # ── the scanner image marks its own processes so it never needs the seeding password ─────────────

@@ -48,6 +48,10 @@ networks:
 volumes:
   pgdata:       # Postgres data (self-hosted reference; managed DB users remove the db service)
   redis-data:   # Redis AOF/RDB persistence (self-hosted reference; managed Redis users remove redis)
+  # Shared scan scratch (ISSUE-3): the control-plane worker writes a scan's untrusted bytes (git
+  # clone, uploaded artifact) here and the DB-less scan-plane worker reads them by path. Only
+  # untrusted scan INPUTS live here — never a credential or key, which cross sealed over the broker.
+  scan-workspace:
 
 services:
   # ── Data stores (self-hosted REFERENCE; prefer managed Postgres/Redis in production) ────────────
@@ -177,6 +181,11 @@ services:
       <<: *control-env
       GUARDIAN_SANDBOX_ENGINES: ${GUARDIAN_SANDBOX_ENGINES:-true}
       GUARDIAN_RECON_PLANE: "false"
+      # ISSUE-3: hand untrusted engine execution to the DB-less, master-key-less worker-scan below,
+      # rather than running it in-process next to the KMS master. Writes each scan's untrusted bytes
+      # to the shared scan-workspace so worker-scan can read them by path.
+      GUARDIAN_SCAN_OFFLOAD: "true"
+      GUARDIAN_SCAN_WORKSPACE_DIR: /var/guardian/scan
     command: ["celery", "-A", "guardian_scanner.celery_app.celery_app", "worker",
               "--loglevel=info", "--concurrency=4", "-Q", "default"]
     depends_on:
@@ -185,6 +194,8 @@ services:
       redis:
         condition: service_healthy
     networks: [backend]
+    volumes:
+      - scan-workspace:/var/guardian/scan
     restart: unless-stopped
     # acks_late + reject_on_worker_lost make a hard stop safe (task redelivers); still allow a warm
     # drain. Health = the worker answers a Celery ping over the broker.
@@ -262,6 +273,43 @@ services:
       redis:
         condition: service_healthy
     networks: [recon-cache]
+    restart: unless-stopped
+    stop_grace_period: 120s
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A guardian_scanner.celery_app.celery_app inspect ping -d celery@$$(hostname) --timeout 5 | grep -q pong"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Scan execution plane (ISSUE-3): runs untrusted engine code (SAST/secrets/DAST/API/CSPM/
+  # container/mobile/iOS parsing customer bytes). Like recon/tools it is DB-less and holds NEITHER
+  # the JWT secret NOR the KMS master (config refuses to start a scan_plane that carries either), so
+  # a malicious file that reaches code execution inside an engine cannot read the key that decrypts
+  # every tenant's credentials. It gets per-scan credentials from the control plane SEALED with the
+  # broker-seal key, and reads each scan's untrusted bytes from the shared scan-workspace by path.
+  worker-scan:
+    image: *app-image
+    environment:
+      GUARDIAN_ENV: ${GUARDIAN_ENV:-production}
+      GUARDIAN_LOG_LEVEL: ${GUARDIAN_LOG_LEVEL:-INFO}
+      GUARDIAN_DATABASE_URL: ""                # DB-incapable
+      GUARDIAN_REDIS_URL: ${GUARDIAN_REDIS_URL}
+      GUARDIAN_BROKER_SEAL_KEY: ${GUARDIAN_BROKER_SEAL_KEY}   # unseal job + sealed creds, seal results
+      GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD}
+      GUARDIAN_SANDBOX_ENGINES: "true"
+      GUARDIAN_SCAN_PLANE: "true"
+      GUARDIAN_SCAN_WORKSPACE_DIR: /var/guardian/scan
+    command: ["celery", "-A", "guardian_scanner.celery_app.celery_app", "worker",
+              "--loglevel=info", "--concurrency=1", "-Q", "scan"]
+    depends_on:
+      redis:
+        condition: service_healthy
+    # recon-cache = the redis broker only, NO database route. It reads scan inputs from the shared
+    # volume, not the network.
+    networks: [recon-cache]
+    volumes:
+      - scan-workspace:/var/guardian/scan
     restart: unless-stopped
     stop_grace_period: 120s
     healthcheck:

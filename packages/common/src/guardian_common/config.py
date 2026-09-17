@@ -223,6 +223,25 @@ class Settings(BaseSettings):
     # internal/authorized scanning; turn on before scanning external/untrusted targets at scale.
     sandbox_engines: bool = False
 
+    # Scan-plane offload (ISSUE-3). When true, the control-plane orchestrator (`run_scan`) hands
+    # untrusted engine execution to a separate worker on the `scan` queue that holds no KMS master
+    # or JWT secret (see `scan_plane`). Off by default so single-worker/dev/test deployments keep
+    # running engines in-process (still sandboxed per `sandbox_engines`); production sets it and
+    # deploys the dedicated scan worker. Requires a scan worker to be consuming `scan`, or a scan
+    # would block until `scan_offload_timeout_seconds`.
+    scan_offload: bool = False
+    # How long the orchestrator waits for one engine's sealed result from the scan plane before
+    # giving up on that engine (bounded well under task_soft_time_limit so the wait cannot outlive
+    # the scan job itself). A timeout degrades that one engine to failed, never the whole scan.
+    scan_offload_timeout_seconds: int = 1200
+    # Directory for scan workspaces (git clones) and materialized artifacts. The control plane
+    # writes the untrusted bytes here and the scan plane reads them by path, so when the two planes
+    # run in SEPARATE containers this must be a volume they share (compose mounts one). Empty = the
+    # system temp dir, correct for single-container deployments (start.sh, the burst worker) where
+    # the planes are processes in one container and already share the filesystem. Only untrusted
+    # scan inputs live here — never a credential or key, which cross sealed over the broker.
+    scan_workspace_dir: str = ""
+
     # Recon execution plane marker (6C.4). True ONLY on the isolated recon worker, which holds no DB
     # credentials and runs `recon_collect` (probing). The DB-bound orchestrator `run_discovery` runs
     # where this is False. Each task refuses to run on the wrong plane, so a misroute fails loudly.
@@ -232,6 +251,14 @@ class Settings(BaseSettings):
     # DB-less tool worker running `run_tool` (sandboxed providers). The trusted `dispatch_tool_job`
     # (authorize/scope/policy/persist) runs where this is False. A misroute fails loudly.
     tool_plane: bool = False
+
+    # Scan execution plane marker (ISSUE-3 untrusted-parsing isolation). True ONLY on the isolated
+    # worker that consumes the `scan` queue and runs untrusted engine code (SAST/secrets/DAST/API/
+    # CSPM/container/mobile/iOS/host-posture parsing customer-controlled bytes). Like tool/recon it
+    # is DB-less and holds NO JWT secret and NO credential KMS master: the control plane decrypts
+    # tenant credentials and hands this plane only per-job data SEALED with the broker-seal key. A
+    # compromise of an engine here therefore cannot read the master key or forge platform tokens.
+    scan_plane: bool = False
 
     # Scanner-worker marker. True on EVERY scanner Celery worker process (default/recon/tools) —
     # set in guardian_scanner.celery_app before Settings is constructed, so no per-deployment env is
@@ -313,9 +340,10 @@ class Settings(BaseSettings):
         if self.is_local_or_dev:
             return self
 
-        # The execution planes (tool/recon) run untrusted external binaries and hold NO DB. They
-        # must be secret-minimal: no token-forging JWT secret, no credential KMS master (P1-A).
-        is_execution_plane = self.tool_plane or self.recon_plane
+        # The execution planes (tool/recon/scan) run untrusted external binaries or parse untrusted
+        # customer bytes and hold NO DB. They must be secret-minimal: no token-forging JWT secret,
+        # no credential KMS master (P1-A / ISSUE-3).
+        is_execution_plane = self.tool_plane or self.recon_plane or self.scan_plane
 
         # JWT secret boundary (P1-A): token-minting/verifying planes require a real secret; the
         # execution planes never sign or verify tokens and must NOT hold a real one, so a hostile
@@ -323,9 +351,10 @@ class Settings(BaseSettings):
         if is_execution_plane:
             if self.jwt_secret and self.jwt_secret != _DEV_JWT_SENTINEL:
                 raise ValueError(
-                    "GUARDIAN_JWT_SECRET must NOT be set on the tool/recon execution plane "
-                    "(GUARDIAN_TOOL_PLANE/GUARDIAN_RECON_PLANE=true): it never signs or verifies "
-                    "tokens, so holding it only creates a JWT-forgery exfiltration risk"
+                    "GUARDIAN_JWT_SECRET must NOT be set on the tool/recon/scan execution plane "
+                    "(GUARDIAN_TOOL_PLANE/GUARDIAN_RECON_PLANE/GUARDIAN_SCAN_PLANE=true): it never "
+                    "signs or verifies tokens, so holding it only creates a JWT-forgery "
+                    "exfiltration risk"
                 )
         elif self.jwt_secret == _DEV_JWT_SENTINEL:
             raise ValueError("GUARDIAN_JWT_SECRET must be set to a strong value outside local/dev")
@@ -340,14 +369,14 @@ class Settings(BaseSettings):
             )
 
         # Credential KMS master (encryption_key) boundary (P1-A): required where credentials are
-        # encrypted/decrypted (API, default worker); FORBIDDEN on the execution planes so a tool
-        # compromise never yields the key that decrypts stored tenant credentials.
+        # encrypted/decrypted (API, default worker); FORBIDDEN on the execution planes so a tool or
+        # engine compromise never yields the key that decrypts stored tenant credentials.
         if is_execution_plane:
             if self.encryption_key and self.encryption_key != _DEV_ENCRYPTION_SENTINEL:
                 raise ValueError(
                     "GUARDIAN_ENCRYPTION_KEY (credential KMS master) must NOT be set on the "
-                    "tool/recon execution plane — it decrypts stored tenant credentials and must "
-                    "stay on the trusted DB-bound planes; the execution plane uses "
+                    "tool/recon/scan execution plane — it decrypts stored tenant credentials and "
+                    "must stay on the trusted DB-bound planes; the execution plane uses "
                     "GUARDIAN_BROKER_SEAL_KEY for payload sealing"
                 )
         elif not self.encryption_key or self.encryption_key == _DEV_ENCRYPTION_SENTINEL:
@@ -357,8 +386,9 @@ class Settings(BaseSettings):
 
         # Broker-seal key (P1-A): the payload-seal key is separate from the credential KMS master
         # and required on every plane that seals/unseals broker payloads — the tool plane (unseals a
-        # job, seals its evidence) and the control plane (seals a job, unseals results). The recon
-        # plane never seals. It MUST differ from encryption_key so the domains use distinct keys.
+        # job, seals its evidence), the scan plane (unseals its job + sealed creds, seals its raw
+        # findings), and the control plane (seals jobs, unseals results). The recon plane never
+        # seals. It MUST differ from encryption_key so the domains use distinct keys.
         if not self.recon_plane:
             if not self.broker_seal_key or self.broker_seal_key == _DEV_SEAL_SENTINEL:
                 raise ValueError(
@@ -400,7 +430,7 @@ class Settings(BaseSettings):
         # carry a seeding credential into a process that parses untrusted customer files. So enforce
         # this only off the worker planes, and do not force the password into those containers' env.
         seeds_bootstrap_admin = not (
-            self.scanner_worker or self.tool_plane or self.recon_plane
+            self.scanner_worker or self.tool_plane or self.recon_plane or self.scan_plane
         )
         if seeds_bootstrap_admin and self.bootstrap_admin_password == _DEFAULT_BOOTSTRAP_PASSWORD:
             raise ValueError(

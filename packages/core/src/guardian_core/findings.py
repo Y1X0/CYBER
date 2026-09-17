@@ -43,6 +43,59 @@ class RawFinding:
     evidence: dict[str, Any] = field(default_factory=dict)
     references: dict[str, Any] = field(default_factory=dict)
 
+    def to_dict(self) -> dict[str, Any]:
+        """A JSON-safe mapping of this finding (enums flattened to their ``.value``).
+
+        Used to carry raw findings across the scan-plane boundary (ISSUE-3). JSON — never pickle —
+        because the scan plane runs untrusted engine code and is the LOWER-trust side; a pickle
+        crossing back would let a compromised scan plane execute code on the control plane that
+        holds the KMS master. Every field here is a str/bool/number/list/dict, so it round-trips
+        with no code execution on decode.
+        """
+        return {
+            "engine": self.engine.value,
+            "title": self.title,
+            "category": self.category,
+            "description": self.description,
+            "base_severity": self.base_severity.value,
+            "confidence": self.confidence,
+            "cwe_id": self.cwe_id,
+            "owasp_ref": self.owasp_ref,
+            "cve_ids": list(self.cve_ids),
+            "cvss_base": self.cvss_base,
+            "epss_score": self.epss_score,
+            "kev": self.kev,
+            "exploit_maturity": self.exploit_maturity,
+            "ransomware": self.ransomware,
+            "location": self.location,
+            "evidence": self.evidence,
+            "references": self.references,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> RawFinding:
+        """Rebuild a RawFinding from :meth:`to_dict`. Unknown enum values fail loudly rather than
+        silently mislabelling a finding's engine or severity."""
+        return cls(
+            engine=EngineKey(data["engine"]),
+            title=str(data["title"]),
+            category=str(data["category"]),
+            description=str(data.get("description", "")),
+            base_severity=Severity(data.get("base_severity", Severity.MEDIUM.value)),
+            confidence=str(data.get("confidence", "medium")),
+            cwe_id=data.get("cwe_id"),
+            owasp_ref=data.get("owasp_ref"),
+            cve_ids=list(data.get("cve_ids", []) or []),
+            cvss_base=data.get("cvss_base"),
+            epss_score=data.get("epss_score"),
+            kev=bool(data.get("kev", False)),
+            exploit_maturity=data.get("exploit_maturity"),
+            ransomware=bool(data.get("ransomware", False)),
+            location=dict(data.get("location", {}) or {}),
+            evidence=dict(data.get("evidence", {}) or {}),
+            references=dict(data.get("references", {}) or {}),
+        )
+
     def fingerprint(self) -> str:
         """Stable identity across scans → dedup & trend tracking.
 

@@ -84,15 +84,6 @@ def test_load_sbom_uses_the_scoped_query():
 
 
 # ── pipeline hooks (_accumulate_sbom + _finalize_sbom) ──────────────────────────────────────────────
-class _StubEngine:
-    def __init__(self, inventory, key=EngineKey.SCA):
-        self._inv = inventory
-        self.key = key
-
-    def collect_inventory(self, _ctx):  # noqa: ANN001
-        return self._inv
-
-
 def _raw(pkg, ver, eco, cve):
     return RawFinding(
         engine=EngineKey.SCA, title=f"{pkg}@{ver}", category="vuln-dep",
@@ -111,11 +102,13 @@ def test_sbom_merges_inventory_from_multiple_engines(monkeypatch):
 
     inv: list = []
     vulns: list = []
-    # An SCA engine (repo deps) and a container engine (image packages) in the same scan.
-    sca = _StubEngine([("flask", "2.0.1", "pypi", "requirements.txt")])
-    container = _StubEngine([("openssl", "3.0.2", "Debian", "dpkg")], key=EngineKey.CONTAINER)
-    tasks._accumulate_sbom(sca, object(), [_raw("flask", "2.0.1", "pypi", "CVE-2020-1")], inv, vulns)
-    tasks._accumulate_sbom(container, object(), [], inv, vulns)
+    # An SCA engine (repo deps) and a container engine (image packages) in the same scan. The
+    # engine already collected its inventory (in-process, or on the scan plane) — _accumulate_sbom
+    # merges those lists, it no longer re-runs collect_inventory.
+    sca_inv = [("flask", "2.0.1", "pypi", "requirements.txt")]
+    container_inv = [("openssl", "3.0.2", "Debian", "dpkg")]
+    tasks._accumulate_sbom(sca_inv, [_raw("flask", "2.0.1", "pypi", "CVE-2020-1")], inv, vulns)
+    tasks._accumulate_sbom(container_inv, [], inv, vulns)
 
     scan = SimpleNamespace(id=_SID, tenant_id=_TID, customer_id=_CID)
     asset = SimpleNamespace(id=_AID, identifier="acme/app", name="app")
@@ -135,8 +128,8 @@ def test_a_versionless_component_is_included(monkeypatch):
     captured = {}
     monkeypatch.setattr(tasks, "store_sbom", lambda session, **kw: captured.update(kw))  # noqa: ANN001
     inv: list = []
-    tasks._accumulate_sbom(_StubEngine([("libssl.so", "", "android-native", "lib/arm64/libssl.so")]),
-                           object(), [], inv, [])
+    tasks._accumulate_sbom([("libssl.so", "", "android-native", "lib/arm64/libssl.so")],
+                           [], inv, [])
     tasks._finalize_sbom(object(), SimpleNamespace(id=_SID, tenant_id=_TID, customer_id=_CID),
                          SimpleNamespace(id=_AID, identifier="app", name="app"), inv, [])
     comp = captured["sbom"].document["components"][0]
@@ -153,18 +146,24 @@ def test_finalize_is_a_noop_without_inventory(monkeypatch):
     assert called["n"] == 0               # nothing to store, store not called
 
 
-def test_accumulate_never_raises_on_a_bad_engine():
-    from guardian_scanner import tasks
+def test_collect_inventory_never_raises_on_a_bad_engine():
+    # The "never fatal" guarantee for collect_inventory now lives in _collect_inventory (which runs
+    # where the engine runs — the scan plane when offloaded), not in _accumulate_sbom.
+    from guardian_scanner.scan_plane import _collect_inventory
 
     class _Boom:
-        key = EngineKey.SCA
-
         def collect_inventory(self, _ctx):  # noqa: ANN001
             raise RuntimeError("walk failed")
 
+    assert _collect_inventory(_Boom(), object()) == []
+
+
+def test_accumulate_never_raises_on_a_bad_inventory_row():
+    from guardian_scanner import tasks
+
     inv: list = []
-    # A collect_inventory that raises must not propagate out of the scan pipeline.
-    tasks._accumulate_sbom(_Boom(), object(), [], inv, [])
+    # A malformed inventory row (wrong arity) must not propagate out of the scan pipeline.
+    tasks._accumulate_sbom([("only", "three", "cols")], [], inv, [])
     assert inv == []
 
 

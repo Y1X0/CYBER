@@ -104,12 +104,19 @@ services:
       # Turn on to run untrusted-input engines in the resource-limited sandbox (5A).
       GUARDIAN_SANDBOX_ENGINES: "false"
       GUARDIAN_RECON_PLANE: "false"  # DB plane — `run_discovery` runs here, `recon_collect` refuses
+      # ISSUE-3: offload untrusted engine execution to worker-scan (below), which holds no KMS
+      # master. Writes each scan's untrusted bytes to the shared scan-workspace so worker-scan reads
+      # them by path.
+      GUARDIAN_SCAN_OFFLOAD: "true"
+      GUARDIAN_SCAN_WORKSPACE_DIR: /var/guardian/scan
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
     networks: [backend]
+    volumes:
+      - scan-workspace:/var/guardian/scan
     # Container-level resource ceiling on top of the per-process rlimits inside the sandbox.
     mem_limit: 1g
     cpus: 1.0
@@ -198,5 +205,37 @@ services:
     # nft rules can never affect another. Scale out with more worker-tools replicas (each its own netns).
     command: celery -A guardian_scanner.celery_app.celery_app worker --loglevel=info --concurrency=1 -Q tools
 
+  # Scan execution plane (ISSUE-3) — DB-LESS untrusted engine execution on the `scan` queue. Runs
+  # SAST/secrets/DAST/API/CSPM/container/mobile/iOS engines that parse customer bytes. Like
+  # recon/tools it carries NO JWT secret and NO credential KMS master — ONLY the broker-seal key, to
+  # unseal its job (incl. per-scan creds the control plane sealed) and seal its findings back. So a
+  # malicious file that reaches code execution inside an engine finds no key that decrypts stored
+  # credentials. It reads each scan's untrusted bytes from the shared scan-workspace by path.
+  worker-scan:
+    build:
+      context: .
+      dockerfile: infra/docker/Dockerfile
+    environment:
+      GUARDIAN_ENV: local
+      GUARDIAN_DATABASE_URL: ""      # NO DB credentials (execution plane is DB-incapable)
+      GUARDIAN_REDIS_URL: redis://:${GUARDIAN_REDIS_PASSWORD:-dev-redis-pass}@redis:6379/0
+      GUARDIAN_BROKER_SEAL_KEY: dev-only-broker-seal-key-change-me
+      GUARDIAN_SANDBOX_ENGINES: "true"
+      GUARDIAN_SCAN_PLANE: "true"    # scan plane marker; prod refuses JWT/KMS-master here
+      GUARDIAN_SCAN_WORKSPACE_DIR: /var/guardian/scan
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks: [recon-cache]          # redis broker only; no route to the database or the API
+    volumes:
+      - scan-workspace:/var/guardian/scan
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 512
+    command: celery -A guardian_scanner.celery_app.celery_app worker --loglevel=info --concurrency=1 -Q scan
+
 volumes:
   pgdata:
+  # Shared scan scratch (ISSUE-3): the control-plane worker writes a scan's untrusted bytes here and
+  # the DB-less worker-scan reads them by path. Only untrusted scan INPUTS live here — no key.
+  scan-workspace:

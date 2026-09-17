@@ -61,6 +61,9 @@ celery_app = Celery(
         "guardian_scanner.discovery.tasks",
         # Security Tool Framework (Phase 1): dispatch (trusted) + run_tool (execution plane).
         "guardian_scanner.tools.tasks",
+        # Scan execution plane (ISSUE-3): the untrusted engine-execution task, consumed by the
+        # DB-less, master-key-less `scan` worker. run_scan (control plane) dispatches to it.
+        "guardian_scanner.scan_plane",
         # The sweep that turns tenant schedules into queued work (WP-A3).
         "guardian_scanner.scheduling",
         # Discovered service version → advisory → finding (WP-C3). Registered here or the task
@@ -105,6 +108,10 @@ celery_app.conf.update(
         "guardian.dispatch_tool_job": {"queue": "default"},
         "guardian.dispatch_artifact_job": {"queue": "default"},
         "guardian.run_tool": {"queue": "tools"},
+        # Untrusted engine execution runs on the isolated `scan` plane (no KMS master / JWT); the
+        # orchestrator run_scan stays on `default`. Keeping them on separate queues is what lets the
+        # scan worker hold neither secret.
+        "guardian.execute_engine": {"queue": "scan"},
         "guardian.sweep_schedules": {"queue": "default"},
         "guardian.sync_feeds": {"queue": "default"},
         "guardian.sync_nvd": {"queue": "default"},

@@ -192,6 +192,38 @@ jobs:
         run: |
           set -o pipefail
           SECONDS_LIMIT=$(( ${{ steps.cfg.outputs.minutes }} * 60 ))
+          IMAGE="${{ steps.image.outputs.ref }}"
+
+          # ISSUE-3: untrusted engine execution runs on a SEPARATE scan-plane container that holds
+          # NEITHER the KMS master NOR the JWT secret — only the broker-seal key. Start it first,
+          # detached, sharing a workspace volume with the control worker below; the control worker
+          # sets GUARDIAN_SCAN_OFFLOAD=true and hands engine execution to it over the `scan` queue.
+          # It gets no GUARDIAN_JWT_SECRET / GUARDIAN_ENCRYPTION_KEY / DB URL: config refuses a
+          # scan_plane that carries a master key, so a mis-set secret crashes it here, loudly.
+          docker volume create guardian-scan-ws >/dev/null
+          docker run -d --name guardian-scan \
+            -e GUARDIAN_ENV=production \
+            -e GUARDIAN_REDIS_URL -e GUARDIAN_BROKER_SEAL_KEY \
+            -e GUARDIAN_SCAN_PLANE=true -e GUARDIAN_SANDBOX_ENGINES=true \
+            -e GUARDIAN_SCAN_WORKSPACE_DIR=/var/guardian/scan \
+            -v guardian-scan-ws:/var/guardian/scan \
+            "$IMAGE" \
+            celery -A guardian_scanner.celery_app.celery_app worker \
+              --queues scan --pool=solo --concurrency 1 \
+              --without-gossip --without-mingle --loglevel INFO >/dev/null
+
+          # Prove the scan plane actually booted (a scan plane that dies at startup would leave every
+          # offloaded scan blocking on it). A dead container here fails the run rather than draining
+          # with no scan plane.
+          sleep 15
+          if [ "$(docker inspect -f '{{.State.Running}}' guardian-scan 2>/dev/null)" != "true" ]; then
+            echo "##[error]scan-plane worker failed to start:"
+            docker logs guardian-scan 2>&1 | tail -40 || true
+            docker rm -f guardian-scan >/dev/null 2>&1 || true
+            docker volume rm guardian-scan-ws >/dev/null 2>&1 || true
+            exit 1
+          fi
+          echo "scan-plane worker is up (no KMS master / JWT secret in its environment)."
 
           # --pool=solo, not prefork: the tool plane's uid_nft guard fails closed unless it can prove
           # a single allocator, and a single-process pool proves it by construction. Concurrency 1
@@ -210,7 +242,9 @@ jobs:
               -e GUARDIAN_ENV=production \
               -e GUARDIAN_DATABASE_URL -e GUARDIAN_APP_DATABASE_URL -e GUARDIAN_REDIS_URL \
               -e GUARDIAN_JWT_SECRET -e GUARDIAN_ENCRYPTION_KEY -e GUARDIAN_BROKER_SEAL_KEY \
+              -e GUARDIAN_SCAN_OFFLOAD=true -e GUARDIAN_SCAN_WORKSPACE_DIR=/var/guardian/scan \
               -e CELERY_CONCURRENCY=1 \
+              -v guardian-scan-ws:/var/guardian/scan \
               "${{ steps.image.outputs.ref }}" \
               celery -A guardian_scanner.celery_app.celery_app worker \
                 --queues default \
@@ -221,6 +255,13 @@ jobs:
                 $BEAT
           rc=$?
           set -e
+
+          # Tear down the scan-plane worker: show a tail of its log (proof it ran), then remove the
+          # detached container and the shared workspace volume.
+          echo "── scan-plane worker log (tail) ──"
+          docker logs guardian-scan 2>&1 | tail -20 || true
+          docker rm -f guardian-scan >/dev/null 2>&1 || true
+          docker volume rm guardian-scan-ws >/dev/null 2>&1 || true
 
           # 124 is `timeout` reporting that it ended the burst on schedule. That is this workflow
           # working, so it must not be reported as a failed run — otherwise every successful burst

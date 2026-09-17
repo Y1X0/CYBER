@@ -186,6 +186,20 @@ def _close_inherited_fds(keep: set[int]) -> None:
             pass  # not open — nothing to close
 
 
+def _scrub_secret_env() -> None:
+    """Remove every GUARDIAN_* variable from the child's environment (ISSUE-3, item 4).
+
+    The fork inherited the parent's whole environment. Engine code operates only on its
+    ScanContext, and settings are already resolved and @lru_cache'd before the fork, so no
+    GUARDIAN_* variable is needed here. Deleting them means a malicious input that reaches code
+    execution inside this sandboxed child cannot read a secret (KMS master, JWT, broker-seal key,
+    DB/Redis URLs) out of `os.environ`. Best-effort and total: we drop the whole GUARDIAN_ prefix
+    rather than an allowlist of names, so a newly-added secret is covered without a code change.
+    """
+    for name in [k for k in os.environ if k.startswith("GUARDIAN_")]:
+        os.environ.pop(name, None)
+
+
 def _apply_limits(policy: SandboxPolicy) -> None:
     """Apply OS resource limits + the wall-clock alarm inside the child. Best-effort per limit."""
     def _set(res: int, soft: int, hard: int | None = None) -> None:
@@ -226,6 +240,14 @@ def run_in_sandbox(func: Callable[[], Any], policy: SandboxPolicy) -> Any:
             # Neutralize inherited descriptors (e.g. the parent's DB/cache sockets) before running
             # untrusted work — keep only stdio and the result pipe (6C.4).
             _close_inherited_fds(keep={0, 1, 2, write_fd})
+            # A fork copies the parent's process memory AND environment, so the child would
+            # otherwise inherit every GUARDIAN_* secret the parent holds (KMS master, JWT, seal key,
+            # DB/Redis URLs). Engine code has no legitimate use for any — it works from the `func`
+            # closure's ScanContext — and get_settings() is @lru_cache'd before the fork, so
+            # clearing them here does not affect settings already resolved. Defence in depth on top
+            # of the plane split (ISSUE-3): even on a plane that still holds a key, a malicious file
+            # that achieves code execution inside this child finds no secret in its environment.
+            _scrub_secret_env()
             if not policy.allow_network:
                 _install_egress_guard()
             else:

@@ -42,6 +42,7 @@ from guardian_scanner.celery_app import celery_app
 from guardian_scanner.engines.base import ScanContext
 from guardian_scanner.normalize import merge_sighting, severity_counts, to_finding
 from guardian_scanner.registry import get_engine
+from guardian_scanner.scan_plane import EngineOutcome, _collect_inventory, run_engine_offloaded
 from guardian_scanner.vuln_match import KbVulnMatcher
 
 log = get_logger("guardian.scanner")
@@ -53,21 +54,32 @@ _CLONE_TIMEOUT = 120
 _DEFAULT_HISTORY_DEPTH = 1000
 
 
-def _run_engine(engine, ctx: ScanContext) -> list:  # noqa: ANN001 - engine is a ScanEngine
-    """Execute an engine, optionally inside the worker sandbox (5A hard gate).
+def _run_engine(engine, ctx: ScanContext) -> EngineOutcome:  # noqa: ANN001 - engine is a ScanEngine
+    """Execute an engine and return its findings, health, and SBOM inventory (EngineOutcome).
 
-    When `sandbox_engines` is on, untrusted-input engines run in a resource-limited, egress-
-    restricted child process. SCA is exempt: it matches against the local KB over a DB handle that
-    isn't fork-safe, and its input (trusted, local advisory data) is low-risk — it stays in-process.
+    SCA always stays in-process here: it matches against the local KB over a DB handle that isn't
+    fork-safe, and its input (trusted, local advisory data) is low-risk. Every other engine parses
+    attacker-controlled bytes:
+
+    * with `scan_offload` on (ISSUE-3), it is handed to the DB-less, master-key-less `scan` plane,
+      which runs it and returns findings + health + inventory sealed with the broker key; the
+      control plane here never runs the untrusted engine code and its collect_inventory pass; or
+    * with offload off (single-worker/dev/test), it runs in-process — still inside the fork sandbox
+      when `sandbox_engines` is set — exactly as before, and health/inventory are collected locally.
     """
     settings = get_settings()
+    if engine.key != EngineKey.SCA and settings.scan_offload:
+        return run_engine_offloaded(engine.key.value, ctx)
     if (
         settings.sandbox_engines
         and sandbox.supported()
         and engine.key != EngineKey.SCA
     ):
-        return sandbox.run_in_sandbox(lambda: list(engine.run(ctx)), sandbox.policy_for(engine.key))
-    return list(engine.run(ctx))
+        raws = sandbox.run_in_sandbox(lambda: list(engine.run(ctx)), sandbox.policy_for(engine.key))
+    else:
+        raws = list(engine.run(ctx))
+    return EngineOutcome(raws=raws, health=engine.health(),
+                         inventory=_collect_inventory(engine, ctx))
 
 
 def _maybe_store_proof(session, finding, raw) -> None:  # noqa: ANN001
@@ -104,17 +116,19 @@ def _maybe_store_proof(session, finding, raw) -> None:  # noqa: ANN001
         log.warning("proof_store_failed", error=f"{type(exc).__name__}: {exc}"[:200])
 
 
-def _accumulate_sbom(engine, ctx, raws, inventory_acc, vuln_acc) -> None:  # noqa: ANN001
-    """Collect one engine's component inventory + the vulnerabilities it found, into scan-level
+def _accumulate_sbom(inventory, raws, inventory_acc, vuln_acc) -> None:  # noqa: ANN001
+    """Merge one engine's already-collected inventory + the vulnerabilities it found into scan-level
     accumulators. Called after each engine runs so a scan's SBOM merges every source that can
     enumerate components (SCA repo deps, container image packages, server packages via the agent,
     Android native libs, iOS frameworks) — one SBOM per scan, not one per engine. Never fatal.
+
+    `inventory` is the list the engine already produced (in-process, or on the scan plane) — this
+    function no longer re-runs `collect_inventory`, so no untrusted parsing happens here on the
+    control plane (ISSUE-3).
     """
     try:
-        collect = getattr(engine, "collect_inventory", None)
-        if callable(collect):
-            for (n, v, e, s) in (collect(ctx) or []):
-                inventory_acc.append(Component(name=n, version=v, ecosystem=e, source=s))
+        for (n, v, e, s) in (inventory or []):
+            inventory_acc.append(Component(name=n, version=v, ecosystem=e, source=s))
         # Any dependency/package finding this engine produced feeds the vulnerabilities section, so
         # the SBOM and the findings never disagree. A package-shaped location marks such a finding.
         for raw in raws:
@@ -213,7 +227,9 @@ def _prepare_workspace(asset: Asset) -> tuple[str | None, str | None, str | None
             sandbox._resolve_public_address(host, _clone_port(asset.identifier))  # reject internal
         except PermissionError as exc:
             raise RuntimeError(f"workspace preparation refused: {exc}") from exc
-        tmp = tempfile.mkdtemp(prefix="guardian_ws_")
+        # On the shared scan-workspace dir when configured, so a scan-plane worker in a SEPARATE
+        # container can read the clone the control plane just made (ISSUE-3); else the system temp.
+        tmp = tempfile.mkdtemp(prefix="guardian_ws_", dir=get_settings().scan_workspace_dir or None)
         # Depth is the difference between scanning a snapshot and scanning a repository. A secret
         # committed and later deleted is invisible at depth 1 while remaining readable by anyone
         # who can clone, so history is fetched by default and bounded rather than skipped.
@@ -263,7 +279,9 @@ def _materialize_artifact(session, asset: Asset) -> tuple[str | None, str | None
         # The pointer is dangling (deleted, or never belonged to this asset/tenant). The engine will
         # raise its own "no artifact provided" and the scan fails clearly, which is correct.
         return None, None
-    tmp = tempfile.mkdtemp(prefix="guardian_artifact_")
+    # Shared scan-workspace dir when set (readable by a separate scan-plane container), else temp.
+    _ws = get_settings().scan_workspace_dir or None
+    tmp = tempfile.mkdtemp(prefix="guardian_artifact_", dir=_ws)
     # Fixed, server-chosen filename with the artifact's own extension — never the uploader's name.
     ext = "apk" if record.kind == "apk" else "ipa"
     path = os.path.join(tmp, f"artifact.{ext}")
@@ -482,11 +500,13 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                 # Business impact defaults to the customer's criticality (overridable per asset).
                 business_impact = (asset.config or {}).get("business_impact", customer.criticality)
                 try:
-                    raws = _run_engine(engine, ctx)
+                    outcome = _run_engine(engine, ctx)
+                    raws = outcome.raws
                     # Record the engine's own health alongside its version. WP-E2 reads this to
                     # decide whether an empty result is evidence: an engine that completed without
-                    # its tool saw less, and calling that "resolved" would close real findings.
-                    health = engine.health()
+                    # its tool saw less, and calling that "resolved" would close real findings. When
+                    # offloaded, this health comes back from the scan plane with the results.
+                    health = outcome.health
                     run.tool_versions = {
                         engine.key.value: engine.version,
                         "degraded": bool(getattr(health, "degraded", False)),
@@ -525,10 +545,11 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                                 prior, finding, scan_id=scan.id, engine_run_id=run.id)
                     run.status = "completed"
                     engine_statuses.append("completed")
-                    # If this engine can enumerate components (SCA deps, container image packages,
-                    # server packages via the agent, Android/iOS bundled libraries), collect them
-                    # and any package vulnerabilities into the scan-level SBOM accumulators.
-                    _accumulate_sbom(engine, ctx, raws, sbom_inventory, sbom_vulns)
+                    # If this engine enumerated components (SCA deps, container image packages,
+                    # server packages via the agent, Android/iOS bundled libraries), merge them and
+                    # any package vulnerabilities into the scan-level SBOM accumulators. The
+                    # inventory was collected where the engine ran (scan plane when offloaded).
+                    _accumulate_sbom(outcome.inventory, raws, sbom_inventory, sbom_vulns)
                 except Exception as exc:  # noqa: BLE001 - isolate per-engine failure
                     run.status = "failed"
                     run.error = str(exc)[:2000]
