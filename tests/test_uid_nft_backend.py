@@ -50,13 +50,35 @@ def _nft(*a):
 def _can_isolate() -> bool:
     if os.geteuid() != 0:
         return False
-    if _nft("add", "table", "inet", "guardian_probe").returncode != 0:
+    try:
+        if _nft("add", "table", "inet", "guardian_probe").returncode != 0:
+            return False
+        _nft("delete", "table", "inet", "guardian_probe")
+    except (FileNotFoundError, OSError):
+        # No `nft` binary on this host (or it cannot be executed): treat as "cannot isolate" and let
+        # the kernel tests SKIP, rather than raising FileNotFoundError out of a module-level
+        # skipif() and aborting collection for the whole file on a root host without nftables.
         return False
-    _nft("delete", "table", "inet", "guardian_probe")
     return True
 
 
 _kernel = pytest.mark.skipif(not _can_isolate(), reason="requires root + nftables (CAP_NET_ADMIN)")
+
+
+def test_can_isolate_skips_instead_of_aborting_when_nft_is_missing(monkeypatch):
+    # Regression: on a root host with no `nft` binary, `nft ...` raises FileNotFoundError. If that
+    # escaped the module-level skipif() it would abort collection of the whole file. _can_isolate()
+    # must swallow it and return False so the kernel tests SKIP instead.
+    import sys
+
+    mod = sys.modules[__name__]
+    monkeypatch.setattr("os.geteuid", lambda: 0)   # pretend we are root, past the first gate
+
+    def _boom(*_a):
+        raise FileNotFoundError("nft: command not found")
+
+    monkeypatch.setattr(mod, "_nft", _boom)
+    assert mod._can_isolate() is False             # returns, does not raise
 
 
 def _job(job_id, targets, ports, *, allow_live=True):
