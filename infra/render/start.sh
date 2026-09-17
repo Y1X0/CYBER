@@ -44,8 +44,11 @@ log "scan plane"
 # that still carries either), and GUARDIAN_SCAN_PLANE=true marks it. It stays DB-less and needs only
 # the broker-seal key (already in the environment) to unseal its job + sealed per-scan creds and
 # seal its findings back. The control-plane worker below sets GUARDIAN_SCAN_OFFLOAD=true so run_scan
-# hands engine execution here rather than running it in-process next to the master key.
-env -u GUARDIAN_JWT_SECRET -u GUARDIAN_ENCRYPTION_KEY GUARDIAN_SCAN_PLANE=true \
+# hands engine execution here rather than running it in-process next to the master key. The DB URLs
+# are set EMPTY (not just unset — the settings default is a non-empty localhost DSN that would fail
+# the production TLS check) so this plane is DB-less.
+env -u GUARDIAN_JWT_SECRET -u GUARDIAN_ENCRYPTION_KEY \
+  GUARDIAN_DATABASE_URL="" GUARDIAN_APP_DATABASE_URL="" GUARDIAN_SCAN_PLANE=true \
   celery -A guardian_scanner.celery_app.celery_app worker \
   --queues scan --concurrency 1 --loglevel INFO &
 SCAN_PID=$!

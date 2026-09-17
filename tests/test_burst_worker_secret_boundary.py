@@ -15,6 +15,7 @@ worker does not mark itself an execution plane (so the secrets it carries are th
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -128,13 +129,19 @@ def test_control_worker_only_forwards_control_plane_secrets():
 
 def test_scan_plane_container_holds_no_master_keys():
     # ISSUE-3: the untrusted-engine (scan) plane must receive NEITHER the KMS master NOR the JWT
-    # secret NOR a DB URL — only the broker-seal key — and must be marked a scan plane so config
-    # refuses to boot it with a master key.
+    # secret — only the broker-seal key — and must be marked a scan plane so config refuses to boot
+    # it with a master key.
     invocation = _scan_worker_invocation()
-    for forbidden in ("GUARDIAN_JWT_SECRET", "GUARDIAN_ENCRYPTION_KEY",
-                      "GUARDIAN_DATABASE_URL", "GUARDIAN_APP_DATABASE_URL"):
-        assert f"-e {forbidden}" not in invocation, \
-            f"the scan plane must not receive {forbidden}"
+    # The master keys must be entirely absent — not forwarded, not set.
+    for forbidden in ("GUARDIAN_JWT_SECRET", "GUARDIAN_ENCRYPTION_KEY"):
+        assert forbidden not in invocation, f"the scan plane must not receive {forbidden}"
+    # DB-less: DB URLs may be set EMPTY (`-e VAR=`) but must never be FORWARDED with a value (a bare
+    # `-e VAR` pulls the real DSN from the runner env). The settings default is a non-empty localhost
+    # DSN, so they must be present-and-empty, not omitted.
+    for db in ("GUARDIAN_DATABASE_URL", "GUARDIAN_APP_DATABASE_URL"):
+        assert f"-e {db}=" in invocation, f"the scan plane must set {db} empty (DB-less)"
+        assert not re.search(rf"-e {db}(?![=\w])", invocation), \
+            f"the scan plane must not forward a {db} value"
     assert "GUARDIAN_SCAN_PLANE=true" in invocation, "scan container must be marked a scan plane"
     assert "-e GUARDIAN_BROKER_SEAL_KEY" in invocation, "scan plane needs the broker-seal key"
 

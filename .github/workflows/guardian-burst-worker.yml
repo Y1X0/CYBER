@@ -198,12 +198,15 @@ jobs:
           # NEITHER the KMS master NOR the JWT secret — only the broker-seal key. Start it first,
           # detached, sharing a workspace volume with the control worker below; the control worker
           # sets GUARDIAN_SCAN_OFFLOAD=true and hands engine execution to it over the `scan` queue.
-          # It gets no GUARDIAN_JWT_SECRET / GUARDIAN_ENCRYPTION_KEY / DB URL: config refuses a
-          # scan_plane that carries a master key, so a mis-set secret crashes it here, loudly.
+          # It gets no GUARDIAN_JWT_SECRET / GUARDIAN_ENCRYPTION_KEY: config refuses a scan_plane
+          # that carries a master key, so a mis-set secret crashes it here, loudly. DB URLs are set
+          # EMPTY (not omitted) to keep it DB-less — the settings default is a non-empty localhost
+          # DSN, which would otherwise fail the production TLS check.
           docker volume create guardian-scan-ws >/dev/null
           docker run -d --name guardian-scan \
             -e GUARDIAN_ENV=production \
             -e GUARDIAN_REDIS_URL -e GUARDIAN_BROKER_SEAL_KEY \
+            -e GUARDIAN_DATABASE_URL= -e GUARDIAN_APP_DATABASE_URL= \
             -e GUARDIAN_SCAN_PLANE=true -e GUARDIAN_SANDBOX_ENGINES=true \
             -e GUARDIAN_SCAN_WORKSPACE_DIR=/var/guardian/scan \
             -v guardian-scan-ws:/var/guardian/scan \
