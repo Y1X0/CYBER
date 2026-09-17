@@ -5,11 +5,10 @@ and stay held:
 
   * the runtime image reference is IMMUTABLE — pinned by `@sha256:` digest, never a mutable tag
     (`:latest`, `:main`, `:sha-<ref>`, or a bare tag) that could drift under a fixed reference; and
-  * the workflow's broker-URL "normalise" step is a bounded, secret-safe shim that only appends
-    `ssl_cert_reqs=required` — it exists ONLY because the currently-pinned image predates
-    `celery_redis_url`. Current source normalises the broker URL in-process, so a scanner image
-    rebuilt from HEAD makes that step removable. This test encodes that removal condition so the
-    shim cannot silently become permanent.
+  * the broker URL is normalised by the image itself (`celery_redis_url`), NOT by a workflow-level
+    shim. The pinned image now postdates that function, so the old "Normalise the broker URL" step
+    was removed; this test asserts it stays removed and that the image still contains the function it
+    was replaced by, so the shim cannot silently creep back in.
 
 These are static checks over the real workflow YAML + source — they do not build or pull an image.
 Rebuilding + repinning to a current digest is a release-pipeline action (it needs GHCR push
@@ -72,29 +71,37 @@ def test_deploy_worker_provisions_by_digest_not_tag():
     assert "cyber-scanner@{digest}" in text, "deploy worker must provision the image by digest"
 
 
-# ── B. the broker-URL shim is bounded, secret-safe, and removable ────────────────────────────────
-def test_broker_normaliser_only_appends_ssl_cert_reqs_and_leaks_no_secret():
-    run = _step(_BURST, "Normalise the broker URL for the pinned image")["run"]
-    # Only that one query parameter is ever added…
-    assert "ssl_cert_reqs=required" in run
-    assert run.count("_replace(query=") <= 1
-    # …the derived value is masked before it can be emitted…
-    assert "::add-mask::" in run
-    # …and no NEW secret is introduced into the scanner environment by this step.
-    forbidden = ("JWT_SECRET", "ENCRYPTION_KEY", "PASSWORD", "PRIVATE_KEY")
-    for name in forbidden:
-        assert f"{name}=" not in run, f"the normalise step must not set {name}"
+# ── B. the broker-URL shim is gone; the image normalises the URL itself ──────────────────────────
+def test_broker_normalise_shim_is_removed_from_the_burst_worker():
+    # The pinned image now contains celery_redis_url, so the workflow-level normalisation shim was
+    # removed with the repin. It must not creep back: two copies of one rule are exactly what drifts.
+    names = [s.get("name") for s in _steps(_BURST)]
+    assert "Normalise the broker URL for the pinned image" not in names
+    text = _BURST.read_text()
+    # The shim's tell-tale mechanics must be gone too: it rewrote the broker URL into GITHUB_ENV and
+    # masked the derived value. Neither belongs in the workflow now that the image normalises it.
+    assert "GUARDIAN_REDIS_URL=" not in text, "workflow must not rewrite the broker URL via GITHUB_ENV"
+    assert "_replace(query=" not in text, "query-string rewriting belongs in the image, not the workflow"
+    assert "::add-mask::" not in text, "no derived-secret masking should remain once the shim is gone"
 
 
 def test_current_source_normalises_broker_url_in_process():
-    # The removal condition for the shim above: a scanner image built from current source normalises
-    # the broker URL itself (celery_redis_url), so once the pinned image is rebuilt the workflow step
-    # is redundant and must be deleted. If this ever stops being true, the shim is load-bearing and
-    # this test tells us so.
+    # The image (built from source at or after the celery_redis_url commit) normalises the broker URL
+    # itself, which is what makes the workflow shim above unnecessary. If this ever stops being true,
+    # the removed shim was load-bearing and this test tells us so.
     config = (_ROOT / "packages/common/src/guardian_common/config.py").read_text()
     celery_app = (_ROOT / "workers/scanner/src/guardian_scanner/celery_app.py").read_text()
     assert "def celery_redis_url(" in config
     assert "celery_redis_url(settings.redis_url)" in celery_app
+
+
+def test_queue_depth_reads_normalise_via_the_image_function():
+    # The read-only queue-depth observations run inside the image and must normalise the URL the same
+    # way the worker does — via celery_redis_url — rather than a second inline copy of that rule.
+    for name in ("Report queue depth before the burst", "Report queue depth after the burst"):
+        run = _step(_BURST, name)["run"]
+        assert "from guardian_common.config import celery_redis_url" in run
+        assert "celery_redis_url(os.environ[" in run
 
 
 # ── C. no fragile image/config runtime patching ──────────────────────────────────────────────────

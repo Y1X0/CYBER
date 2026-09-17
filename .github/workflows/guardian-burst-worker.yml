@@ -80,33 +80,29 @@ jobs:
       - name: Log in to GHCR
         run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
 
-      # Pinned by digest, not by tag: this is the exact artifact step 8 of run 32039299600 executed
-      # each tool inside. A floating tag would let the thing that runs in production drift away from
+      # Pinned by digest, not by tag: this is the exact artifact guardian-deploy-worker.yml built and
+      # pushed from HEAD. A floating tag would let the thing that runs in production drift away from
       # the thing that was verified. (Immutability is enforced by tests/test_scanner_image_supply_chain.py.)
       #
-      # SECURITY STALENESS — repin owed. This digest was built at `a959396` (17 Aug 2026), which
-      # PREDATES the scanner security hardening on this branch: the secure artifact-upload path
+      # Built at `cd01ace` by guardian-deploy-worker.yml (mode: publish, run 35187333995). This commit
+      # POSTDATES the scanner security hardening on this branch: the secure artifact-upload path
       # (f65c09f — AUD-P1-5 zip-bomb bounds, AUD-P1-6 tenant/asset-scoped artifact resolution that
       # stops the engine reading a config-supplied filesystem path, AUD-P1-7), the mobile/iOS engines,
-      # and `celery_redis_url` (0317a86 — see the broker-URL step below). So a scan this burst worker
-      # executes runs OLDER engine code. The fix is a rebuild + repin, NOT a code edit here:
-      #   1. Run guardian-deploy-worker.yml (mode: plan) to build ghcr.io/y1x0/cyber-scanner from
-      #      current HEAD and read the new immutable @sha256 digest it prints.
-      #   2. Replace the digest below with that verified digest.
-      #   3. Delete the "Normalise the broker URL" step — a current image normalises it in-process.
-      # This requires GHCR push credentials + running in CI; it is a release-pipeline action.
+      # and `celery_redis_url` (0317a86). Because the image now contains `celery_redis_url`, the broker
+      # URL is normalised in-process and the workflow-level shim that used to live here was removed.
+      # To repin after a future rebuild: run guardian-deploy-worker.yml (mode: publish), read the
+      # @sha256 digest it prints, and replace the digest below.
       - name: Pull the verified scanner image
         id: image
         run: |
-          IMAGE="ghcr.io/y1x0/cyber-scanner@sha256:80037347e22ee4574bc9ebfe5a557cfb0399d178049cf57a0c20be81102e61ac"
+          IMAGE="ghcr.io/y1x0/cyber-scanner@sha256:a338c421ca68640f017981c089210ab1a853d864cca0fd1b6469af220b9cb8bd"
           echo "ref=$IMAGE" >> "$GITHUB_OUTPUT"
           docker pull "$IMAGE"
 
       # AUD-P1-6 guard: refuse to run any scanner image whose source commit predates the worker
-      # file-read fix (f65c09f). The stale digest pinned above was built at a959396, which is BEFORE
-      # that fix and honours a tenant-controlled `local_path` — so this step fails until the image is
-      # rebuilt from current HEAD and the digest above is repinned (see the pull step's comment). The
-      # revision is read from the image's own org.opencontainers.image.revision label; ancestry is
+      # file-read fix (f65c09f). The digest pinned above was built at cd01ace, a descendant of that
+      # fix, so this guard passes; it stays as a tripwire against a future repin to a stale digest.
+      # The revision is read from the image's own org.opencontainers.image.revision label; ancestry is
       # proved against this checkout, so no value is trusted that the repo cannot verify.
       - name: Refuse a scanner image that predates the AUD-P1-6 fix
         env:
@@ -154,67 +150,25 @@ jobs:
           fi
           echo "All required settings present (values not shown)."
 
-      # Why this exists here and not in the image: the digest pinned above was built at `a959396`
-      # (17 Aug 2026). The normalisation that makes a `rediss://` URL acceptable to Celery landed in
-      # `0317a86` (21 Aug 2026), four days later, so `celery_redis_url` does not exist inside this
-      # image. Its `celery_app` still hands `settings.redis_url` to the result backend raw, and
-      # Celery raises on a `rediss://` URL carrying no `ssl_cert_reqs` — at construction, before any
-      # network call. Unpatched, the worker dies at startup and the burst consumes nothing.
-      #
-      # Same contract as the function in the repository, deliberately: a URL that is not `rediss://`
-      # passes through, and so does one that already states its own `ssl_cert_reqs` — the operator
-      # chose that, and overwriting it would hide a misconfiguration instead of surfacing it. The
-      # parameter is appended as text rather than the query re-encoded, so an existing query is
-      # returned byte-for-byte as written.
-      #
-      # This step is redundant the moment the image is rebuilt from a commit that contains
-      # `celery_redis_url` — delete it then, rather than leaving two copies of one rule to drift.
-      - name: Normalise the broker URL for the pinned image
-        env:
-          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
-        run: |
-          python3 - <<'PY'
-          import os
-          from urllib.parse import parse_qsl, urlsplit, urlunsplit
-
-          raw = os.environ["GUARDIAN_REDIS_URL"]
-
-          def normalise(url: str) -> str:
-              try:
-                  parts = urlsplit(url)
-              except ValueError:
-                  return url
-              if parts.scheme != "rediss":
-                  return url
-              if "ssl_cert_reqs" in {k for k, _ in parse_qsl(parts.query, keep_blank_values=True)}:
-                  return url
-              separator = "&" if parts.query else ""
-              return urlunsplit(
-                  parts._replace(query=f"{parts.query}{separator}ssl_cert_reqs=required"))
-
-          fixed = normalise(raw)
-          # Derived from a secret but no longer equal to it, so Actions will not mask it on its own.
-          # Mask it before anything else can emit it, then hand it to later steps through the
-          # environment — never a step output, and never printed. Only the verdict is logged.
-          print(f"::add-mask::{fixed}")
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as handle:
-              handle.write(f"GUARDIAN_REDIS_URL={fixed}\n")
-          print("ssl_cert_reqs appended" if fixed != raw else
-                "left unchanged (not rediss://, or already carries ssl_cert_reqs)")
-          PY
-
-      # `GUARDIAN_REDIS_URL` is deliberately absent from this step's `env:` — a step-level value
-      # would override the normalised one the step above exported. Same in the two steps below.
+      # The pinned image (built at cd01ace) contains `celery_redis_url`, which normalises a `rediss://`
+      # broker URL in-process (appending `ssl_cert_reqs=required` when absent) before Celery constructs
+      # the result backend. The workflow-level normalisation shim that used to sit here — needed only
+      # while the pinned digest predated that function — was removed with the repin. The raw secret is
+      # handed to each step that needs it via a step-level `env:` below.
       - name: Report queue depth before the burst
         continue-on-error: true
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
         run: |
           # Read-only and allowed to fail: this is an observation, and losing the observation is not
           # a reason to skip the work.
           cat > /tmp/qdepth.py <<'PY'
           import os, redis
-          # Uses the already-normalised URL from the environment rather than importing
-          # `celery_redis_url` from the image, which was built before that function existed.
-          r = redis.from_url(os.environ["GUARDIAN_REDIS_URL"])
+          # Normalise the rediss:// URL the same way the worker does, via the image's own
+          # celery_redis_url (the pinned image now contains it), so a URL missing ssl_cert_reqs
+          # does not fail the read.
+          from guardian_common.config import celery_redis_url
+          r = redis.from_url(celery_redis_url(os.environ["GUARDIAN_REDIS_URL"]))
           for q in ("default", "recon", "tools"):
               print(f"  {q:<8} {r.llen(q)} pending")
           PY
@@ -228,6 +182,7 @@ jobs:
         env:
           GUARDIAN_DATABASE_URL: ${{ secrets.GUARDIAN_DATABASE_URL }}
           GUARDIAN_APP_DATABASE_URL: ${{ secrets.GUARDIAN_APP_DATABASE_URL }}
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
           GUARDIAN_JWT_SECRET: ${{ secrets.GUARDIAN_JWT_SECRET }}
           GUARDIAN_ENCRYPTION_KEY: ${{ secrets.GUARDIAN_ENCRYPTION_KEY }}
           GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
@@ -278,12 +233,16 @@ jobs:
       - name: Report queue depth after the burst
         if: always()
         continue-on-error: true
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
         run: |
           cat > /tmp/qdepth.py <<'PY'
           import os, redis
-          # Uses the already-normalised URL from the environment rather than importing
-          # `celery_redis_url` from the image, which was built before that function existed.
-          r = redis.from_url(os.environ["GUARDIAN_REDIS_URL"])
+          # Normalise the rediss:// URL the same way the worker does, via the image's own
+          # celery_redis_url (the pinned image now contains it), so a URL missing ssl_cert_reqs
+          # does not fail the read.
+          from guardian_common.config import celery_redis_url
+          r = redis.from_url(celery_redis_url(os.environ["GUARDIAN_REDIS_URL"]))
           for q in ("default", "recon", "tools"):
               print(f"  {q:<8} {r.llen(q)} pending")
           PY
