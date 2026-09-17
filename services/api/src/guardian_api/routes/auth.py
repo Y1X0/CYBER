@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from guardian_common.config import get_settings
 from guardian_common.logging import get_logger
 from guardian_common.metrics import REGISTRY
@@ -181,7 +181,8 @@ def signup(
 
     token = create_access_token(subject=str(user.id), secret=settings.jwt_secret,
                                 algorithm=settings.jwt_algorithm,
-                                ttl_minutes=settings.access_token_ttl_minutes)
+                                ttl_minutes=settings.access_token_ttl_minutes,
+                                claims={"tv": user.token_version or 0})
     del request
     return SignupResponse(access_token=token,
                           expires_in=settings.access_token_ttl_minutes * 60,
@@ -275,6 +276,7 @@ def login(
         secret=settings.jwt_secret,
         algorithm=settings.jwt_algorithm,
         ttl_minutes=settings.access_token_ttl_minutes,
+        claims={"tv": user.token_version},
     )
     record_audit(
         db, action="auth.login", actor_id=user.id, entity_type="user", entity_id=str(user.id), ip=ip
@@ -335,3 +337,24 @@ def me(identity: Identity = Depends(get_current_identity)) -> MeResponse:
         staff_role=identity.staff_role,
         portal_customer_id=identity.portal_customer_id,
     )
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(
+    identity: Identity = Depends(get_current_identity),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Revoke every access token this user currently holds.
+
+    Access tokens are stateless bearer tokens, so "log out" cannot mean deleting a server session —
+    there is none. Instead it bumps the user's token_version, which is embedded in every token as
+    `tv`; on the next request each outstanding token fails the `tv` check in get_current_identity
+    and is rejected as revoked. This closes the window where a token stolen before logout stays
+    valid until its natural expiry.
+    """
+    user = db.get(User, identity.user.id)
+    user.token_version += 1
+    record_audit(db, action="auth.logout", actor_id=user.id, tenant_id=identity.tenant_id,
+                 entity_type="user", entity_id=str(user.id))
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

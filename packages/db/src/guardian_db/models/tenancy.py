@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import Boolean, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Boolean, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -43,6 +43,11 @@ class User(Base, TimestampMixin):
     password_hash: Mapped[str | None] = mapped_column(String(512), nullable=True)
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    # Server-side session revocation: every access token carries the `token_version` it was minted
+    # at (claim `tv`); a request is rejected when the token `tv` != this value. Bumping it (logout,
+    # password change/reset, account disable) invalidates every token issued before the bump — a
+    # stolen bearer token cannot outlive a logout, statelessly, with no server-side token store.
+    token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class TenantMembership(Base, TimestampMixin):

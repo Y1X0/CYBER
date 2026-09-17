@@ -36,6 +36,7 @@ class _FakeUser:
         self.status = "active"
         self.email = "user@example.com"
         self.name = "User"
+        self.token_version = 0
 
 
 class _Session:

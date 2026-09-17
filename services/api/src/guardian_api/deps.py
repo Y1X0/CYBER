@@ -183,6 +183,17 @@ def get_current_identity(
     if user is None or user.status != "active":
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "user not found or inactive")
 
+    # Server-side revocation: the token carries the token_version it was minted at. A logout,
+    # password change/reset, or account disable bumps users.token_version, which makes every token
+    # minted before it fail here. A token minted before this feature (no `tv`) is treated as version
+    # 0, matching a user who has never bumped — so it keeps working until the first bump.
+    try:
+        token_tv = int(payload.get("tv", 0) or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid or expired token") from None
+    if token_tv != (user.token_version or 0):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "token has been revoked")
+
     identity: Identity | None = None
     memberships = db.execute(
         text("SELECT tenant_id, role FROM auth_memberships(:u)"), {"u": str(user_id)}

@@ -1,0 +1,20 @@
+# Security response headers for the built SPA. This file is copied verbatim into dist/ by Vite and
+# is read by static hosts that honour the Netlify/Render/Cloudflare `_headers` convention. It is the
+# authoritative source of the security headers in production (the CSP <meta> injected into the built
+# index.html is a defence-in-depth fallback for hosts that ignore this file).
+#
+# CSP notes:
+#   default-src 'self'      — same-origin by default; nothing loads cross-origin unless listed below.
+#   script-src 'self'       — NO inline scripts and NO eval; the app ships as external ES modules.
+#   style-src ... 'unsafe-inline' https://fonts.googleapis.com
+#                           — the Google Fonts stylesheet, plus React's inline style attributes.
+#   font-src https://fonts.gstatic.com — the Google Fonts files.
+#   connect-src 'self'      — the API is same-origin (the SPA is served behind the same host that
+#                             proxies /api). A SPLIT-ORIGIN deployment must add the API origin here.
+#   frame-ancestors 'none'  — not framable (clickjacking); header-only, so it lives here not in meta.
+/*
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; object-src 'none'; form-action 'self'
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
+  X-Frame-Options: DENY
+  Permissions-Policy: geolocation=(), camera=(), microphone=(), browsing-topics=()
