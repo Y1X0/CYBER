@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import PlainTextResponse
 from guardian_common.config import get_settings
+from guardian_common.logging import get_logger
 from guardian_common.metrics import REGISTRY
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -14,9 +15,19 @@ from guardian_api.observability import collect_execution_metrics, evaluate_slos,
 
 router = APIRouter()
 
+log = get_logger("guardian.api.health")
+
 
 @router.get("/health")
-def health() -> dict:
+def health(request: Request) -> dict:
+    # TEMPORARY proxy hop-count diagnostic (to be removed in a follow-up commit). Logs ONLY how many
+    # X-Forwarded-For entries arrived and the configured trusted-proxy count — never any IP value
+    # and never the header contents. A browser adds no client X-Forwarded-For, so every counted
+    # entry was added by the edge, and the correct GUARDIAN_TRUSTED_PROXY_COUNT equals it.
+    xff = request.headers.get("x-forwarded-for", "")
+    hops = len([p for p in xff.split(",") if p.strip()])
+    log.info("proxy_hops_observed", xff_entry_count=hops,
+             trusted_proxy_count_configured=get_settings().trusted_proxy_count)
     return {"status": "ok", "service": "guardian-api"}
 
 
