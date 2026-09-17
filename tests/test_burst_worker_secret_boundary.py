@@ -99,7 +99,9 @@ def test_burst_worker_is_not_marked_an_execution_plane():
 
 def test_burst_worker_only_forwards_control_plane_secrets():
     # The container env is constructed explicitly with `-e` flags. Assert it forwards exactly the
-    # control-plane secret set and nothing else secret-shaped (no stray API-only material).
+    # control-plane secret set and nothing else secret-shaped (no stray API-only material). In
+    # particular the SEEDING credential GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD must NOT be forwarded — the
+    # scanner container parses untrusted customer files and never seeds.
     run = _consume_step()["run"]
     expected = {
         "GUARDIAN_DATABASE_URL", "GUARDIAN_APP_DATABASE_URL", "GUARDIAN_REDIS_URL",
@@ -110,3 +112,21 @@ def test_burst_worker_only_forwards_control_plane_secrets():
     # Every secret-ish var forwarded is one the control-plane worker genuinely needs.
     stray = forwarded - expected - {"GUARDIAN_ENV"}
     assert stray == set(), f"unexpected vars forwarded to the scanner container: {stray}"
+
+
+# ── the scanner image marks its own processes so it never needs the seeding password ─────────────
+def test_scanner_image_marks_itself_a_scanner_worker():
+    # The reason the burst worker can drop GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: the scanner image sets
+    # GUARDIAN_SCANNER_WORKER=true, so Settings() skips the bootstrap-admin check on every process
+    # started from it. Set on the image (not per-deployment) so it cannot be forgotten on one worker.
+    dockerfile = (_ROOT / "infra/docker/Dockerfile.scanner").read_text()
+    assert "GUARDIAN_SCANNER_WORKER=true" in dockerfile, \
+        "scanner image must mark its processes as scanner workers"
+
+
+def test_api_image_does_not_mark_itself_a_scanner_worker():
+    # The API/control plane runs the seed and MUST still enforce the bootstrap-admin check, so its
+    # image must never carry the scanner-worker marker.
+    dockerfile = (_ROOT / "infra/docker/Dockerfile").read_text()
+    assert "GUARDIAN_SCANNER_WORKER" not in dockerfile, \
+        "the API image must not mark itself a scanner worker — it must keep enforcing the seed check"

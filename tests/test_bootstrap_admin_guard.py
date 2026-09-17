@@ -8,11 +8,15 @@ before any write. local/dev/test/ci keep the convenience default.
 
 from __future__ import annotations
 
+import base64
+
 import pytest
 from guardian_common.config import _DEFAULT_BOOTSTRAP_PASSWORD, Settings
 from pydantic import ValidationError
 
 _STRONG = "x" * 40
+_SEAL = "s" * 40
+_PUB = base64.b64encode(b"u" * 32).decode()  # tool-plane public signing key (verify-only)
 
 
 def _prod(**over):
@@ -28,10 +32,47 @@ def _prod(**over):
     return Settings(**base)
 
 
-# ── config fail-fast ─────────────────────────────────────────────────────────────────────────────
+# ── config fail-fast: the SEEDING plane (API/control plane) rejects the default password ──────────
 def test_production_default_bootstrap_password_is_rejected():
+    # The API/control plane runs the seed and reads the password, so it must reject the default. It
+    # sets none of the worker-plane markers.
     with pytest.raises(ValidationError, match="BOOTSTRAP_ADMIN_PASSWORD must be changed"):
         _prod(bootstrap_admin_password=_DEFAULT_BOOTSTRAP_PASSWORD)
+
+
+# ── the WORKER planes never seed, so the password check is skipped and not required there ─────────
+def test_scanner_worker_does_not_require_a_bootstrap_password():
+    # The default-queue scanner worker (the burst worker's role) is DB-bound but never seeds. It must
+    # boot in production with the default password untouched — because that seeding credential is not
+    # meant to be forwarded into a process that parses untrusted customer files at all.
+    s = _prod(scanner_worker=True, bootstrap_admin_password=_DEFAULT_BOOTSTRAP_PASSWORD)
+    assert s.scanner_worker is True
+    assert s.bootstrap_admin_password == _DEFAULT_BOOTSTRAP_PASSWORD  # accepted, not rejected
+
+
+def test_tool_plane_does_not_require_a_bootstrap_password():
+    s = _prod(
+        tool_plane=True, jwt_secret="", encryption_key="", broker_seal_key=_SEAL,
+        app_database_url="", job_signing_public_key=_PUB,
+        bootstrap_admin_password=_DEFAULT_BOOTSTRAP_PASSWORD,
+    )
+    assert s.tool_plane is True
+    assert s.bootstrap_admin_password == _DEFAULT_BOOTSTRAP_PASSWORD
+
+
+def test_recon_plane_does_not_require_a_bootstrap_password():
+    s = _prod(
+        recon_plane=True, jwt_secret="", encryption_key="", app_database_url="",
+        bootstrap_admin_password=_DEFAULT_BOOTSTRAP_PASSWORD,
+    )
+    assert s.recon_plane is True
+    assert s.bootstrap_admin_password == _DEFAULT_BOOTSTRAP_PASSWORD
+
+
+def test_scanner_worker_marker_defaults_false_so_the_api_still_enforces():
+    # Guard against the marker silently defaulting True (which would disable the API check): a plain
+    # control-plane Settings has scanner_worker False and still rejects the default password.
+    assert _prod().scanner_worker is False
 
 
 def test_production_strong_bootstrap_password_is_accepted():

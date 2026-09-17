@@ -233,6 +233,15 @@ class Settings(BaseSettings):
     # (authorize/scope/policy/persist) runs where this is False. A misroute fails loudly.
     tool_plane: bool = False
 
+    # Scanner-worker marker. True on EVERY scanner Celery worker process (default/recon/tools) —
+    # set in guardian_scanner.celery_app before Settings is constructed, so no per-deployment env is
+    # needed. A scanner worker runs engines over untrusted customer files and NEVER seeds the
+    # bootstrap admin (only the API/control plane runs `python -m guardian_api.seed`). It exists so
+    # the bootstrap-admin-password check below is enforced where the password is used and skipped on
+    # the planes that must never carry it. It is NOT a trust boundary on its own — the JWT/KMS
+    # secret boundary is still governed by tool_plane/recon_plane above.
+    scanner_worker: bool = False
+
     # DevSecOps: GitHub webhook HMAC secret (empty = webhook endpoint rejects all deliveries).
     github_webhook_secret: str = ""
 
@@ -384,9 +393,16 @@ class Settings(BaseSettings):
                 "user:PASSWORD@host) outside local/dev — an unauthenticated broker/replay store "
                 "lets a compromised execution-plane worker tamper the queue and defeat replay"
             )
-        # Bootstrap-admin credential (P1-B): never boot production with the publicly-documented
-        # default owner password — the seed would otherwise create a known-credential owner.
-        if self.bootstrap_admin_password == _DEFAULT_BOOTSTRAP_PASSWORD:
+        # Bootstrap-admin credential (P1-B): never boot the SEEDING plane in production with the
+        # publicly-documented default owner password — the seed would otherwise create a
+        # known-credential owner. Only the API/control plane runs `python -m guardian_api.seed` and
+        # reads this value; the scanner workers (default/recon/tools) never seed and must never
+        # carry a seeding credential into a process that parses untrusted customer files. So enforce
+        # this only off the worker planes, and do not force the password into those containers' env.
+        seeds_bootstrap_admin = not (
+            self.scanner_worker or self.tool_plane or self.recon_plane
+        )
+        if seeds_bootstrap_admin and self.bootstrap_admin_password == _DEFAULT_BOOTSTRAP_PASSWORD:
             raise ValueError(
                 "GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD must be changed from the default "
                 "outside local/dev"

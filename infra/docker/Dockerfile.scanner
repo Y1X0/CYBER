@@ -90,7 +90,13 @@ LABEL org.opencontainers.image.title="guardian-scanner" \
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    # Marks every process from THIS image as a scanner worker (default/recon/tools). Config
+    # validation reads it to skip the bootstrap-admin-password check: a scanner worker parses
+    # untrusted customer files and must never be handed that seeding credential, which belongs only
+    # to the API/control plane (a separate image that runs `python -m guardian_api.seed`). Set on the
+    # image, not per-deployment, so it cannot be forgotten on one worker; the API image never sets it.
+    GUARDIAN_SCANNER_WORKER=true
 
 # git: repository assets are cloned WITH history, because a secret deleted in a later commit is
 # still readable and the working tree alone shows nothing (WP-D5).
