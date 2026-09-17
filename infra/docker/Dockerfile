@@ -28,19 +28,24 @@ RUN apt-get update \
 WORKDIR /app
 
 # Source must be present before the editable install (monorepo, multi-src discovery).
-COPY pyproject.toml README.md alembic.ini ./
+COPY pyproject.toml README.md alembic.ini requirements.lock ./
 COPY packages ./packages
 COPY services ./services
 COPY workers ./workers
 
+# Install the hash-verified dependency set from the lock, then the app without re-resolving:
+# --require-hashes makes pip refuse any artifact whose hash is not in the lock, so a substituted or
+# compromised upstream wheel cannot enter the image.
 # setuptools >=78.1.1 fixes CVE-2025-47273 (path traversal); upgraded in-image before the install.
 # Then drop pip's bundled vendoring manifests (bom.cdx.json = CycloneDX SBOM, vendor.txt = pin list).
 # These describe pip's OWN internal _vendor copies (setuptools 70.3.0 / msgpack 1.1.2), not the
-# runtime packages (which are the upgraded 84.0.0 / 1.2.1). Trivy's SBOM analyzer parses them and
-# mis-attributes those vendored versions as image findings. They are build/maintenance metadata only
-# (bom.cdx.json is never read by pip; vendor.txt is read solely by the `pip debug` subcommand), so
-# removing them clears the false attribution at its source without touching any runtime dependency.
-RUN pip install --upgrade pip "setuptools>=78.1.1" && pip install -e . \
+# runtime packages. Trivy's SBOM analyzer parses them and mis-attributes those vendored versions as
+# image findings. They are build/maintenance metadata only (bom.cdx.json is never read by pip;
+# vendor.txt is read solely by the `pip debug` subcommand), so removing them clears the false
+# attribution at its source without touching any runtime dependency.
+RUN pip install --upgrade pip "setuptools>=78.1.1" \
+    && pip install --require-hashes -r requirements.lock \
+    && pip install -e . --no-deps \
     && vendor="$(python -c 'import os, pip._vendor as v; print(os.path.dirname(v.__file__))')" \
     && rm -f "$vendor/bom.cdx.json" "$vendor/vendor.txt"
 

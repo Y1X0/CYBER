@@ -13,8 +13,12 @@ set -euo pipefail
 log() { printf '[build] %s\n' "$1"; }
 
 log "application"
-pip install --upgrade pip
-pip install -e .
+# Install the exact, hash-verified dependency set from the lock (pinned floors + transitive deps),
+# then the app itself without re-resolving. --require-hashes makes pip refuse any artifact whose
+# hash is not in the lock, so a compromised or substituted upstream wheel cannot be installed.
+pip install --upgrade pip "setuptools>=78.1.1"
+pip install --require-hashes -r requirements.lock
+pip install -e . --no-deps
 
 log "security tools"
 # Best effort, and that is the point: a tool that fails to download makes its engine report

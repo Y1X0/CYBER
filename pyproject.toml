@@ -19,7 +19,12 @@ dependencies = [
     # Auth / security
     "argon2-cffi>=23.1",
     "pyjwt>=2.8",
-    "cryptography>=42.0",  # envelope encryption of credential references
+    "cryptography>=50",  # envelope encryption of credential references; floor raised for CVE fixes
+    # Transitive floors pinned explicitly so the lock cannot resolve a known-vulnerable version:
+    #   urllib3 (via requests/pip-audit)  — >=2.7 for recent redirect/auth-leak fixes
+    #   idna    (via httpx/email-validator) — >=3.15 for GHSA-jjg7-2v4v-x38h (DoS)
+    "urllib3>=2.7",
+    "idna>=3.15",
     # Data
     "sqlalchemy>=2.0",
     "alembic>=1.13",

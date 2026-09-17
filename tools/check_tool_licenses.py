@@ -65,6 +65,11 @@ def _package_name(token: str) -> str | None:
     token = token.strip().strip("\"'").lower()
     if not token or token.startswith("-"):
         return None
+    # A requirements file (`-r requirements.lock`/`.txt`) is not a third-party tool to licence-gate:
+    # it lists the app's OWN pinned dependencies, audited separately (pip-audit against the lock in
+    # CI). Without this the lock filename was mis-read as a package needing a registry row.
+    if token.endswith((".lock", ".txt")):
+        return None
     for sep in ("==", ">=", "<=", "~=", "@", "="):
         if sep in token:
             token = token.split(sep, 1)[0]

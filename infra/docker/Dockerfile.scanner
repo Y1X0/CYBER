@@ -126,12 +126,17 @@ RUN pip install --no-cache-dir "semgrep==${SEMGREP_VERSION}" "checkov==${CHECKOV
 
 WORKDIR /app
 
-COPY pyproject.toml README.md alembic.ini ./
+COPY pyproject.toml README.md alembic.ini requirements.lock ./
 COPY packages ./packages
 COPY services ./services
 COPY workers ./workers
 
-RUN pip install --upgrade pip "setuptools>=78.1.1" && pip install -e . \
+# Hash-verified dependency install from the lock, then the app without re-resolving. --require-hashes
+# refuses any artifact whose hash is not in the lock, so a substituted upstream wheel cannot enter
+# the scanner image (the plane that parses untrusted customer bytes).
+RUN pip install --upgrade pip "setuptools>=78.1.1" \
+    && pip install --require-hashes -r requirements.lock \
+    && pip install -e . --no-deps \
     && vendor="$(python -c 'import os, pip._vendor as v; print(os.path.dirname(v.__file__))')" \
     && rm -f "$vendor/bom.cdx.json" "$vendor/vendor.txt"
 

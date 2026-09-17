@@ -113,8 +113,10 @@ jobs:
           name: guardian-sbom
           path: sbom.json
 
-      - name: Dependency vulnerability scan (pip-audit)
-        # Recommended hardening, not a release blocker (per Phase 5 gate tiering): report advisories
-        # in our own dependency tree without failing the build on a fresh upstream CVE.
-        continue-on-error: true
-        run: pip-audit --desc --strict
+      - name: Dependency vulnerability scan (pip-audit against the lock)
+        # Audit the LOCK — the exact, hash-pinned set that ships (build.sh + both Dockerfiles install
+        # it with --require-hashes) — and FAIL the build on any advisory. Auditing the lock rather
+        # than the ambient install makes the gate deterministic: the same versions are checked here
+        # and shipped. A fresh upstream CVE now blocks release until the lock is bumped, which is the
+        # point of pinning. `--strict` also fails when a dependency cannot be audited.
+        run: pip-audit --desc --strict --require-hashes -r requirements.lock
