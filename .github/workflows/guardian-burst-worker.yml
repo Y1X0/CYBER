@@ -137,15 +137,10 @@ jobs:
           GUARDIAN_JWT_SECRET: ${{ secrets.GUARDIAN_JWT_SECRET }}
           GUARDIAN_ENCRYPTION_KEY: ${{ secrets.GUARDIAN_ENCRYPTION_KEY }}
           GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
-          # Settings() validates BOOTSTRAP_ADMIN_PASSWORD unconditionally on every plane, worker
-          # included — a missing/default value makes the worker die at import. Preflight it here so a
-          # gap fails fast with a clear message, not a Celery traceback mid-burst.
-          GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
         run: |
           missing=""
           for k in GUARDIAN_DATABASE_URL GUARDIAN_APP_DATABASE_URL GUARDIAN_REDIS_URL \
-                   GUARDIAN_JWT_SECRET GUARDIAN_ENCRYPTION_KEY GUARDIAN_BROKER_SEAL_KEY \
-                   GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD; do
+                   GUARDIAN_JWT_SECRET GUARDIAN_ENCRYPTION_KEY GUARDIAN_BROKER_SEAL_KEY; do
             [ -n "${!k}" ] || missing="$missing $k"
           done
           if [ -n "$missing" ]; then
@@ -191,8 +186,6 @@ jobs:
           GUARDIAN_JWT_SECRET: ${{ secrets.GUARDIAN_JWT_SECRET }}
           GUARDIAN_ENCRYPTION_KEY: ${{ secrets.GUARDIAN_ENCRYPTION_KEY }}
           GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
-          # Validated unconditionally by Settings() at worker import — see the preflight step.
-          GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD: ${{ secrets.GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD }}
           BEAT: ${{ inputs.beat == true && '--beat' || '' }}
         run: |
           set -o pipefail
@@ -215,7 +208,6 @@ jobs:
               -e GUARDIAN_ENV=production \
               -e GUARDIAN_DATABASE_URL -e GUARDIAN_APP_DATABASE_URL -e GUARDIAN_REDIS_URL \
               -e GUARDIAN_JWT_SECRET -e GUARDIAN_ENCRYPTION_KEY -e GUARDIAN_BROKER_SEAL_KEY \
-              -e GUARDIAN_BOOTSTRAP_ADMIN_PASSWORD \
               -e CELERY_CONCURRENCY=1 \
               "${{ steps.image.outputs.ref }}" \
               celery -A guardian_scanner.celery_app.celery_app worker \
