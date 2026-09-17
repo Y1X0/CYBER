@@ -13,11 +13,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "plan = report only; apply = build, push and provision"
+        description: "plan = build+load+verify only; publish = build+push (no provision); apply = build, push and provision a Render worker"
         type: choice
         required: true
         default: plan
-        options: [plan, apply]
+        options: [plan, publish, apply]
       plan_tier:
         description: "Render plan. starter is the cheapest background worker."
         type: choice
@@ -118,8 +118,9 @@ jobs:
         with:
           context: .
           file: infra/docker/Dockerfile.scanner
-          push: ${{ inputs.mode == 'apply' }}
-          load: ${{ inputs.mode != 'apply' }}
+          # publish and apply push to GHCR; plan only loads locally so the toolchain can be verified.
+          push: ${{ inputs.mode != 'plan' }}
+          load: ${{ inputs.mode == 'plan' }}
           tags: ghcr.io/y1x0/cyber-scanner:sha-${{ github.sha }}
           # Stamp the source commit so a consumer can PROVE which code the image runs (AUD-P1-6): the
           # burst worker refuses to run an image whose revision predates the worker file-read fix.
@@ -143,8 +144,14 @@ jobs:
       # Prove the tools are present in the artifact before it is deployed. An engine whose binary is
       # missing degrades to producing no findings, and an empty report reads exactly like a clean
       # one — so this asserts the image can do the job rather than assuming it.
+      - name: Print the pushed image digest
+        if: inputs.mode != 'plan'
+        run: |
+          echo "PUSHED_IMAGE=ghcr.io/y1x0/cyber-scanner@${{ steps.build.outputs.digest }}"
+          echo "revision=${{ github.sha }}"
+
       - name: Verify the toolchain inside the image
-        if: inputs.mode != 'apply'
+        if: inputs.mode == 'plan'
         run: |
           IMG=ghcr.io/y1x0/cyber-scanner:sha-${{ github.sha }}
           cat > /tmp/verify.sh <<'SH'
