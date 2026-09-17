@@ -10,9 +10,10 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import uuid
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -48,6 +49,25 @@ class User(Base, TimestampMixin):
     # password change/reset, account disable) invalidates every token issued before the bump — a
     # stolen bearer token cannot outlive a logout, statelessly, with no server-side token store.
     token_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class PasswordResetToken(Base, TimestampMixin):
+    """A single-use, hashed, expiring password-reset token (Item 6).
+
+    Only the SHA-256 hex of the raw token is stored, so a database read cannot reset anyone's
+    password — the raw token exists only in the delivery to the user. A token is consumed by setting
+    `used_at`, and a `confirm` also consumes every other outstanding token for the same user.
+    """
+
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id"), nullable=False, index=True)
+    # SHA-256 hex (64 chars) of the raw token — never the raw token itself.
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    expires_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class TenantMembership(Base, TimestampMixin):

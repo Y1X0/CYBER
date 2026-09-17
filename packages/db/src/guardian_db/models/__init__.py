@@ -45,6 +45,7 @@ from guardian_db.models.scheduling import Schedule
 from guardian_db.models.tenancy import (
     Customer,
     CustomerContact,
+    PasswordResetToken,
     Tenant,
     TenantMembership,
     User,
@@ -57,6 +58,7 @@ __all__ = [
     "ApiKey",
     "Approval",
     "Asset",
+    "PasswordResetToken",
     "AuditLog",
     "Authorization",
     "CapabilityGrant",

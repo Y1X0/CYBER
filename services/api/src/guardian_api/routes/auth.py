@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import datetime as dt
+import hashlib
 import re
+import secrets
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -16,7 +19,13 @@ from guardian_common.security import (
     verify_password,
 )
 from guardian_db.audit import record_audit
-from guardian_db.models import Customer, Tenant, TenantMembership, User
+from guardian_db.models import (
+    Customer,
+    PasswordResetToken,
+    Tenant,
+    TenantMembership,
+    User,
+)
 from guardian_db.session import set_tenant
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.exc import IntegrityError
@@ -356,5 +365,131 @@ def logout(
     user.token_version += 1
     record_audit(db, action="auth.logout", actor_id=user.id, tenant_id=identity.tenant_id,
                  entity_type="user", entity_id=str(user.id))
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ── Password reset (Item 6) ──────────────────────────────────────────────────────────────────────
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirm(BaseModel):
+    # A urlsafe token of 32 bytes is 43 chars; bound generously and cheaply reject nonsense.
+    token: str = Field(min_length=20, max_length=512)
+    new_password: str = Field(min_length=MIN_PASSWORD_LENGTH, max_length=200)
+
+
+def _hash_reset_token(raw: str) -> str:
+    """SHA-256 hex of a reset token. Only this is stored — never the raw token."""
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _reset_rate_limited(keys: list[str], settings) -> float | None:  # noqa: ANN001
+    """Fail-closed per-key rate limit for the reset endpoints. Returns Retry-After secs if over."""
+    limiter = login_limiter()
+    ceiling = settings.password_reset_per_minute
+    for key in keys:
+        ok, retry = limiter.hit(key, max_hits=ceiling, fail_closed=True)
+        if not ok:
+            return retry
+    return None
+
+
+def _deliver_reset_token(user: User, raw_token: str, settings) -> None:  # noqa: ANN001
+    """Deliver a reset token to the user.
+
+    There is no email provider wired into this repo yet, so this is the single delivery seam a
+    deployment overrides to send the reset link by email. It NEVER logs the raw token outside
+    local/dev (a token in a production log is a credential in a log). In local/dev it logs the token
+    so the flow is usable without email infrastructure.
+    """
+    if settings.is_local_or_dev:
+        log.info("password_reset_token_dev_only", user_id=str(user.id), reset_token=raw_token)
+    else:
+        # Production: record that a reset was requested, WITHOUT the token. A real deployment wires
+        # an email sender here. Until then the token is delivered by no channel in production.
+        log.info("password_reset_requested", user_id=str(user.id))
+
+
+@router.post("/password-reset/request", status_code=status.HTTP_202_ACCEPTED)
+def request_password_reset(
+    body: PasswordResetRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Begin a password reset. ALWAYS returns 202 — the response never reveals whether the email is
+    registered (no account enumeration). If it is a real, active account, a single-use token
+    (hashed at rest, 30-minute expiry) is created and delivered out of band."""
+    settings = get_settings()
+    email = body.email.lower()
+    ip, _ = resolve_client_ip(request)
+    # Rate-limit per email (bounds targeting one inbox) and per client IP (bounds a spraying src).
+    keys = [f"pwreset-req:{email}"]
+    bucket = client_bucket_key(ip)
+    if bucket is not None:
+        keys.append(f"pwreset-ip:{bucket}")
+    retry = _reset_rate_limited(keys, settings)
+    if retry is not None:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "too many reset requests",
+                            headers={"Retry-After": str(int(retry) + 1)})
+
+    user = db.query(User).filter(User.email == email).first()
+    if user is not None and user.status == "active":
+        raw = secrets.token_urlsafe(32)
+        expires = dt.datetime.now(dt.UTC) + dt.timedelta(
+            minutes=settings.password_reset_ttl_minutes)
+        db.add(PasswordResetToken(user_id=user.id, token_hash=_hash_reset_token(raw),
+                                  expires_at=expires))
+        record_audit(db, action="auth.password_reset.requested", actor_id=user.id,
+                     entity_type="user", entity_id=str(user.id), ip=ip)
+        db.commit()
+        _deliver_reset_token(user, raw, settings)
+    # Uniform answer whether or not the account exists.
+    return {"status": "if the account exists, a reset link has been sent"}
+
+
+@router.post("/password-reset/confirm", status_code=status.HTTP_204_NO_CONTENT)
+def confirm_password_reset(
+    body: PasswordResetConfirm,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Response:
+    """Complete a password reset with a valid, unused, unexpired token. Sets the new password and
+    bumps token_version so every existing session is revoked (Item 1). The token — and every other
+    outstanding reset token for the user — is consumed, so it cannot be replayed."""
+    settings = get_settings()
+    ip, _ = resolve_client_ip(request)
+    # Rate-limit confirmation per client IP to slow token guessing (the token itself is 256-bit).
+    bucket = client_bucket_key(ip)
+    if bucket is not None:
+        retry = _reset_rate_limited([f"pwreset-confirm:{bucket}"], settings)
+        if retry is not None:
+            raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "too many attempts",
+                                headers={"Retry-After": str(int(retry) + 1)})
+
+    now = dt.datetime.now(dt.UTC)
+    token_hash = _hash_reset_token(body.token)
+    row = db.query(PasswordResetToken).filter(
+        PasswordResetToken.token_hash == token_hash,
+        PasswordResetToken.used_at.is_(None),
+        PasswordResetToken.expires_at > now,
+    ).first()
+    if row is None:
+        # One generic error for unknown / used / expired — never reveal which.
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid or expired reset token")
+    user = db.get(User, row.user_id)
+    if user is None or user.status != "active":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid or expired reset token")
+
+    user.password_hash = hash_password(body.new_password)
+    user.token_version += 1     # revoke every access token issued before the reset
+    # Consume this token AND any other outstanding token for the user, so none can be replayed.
+    db.query(PasswordResetToken).filter(
+        PasswordResetToken.user_id == user.id,
+        PasswordResetToken.used_at.is_(None),
+    ).update({PasswordResetToken.used_at: now})
+    record_audit(db, action="auth.password_reset.completed", actor_id=user.id,
+                 entity_type="user", entity_id=str(user.id), ip=ip)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

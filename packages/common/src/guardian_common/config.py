@@ -146,6 +146,12 @@ class Settings(BaseSettings):
     # gateway concern (this in-app limiter is per-process). 0 disables the limiter.
     auth_rate_limit_per_minute: int = 10
 
+    # Password reset (Item 6). A reset token lives 30 minutes and is single-use. The request and
+    # confirm endpoints are rate-limited per email and per client IP (fail-closed) to bound email
+    # bombing and token guessing.
+    password_reset_ttl_minutes: int = 30
+    password_reset_per_minute: int = 5
+
     # Process-wide FAILED-login alert threshold (P1-γ). This is ALERT-ONLY and never blocks a login:
     # a blocking global limit lets one attacker deny login to everyone (including users with the
     # correct password), which is the DoS it must not become. When failed logins across the process
