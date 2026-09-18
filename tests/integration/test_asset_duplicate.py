@@ -29,7 +29,7 @@ def _client_and_customer():
     slug = uuid.uuid4().hex[:10]
     signup = client.post("/api/v1/auth/signup", json={
         "organization": f"Org {slug}", "company": "Test estate", "name": "Owner",
-        "email": f"owner-{slug}@x.invalid", "password": "a-long-enough-password"})
+        "email": f"owner-{slug}@example.com", "password": "a-long-enough-password"})
     assert signup.status_code == 201, signup.text
     hdr = {"Authorization": f"Bearer {signup.json()['access_token']}"}
     customer_id = signup.json()["customer_id"]
