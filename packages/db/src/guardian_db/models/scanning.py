@@ -42,7 +42,8 @@ class Scan(Base, TimestampMixin):
     # (the normal per-engine ownership gate, for every user) or "owner-direct" (the tenant OWNER
     # ran it against an unverified target under the owner-direct capability). Set once by the API
     # at dispatch — after a server-side owner-role re-check — and never by the worker or the client;
-    # the worker reads it to decide whether to bypass the ownership gate. Defaults to the safe value.
+    # the worker reads it to decide whether to bypass the ownership gate. Defaults to the safe
+    # value.
     authorization_basis: Mapped[str] = mapped_column(
         String(20), default="verified-ownership", server_default="verified-ownership",
         nullable=False,
