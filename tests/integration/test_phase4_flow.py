@@ -80,13 +80,14 @@ def test_authorization_gate_blocks_then_allows_active_engine():
 
         scan_blocked = mk_scan()
 
-    # No authorization → active CSPM engine is skipped, zero findings.
+    # No authorization → active CSPM engine is BLOCKED (distinct from a skipped engine so it never
+    # reads as a clean 0-findings result), zero findings.
     run_scan.apply(args=[scan_blocked]).get()
     with session_scope() as db:
         runs = (
             db.query(ScanEngineRun).filter(ScanEngineRun.scan_id == uuid.UUID(scan_blocked)).all()
         )
-        assert any(r.engine == "cspm" and r.status == "skipped" for r in runs)
+        assert any(r.engine == "cspm" and r.status == "blocked" for r in runs)
         assert db.query(Finding).filter(Finding.scan_id == uuid.UUID(scan_blocked)).count() == 0
 
         # Grant authorization, run again → findings appear.

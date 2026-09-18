@@ -57,8 +57,14 @@ def _estate():
             TenantMembership(user_id=admin.id, tenant_id=tenant.id,
                              role=StaffRole.ADMIN.value),
         ])
+        # An offline HTTP snapshot so that, under the tests' eager Celery, an owner-direct scan that
+        # actually runs the DAST engine (gate bypassed) reads from the snapshot instead of doing
+        # live network I/O — deterministic and network-free in CI.
+        host = f"{slug}.example.com"
         asset = Asset(tenant_id=tenant.id, customer_id=customer.id, name="app", kind="web",
-                      identifier=f"https://{slug}.example.com", exposure="public", config={})
+                      identifier=f"https://{host}", exposure="public",
+                      config={"http_snapshot": {"url": f"https://{host}", "headers": {},
+                                                "cookies": []}})
         db.add(asset)
         db.flush()
         return {"tenant": tenant.id, "asset": asset.id,
