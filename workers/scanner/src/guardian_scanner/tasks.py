@@ -19,7 +19,7 @@ from guardian_common.crypto import decrypt_json
 from guardian_common.logging import get_logger
 from guardian_core import authorization as authz
 from guardian_core import safescan
-from guardian_core.enums import ACTIVE_ENGINES, EngineKey, ScanStatus
+from guardian_core.enums import ACTIVE_ENGINES, AuthorizationBasis, EngineKey, ScanStatus
 from guardian_core.proof import SafeReproduction, UnsafeReproductionError, build_proof
 from guardian_core.sbom import Component, Vulnerability, build_sbom
 from guardian_db.audit import record_audit
@@ -452,13 +452,38 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
                 else:
                     scan_settings = {}
 
-                decision = (_authorized(session, asset, engine_key=engine_key)
-                            if needs_auth else None)
+                # Owner-direct (ISSUE owner-direct): the tenant OWNER ran this scan against an
+                # unverified target on their own authority — re-checked server-side at dispatch,
+                # affirmed per target, and written to the immutable audit log. For THIS scan only,
+                # the per-engine ownership gate is bypassed; the basis is a column the API set and
+                # neither the client nor this worker can forge. It never affects any other scan, and
+                # the safe-scanning verdict above (window / platform pause) still applied.
+                owner_direct = (needs_auth
+                                and scan.authorization_basis
+                                == AuthorizationBasis.OWNER_DIRECT.value)
+                if owner_direct:
+                    record_audit(
+                        session,
+                        action="scan.engine.owner_direct_authorized",
+                        tenant_id=scan.tenant_id,
+                        customer_id=scan.customer_id,
+                        entity_type="scan_engine_run",
+                        entity_id=str(run.id),
+                        metadata={"engine": engine_key,
+                                  "basis": AuthorizationBasis.OWNER_DIRECT.value},
+                    )
+                    decision = None
+                else:
+                    decision = (_authorized(session, asset, engine_key=engine_key)
+                                if needs_auth else None)
                 if decision is not None and not decision.allowed:
-                    run.status = "skipped"
+                    # BLOCKED, not silently skipped: an authorization block is a state the customer
+                    # can act on (verify ownership), so it is surfaced distinctly on the scan screen
+                    # rather than reading as "0 findings, all clear".
+                    run.status = "blocked"
                     # The reason, not just the refusal: "blocked" with no cause is a support ticket.
                     run.error = decision.reason
-                    engine_statuses.append("skipped")
+                    engine_statuses.append("blocked")
                     record_audit(
                         session,
                         action="scan.engine.blocked_unauthorized",
@@ -599,7 +624,10 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
         scan.finished_at = _now()
         if engine_statuses and all(s == "failed" for s in engine_statuses):
             scan.status = ScanStatus.FAILED.value
-        elif any(s in {"failed", "skipped"} for s in engine_statuses):
+        elif any(s in {"failed", "skipped", "blocked"} for s in engine_statuses):
+            # "blocked" (authorization) counts here too: a scan whose engines were all blocked is
+            # PARTIAL, never COMPLETED — the /engines view then shows the customer why and offers
+            # "Verify ownership", instead of the scan reading as a clean 0-findings result (WP-P0).
             scan.status = ScanStatus.PARTIAL.value
         else:
             scan.status = ScanStatus.COMPLETED.value

@@ -116,6 +116,14 @@ class Settings(BaseSettings):
     # touches a customer's network refuses, whatever their authorization says.
     active_scanning_paused: bool = False
 
+    # Owner-direct scanning. OFF by default so a fresh deploy is safe: while false, EVERY user —
+    # owner included — must have verified ownership for an active scan, exactly as before. When an
+    # operator sets GUARDIAN_OWNER_DIRECT_SCAN=true, and ONLY then, the tenant OWNER may run an
+    # active scan against an unverified target (the ownership gate is bypassed for that one scan).
+    # The owner role is re-checked server-side at dispatch, the owner affirms legal right per
+    # target, and both are written to the immutable audit log. This flag never affects non-owners.
+    owner_direct_scan: bool = False
+
     # Per-tenant ceilings (WP-G2). Platform defaults; a tenant may lower or raise them within the
     # hard ceiling via `tenants.settings["quota"]`. 0 disables that limit entirely, which is a
     # deliberate operational choice and not the effect of leaving a value unset.

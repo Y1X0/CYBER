@@ -97,6 +97,35 @@ class Authorization(Base, TimestampMixin):
     asset: Mapped[Asset | None] = relationship()
 
 
+class OwnerDirectAffirmation(Base, TimestampMixin):
+    """A tenant OWNER's one-time, per-target legal affirmation for owner-direct scanning.
+
+    Owner-direct bypasses the ownership-verification gate, so before the first such scan of a target
+    the owner must affirm they have the legal right/permission to scan it. That affirmation is
+    recorded here (operational: "has this target been affirmed?") AND written to the immutable
+    audit log (accountability). This row is NOT itself an authorization grant and is never consulted
+    by the ownership gate — it only gates the owner-direct affirmation prompt, per target.
+
+    `target` is the normalized asset identifier (lowercased host/URL). Unique per tenant+target, so
+    the affirmation is asked exactly once per target. It is not grantable to another user: the
+    capability is the OWNER role, re-checked server-side at every dispatch, not this row.
+    """
+
+    __tablename__ = "owner_direct_affirmations"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "target", name="uq_owner_direct_affirmation_target"),
+        Index("idx_owner_direct_affirmation_tenant", "tenant_id"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    # The normalized scan target the owner affirmed a legal right to scan (host or URL, lowercased).
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    # The owner who affirmed. Recorded for accountability; it never makes another user an owner.
+    affirmed_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    affirmed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class DomainVerification(Base, TimestampMixin):
     """Proof that a customer controls a domain (WP-F1).
 

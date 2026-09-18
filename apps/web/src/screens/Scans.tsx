@@ -90,10 +90,27 @@ export function ScanDetailScreen({ id }: { id: string }) {
               <p>{state.meaning}</p>
               <dl className="kv">
                 <dt>Requested engines</dt><dd>{s.requested_engines.join(", ")}</dd>
+                <dt>Authorization</dt><dd>
+                  {s.authorization_basis === "owner-direct"
+                    ? "Owner-direct (ran against an unverified target on the owner's affirmed authority)"
+                    : "Verified ownership"}
+                </dd>
                 <dt>Started</dt><dd>{when(s.created_at)}</dd>
                 <dt>Finished</dt><dd>{when(s.finished_at)}</dd>
                 <dt>Trigger</dt><dd>{s.trigger}</dd>
               </dl>
+
+              {(engines.data ?? []).some((e) => e.customer_state === "blocked") && (
+                <div className="state state-blocked" role="alert">
+                  <h4>Active scanning was blocked — this target isn't verified as yours</h4>
+                  <p>
+                    Guardian will not actively scan a target you have not verified you own or have
+                    permission to test, so the engine(s) below did not run. Nothing here was
+                    scanned — this is not a clean result.
+                  </p>
+                  <button onClick={() => navigate("ownership")}>Verify ownership</button>
+                </div>
+              )}
 
               {waiting && queue.data && (
                 <div className={queue.data.state === "stalled" ? "state state-blocked" : "notice"}>

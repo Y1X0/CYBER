@@ -185,6 +185,24 @@ class StaffRole(str, Enum):
     REVIEWER = "reviewer"
 
 
+class AuthorizationBasis(str, Enum):
+    """On what authority a scan's active engines were allowed to run.
+
+    Every scan carries one, so a report can state plainly WHY the target could be scanned:
+
+    * ``VERIFIED_OWNERSHIP`` — the normal path: an ``Authorization`` row (verified ownership /
+      written consent) covered the target, evaluated per-engine in the worker for every user.
+    * ``OWNER_DIRECT`` — the tenant OWNER ran an active scan against an UNVERIFIED target under the
+      owner-direct capability (off by default; owner role re-checked server-side at dispatch; the
+      owner affirmed legal right to scan the target). The ownership gate is bypassed for that one
+      scan only; it never changes the gate for any non-owner. The dispatch and the affirmation are
+      written to the immutable audit log — this label is the human-readable half of that record.
+    """
+
+    VERIFIED_OWNERSHIP = "verified-ownership"
+    OWNER_DIRECT = "owner-direct"
+
+
 class PortalRole(str, Enum):
     """External customer-portal roles."""
 

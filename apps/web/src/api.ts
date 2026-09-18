@@ -30,9 +30,14 @@ export function setToken(t: string | null) {
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  // The parsed `detail` from the error body, when it is structured rather than a plain string.
+  // Owner-direct affirmation, for one, returns {code, target, affirmation} with a 409 so the UI
+  // can show the affirmation prompt instead of a raw error string.
+  detail?: unknown;
+  constructor(status: number, message: string, detail?: unknown) {
     super(message);
     this.status = status;
+    this.detail = detail;
     this.name = "ApiError";
   }
 }
@@ -77,7 +82,12 @@ async function raw(path: string, opts: RequestInit = {}): Promise<Response> {
       "Could not reach the control plane. If it has been idle it may be starting up — this can "
       + `take up to a minute on a sleeping instance. Try again shortly. (${(e as Error).message})`);
   }
-  if (!resp.ok) throw new ApiError(resp.status, reason(resp.status, await resp.text()));
+  if (!resp.ok) {
+    const body = await resp.text();
+    let detail: unknown;
+    try { detail = JSON.parse(body)?.detail; } catch { /* not JSON */ }
+    throw new ApiError(resp.status, reason(resp.status, body), detail);
+  }
   return resp;
 }
 
@@ -104,6 +114,9 @@ export interface Scan {
   status: string;
   trigger: string;
   requested_engines: string[];
+  // "verified-ownership" (the normal gate) or "owner-direct" (owner ran it against an unverified
+  // target on their own affirmed authority).
+  authorization_basis: string;
   stats: Record<string, number>;
   started_at: string | null;
   finished_at: string | null;
@@ -113,12 +126,23 @@ export interface Scan {
 export interface EngineRun {
   engine: string;
   status: string;
-  customer_state: "checked" | "not_checked" | "inconclusive" | "running" | "queued";
+  customer_state: "checked" | "not_checked" | "inconclusive" | "running" | "queued" | "blocked";
   meaning: string;
   error: string | null;
   degraded: boolean;
   missing: string[];
+  // "verify_ownership" when the engine was blocked for missing authorization; else null.
+  action: string | null;
   started_at: string | null;
+}
+
+export interface OwnerDirectPreflight {
+  eligible: boolean;      // may this caller run an owner-direct scan (owner + feature enabled)
+  enabled: boolean;       // is the owner-direct feature turned on for this deployment
+  is_owner: boolean;      // is the caller the tenant owner
+  target: string | null;  // normalized target, when an asset was supplied
+  affirmed: boolean;      // has this target already been affirmed
+  affirmation_text: string;
 }
 
 export interface SbomMeta {
@@ -521,11 +545,23 @@ export const api = {
     return resp.blob();
   },
   queueHealth: () => req<QueueHealth>("/scans/queue-health"),
-  startScan: (asset_id: string, engines: string[]) =>
+  startScan: (
+    asset_id: string, engines: string[],
+    opts?: { direct?: boolean; affirm?: boolean },
+  ) =>
     req<Scan>("/scans", {
       method: "POST",
-      body: JSON.stringify({ asset_id, engines, trigger: "manual" }),
+      body: JSON.stringify({
+        asset_id, engines, trigger: "manual",
+        direct: opts?.direct ?? false, affirm: opts?.affirm ?? false,
+      }),
     }),
+  // Owner-direct capability check. Pass an asset to also learn the target + whether it is affirmed;
+  // omit it to learn only whether the caller may use the capability at all (before the asset
+  // exists). Read-only — the authoritative checks run on the scan dispatch itself.
+  ownerDirectPreflight: (asset_id?: string) =>
+    req<OwnerDirectPreflight>(
+      `/scans/owner-direct/preflight${asset_id ? `?asset_id=${encodeURIComponent(asset_id)}` : ""}`),
 
   // ── findings ──────────────────────────────────────────────────────────────────────────────────
   findings: (params: Record<string, string> = {}) => {

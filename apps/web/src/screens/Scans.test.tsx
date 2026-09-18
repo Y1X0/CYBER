@@ -6,10 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import { ScanDetailScreen } from "./Scans";
 
-const scan = (status: string) => ({
+const scan = (status: string, basis = "verified-ownership") => ({
   id: "11111111-2222-3333-4444-555555555555",
   customer_id: "c", asset_id: "a", status, trigger: "manual",
-  requested_engines: ["secrets", "sast"], stats: { total: 0 },
+  requested_engines: ["secrets", "sast"], authorization_basis: basis, stats: { total: 0 },
   started_at: null, finished_at: null, created_at: "2026-01-01T00:00:00Z",
 });
 
@@ -119,6 +119,35 @@ describe("scan detail", () => {
     await waitFor(() => expect(screen.getByText("cspm")).toBeInTheDocument());
     expect(screen.getByText("Not checked")).toBeInTheDocument();
     expect(screen.getByText(/no cloud snapshot is configured/i)).toBeInTheDocument();
+  });
+
+  it("surfaces a blocked engine with a Verify ownership action, not a silent 0-findings", async () => {
+    stub({
+      status: "partial",
+      engines: [engine("dast", "blocked",
+        { error: "prove ownership of example.com first", action: "verify_ownership" })],
+    });
+
+    render(<ScanDetailScreen id="s1" />);
+
+    // The scan screen SAYS active scanning was blocked, rather than reading as a clean result.
+    expect(await screen.findByText(/isn't verified as yours/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /verify ownership/i })).toBeInTheDocument();
+  });
+
+  it("labels an owner-direct scan's authorization basis", async () => {
+    vi.spyOn(api, "scan").mockResolvedValue(scan("completed", "owner-direct") as never);
+    vi.spyOn(api, "scanEngines").mockResolvedValue([engine("dast", "checked")] as never);
+    vi.spyOn(api, "findings").mockResolvedValue(
+      { rows: [], hasMore: false, nextCursor: null } as never);
+    vi.spyOn(api, "queueHealth").mockResolvedValue({
+      state: "idle", detail: "", queued: 0, running: 0, oldest_waiting_seconds: 0,
+      scanner: { status: "unknown", detail: "" },
+    } as never);
+
+    render(<ScanDetailScreen id="s1" />);
+
+    expect(await screen.findByText(/owner-direct/i)).toBeInTheDocument();
   });
 
   it("surfaces the server's error rather than an empty screen", async () => {

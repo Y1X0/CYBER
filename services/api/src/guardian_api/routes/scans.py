@@ -8,13 +8,14 @@ import uuid
 from functools import lru_cache
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from guardian_common.config import get_settings
 from guardian_common.metrics import REGISTRY
 from guardian_core import quota
 from guardian_core.artifacts import asset_requires_artifact
-from guardian_core.enums import ScanStatus
+from guardian_core.enums import AuthorizationBasis, ScanStatus, StaffRole
 from guardian_core.policy import evaluate_gate
 from guardian_db.audit import record_audit
-from guardian_db.models import Asset, Finding, Policy, Scan, ScanEngineRun
+from guardian_db.models import Asset, Finding, OwnerDirectAffirmation, Policy, Scan, ScanEngineRun
 from guardian_db.sbom_store import load_sbom
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -33,6 +34,26 @@ def _registered_engine_keys() -> frozenset[str]:
     from importlib.metadata import entry_points
 
     return frozenset(ep.name for ep in entry_points(group="guardian.scanner_plugins"))
+
+
+def _owner_direct_target(asset: Asset) -> str:
+    """The per-target key an owner affirms once for owner-direct scanning. Normalized (stripped,
+    lowercased) so `HTTPS://Example.com/` and `https://example.com/` are the same target."""
+    return (asset.identifier or asset.name or str(asset.id)).strip().lower()
+
+
+def _owner_direct_affirmation_text(target: str) -> str:
+    return (
+        f"I affirm that I have the legal right and permission to run active security scans "
+        f"against {target}, and I accept responsibility for this authorization."
+    )
+
+
+def _is_owner(identity: Identity) -> bool:
+    """The owner check, in one place: a human (never a machine key) whose resolved staff role is
+    OWNER. `staff_role` is resolved server-side from the authenticated principal — never a value the
+    client sends — and a key holds no staff role, so it can never satisfy this."""
+    return (not identity.is_machine) and identity.staff_role == StaffRole.OWNER.value
 
 
 @router.post("", response_model=ScanOut, status_code=202)
@@ -94,6 +115,67 @@ def create_scan(
             headers={"Retry-After": str(admission.retry_after)},
         )
 
+    # ── Owner-direct authority (server-side gate) ────────────────────────────────────────────────
+    # Default: every scan runs under verified-ownership, and the worker's per-engine ownership gate
+    # is unchanged for everyone. `body.direct` is only a REQUEST; the checks below are what decide,
+    # and any of them failing refuses the scan rather than silently downgrading it.
+    basis = AuthorizationBasis.VERIFIED_OWNERSHIP.value
+    if body.direct:
+        settings = get_settings()
+        # (1) OWNER-only, re-checked here from the resolved identity — never a client flag, never a
+        # borrowed/inherited role, never an API key. A non-owner (or machine) is refused outright.
+        if not _is_owner(identity):
+            record_audit(
+                db, action="scan.owner_direct.denied", tenant_id=identity.tenant_id,
+                customer_id=asset.customer_id, actor_id=identity.user.id, entity_type="asset",
+                entity_id=str(asset.id), ip=ip,
+                metadata={"reason": "not_owner", "role": identity.staff_role},
+            )
+            db.commit()
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "owner-direct scanning requires the tenant owner role",
+            )
+        # (6) Off by default: the capability does not exist until an operator enables it.
+        if not settings.owner_direct_scan:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "owner-direct scanning is disabled on this deployment",
+            )
+        # (4) One-time, per-target legal affirmation before the first owner-direct scan of a target.
+        target = _owner_direct_target(asset)
+        affirmed = db.execute(
+            select(OwnerDirectAffirmation).where(
+                OwnerDirectAffirmation.tenant_id == identity.tenant_id,
+                OwnerDirectAffirmation.target == target,
+            )
+        ).scalar_one_or_none()
+        if affirmed is None:
+            if not body.affirm:
+                # Not an error the client should retry blindly: it must show the affirmation and
+                # resend with affirm=true. 409 carries the exact text and target for that prompt.
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    detail={
+                        "code": "owner_direct_affirmation_required",
+                        "target": target,
+                        "affirmation": _owner_direct_affirmation_text(target),
+                    },
+                )
+            db.add(OwnerDirectAffirmation(
+                tenant_id=identity.tenant_id, target=target,
+                affirmed_by=identity.user.id, affirmed_at=dt.datetime.now(dt.UTC),
+            ))
+            db.flush()
+            # The affirmation itself, in the immutable audit log (accountability, not just state).
+            record_audit(
+                db, action="scan.owner_direct.affirmed", tenant_id=identity.tenant_id,
+                customer_id=asset.customer_id, actor_id=identity.user.id, entity_type="asset",
+                entity_id=str(asset.id), ip=ip,
+                metadata={"target": target, "affirmation": _owner_direct_affirmation_text(target)},
+            )
+        basis = AuthorizationBasis.OWNER_DIRECT.value
+
     scan = Scan(
         tenant_id=identity.tenant_id,
         customer_id=asset.customer_id,
@@ -102,6 +184,7 @@ def create_scan(
         ref=body.ref,
         status=ScanStatus.QUEUED.value,
         requested_engines=body.engines,
+        authorization_basis=basis,
         stats={},
         created_by=identity.user.id,
     )
@@ -116,8 +199,27 @@ def create_scan(
         entity_type="scan",
         entity_id=str(scan.id),
         ip=ip,
-        metadata={"engines": body.engines},
+        metadata={"engines": body.engines, "authorization_basis": basis},
     )
+    # (3) The owner-direct dispatch, recorded immutably: who, when, target, and that it ran under
+    # owner-direct authority rather than verified ownership. This is the accountability record.
+    if basis == AuthorizationBasis.OWNER_DIRECT.value:
+        record_audit(
+            db,
+            action="scan.owner_direct.dispatch",
+            tenant_id=identity.tenant_id,
+            customer_id=asset.customer_id,
+            actor_id=identity.user.id,
+            entity_type="scan",
+            entity_id=str(scan.id),
+            ip=ip,
+            metadata={
+                "target": _owner_direct_target(asset),
+                "basis": AuthorizationBasis.OWNER_DIRECT.value,
+                "authority": "owner-direct: ownership verification bypassed by tenant owner",
+                "engines": body.engines,
+            },
+        )
     db.commit()
 
     enqueue_scan(str(scan.id))
@@ -217,6 +319,49 @@ def queue_health(
     }
 
 
+@router.get("/owner-direct/preflight", response_model=dict)
+def owner_direct_preflight(
+    asset_id: uuid.UUID | None = None,
+    identity: Identity = Depends(require_staff_write),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Can this caller run an owner-direct scan, and (if an asset is given) is the target affirmed?
+
+    Read-only. Lets the UI show the owner-direct control (and the affirmation prompt) only when it
+    would actually be honored, instead of learning that from a failed POST. With no asset it answers
+    only the capability question (owner + feature enabled) — useful before the asset exists. It
+    never grants anything: the authoritative checks are re-run on the dispatch itself.
+    """
+    settings = get_settings()
+    is_owner = _is_owner(identity)
+    target: str | None = None
+    affirmed_row = None
+    if asset_id is not None:
+        asset = db.get(Asset, asset_id)
+        if asset is None or asset.tenant_id != identity.tenant_id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "asset not found")
+        target = _owner_direct_target(asset)
+        affirmed_row = db.execute(
+            select(OwnerDirectAffirmation).where(
+                OwnerDirectAffirmation.tenant_id == identity.tenant_id,
+                OwnerDirectAffirmation.target == target,
+            )
+        ).scalar_one_or_none()
+    return {
+        # `eligible` is the only field the UI needs to decide whether to offer the control; the rest
+        # explain why. A non-owner sees eligible=false and is_owner=false; the feature being off
+        # makes everyone ineligible.
+        "eligible": bool(settings.owner_direct_scan and is_owner),
+        "enabled": settings.owner_direct_scan,
+        "is_owner": is_owner,
+        "target": target,
+        "affirmed": affirmed_row is not None,
+        "affirmation_text": (_owner_direct_affirmation_text(target) if target
+                             else "I affirm that I have the legal right and permission to run "
+                                  "active security scans against this target."),
+    }
+
+
 @router.get("/{scan_id}", response_model=ScanOut)
 def get_scan(
     scan_id: uuid.UUID,
@@ -302,6 +447,10 @@ ENGINE_STATE_MEANING = {
     "skipped": ("not_checked", "This engine did not run. Its part of the scan is unassessed."),
     "deferred": ("not_checked", "This engine was held back by your scanning window or pause "
                                 "setting. It will run when the window reopens."),
+    "blocked": ("blocked", "This engine did NOT run because active scanning of this target is not "
+                           "authorized. Guardian will not actively scan a target you have not "
+                           "verified you own or have permission to test. Verify ownership to "
+                           "unblock it — nothing here was scanned."),
 }
 
 
@@ -346,6 +495,9 @@ def scan_engines(
             "error": run.error,
             "degraded": degraded,
             "missing": list(tools.get("missing") or []),
+            # A blocked engine is the one state the customer can act on themselves: the UI turns
+            # this into a "Verify ownership" call to action instead of a dead-end "0 findings".
+            "action": "verify_ownership" if run.status == "blocked" else None,
             "started_at": run.created_at.isoformat() if run.created_at else None,
         })
     return out

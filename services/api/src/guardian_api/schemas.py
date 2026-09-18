@@ -149,6 +149,14 @@ class ScanCreate(BaseModel):
     engines: list[str] = Field(default_factory=lambda: ["secrets"])
     ref: str | None = None
     trigger: str = Field(default="manual", pattern="^(manual|schedule|webhook|ci)$")
+    # Owner-direct scanning. `direct=true` REQUESTS running against an unverified target under the
+    # owner's authority — it is a request, never a grant: the server independently re-checks the
+    # OWNER role, the feature flag, and the per-target affirmation before honoring it, and a
+    # non-owner sending it is refused. `affirm=true` records the owner's legal-right affirmation for
+    # this target the first time it is scanned this way. Both default off, so the normal
+    # verified-ownership path is entirely unchanged for every user who does not set them.
+    direct: bool = False
+    affirm: bool = False
 
 
 class ScanOut(BaseModel):
@@ -159,6 +167,8 @@ class ScanOut(BaseModel):
     trigger: str
     ref: str | None
     requested_engines: list[str]
+    # On what authority the scan's active engines ran: "verified-ownership" or "owner-direct".
+    authorization_basis: str = "verified-ownership"
     stats: dict
     started_at: dt.datetime | None
     finished_at: dt.datetime | None

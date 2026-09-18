@@ -3,7 +3,7 @@
 // exactly as the Assets screen does, then routes to the live scan.
 
 import { useState } from "react";
-import { ARTIFACT_MAX_BYTES, Customer, api } from "../api";
+import { ApiError, ARTIFACT_MAX_BYTES, Customer, api } from "../api";
 import { navigate } from "../router";
 import { SCAN_TYPES, ScanType } from "../scanCatalog";
 import { Async, Card, useAsync } from "../ui";
@@ -77,6 +77,25 @@ function ScanForm({ type, customers, onBack }:
   const [progress, setProgress] = useState<number | null>(null);
   const needsUpload = Boolean(type.upload);
 
+  // Owner-direct: only relevant for network/active scans, and only offered when the server says
+  // this caller may use it (tenant owner + feature enabled). The checkbox is UX; the server
+  // re-checks the owner role on dispatch regardless of what the client sends.
+  const ownerDirect = useAsync(
+    () => (type.network ? api.ownerDirectPreflight().catch(() => null) : Promise.resolve(null)), []);
+  const [direct, setDirect] = useState(false);
+  // When the first owner-direct scan of a target needs the legal affirmation, the server returns
+  // it here; the modal below captures it and re-launches with affirm=true against the SAME asset.
+  const [affirmModal, setAffirmModal] =
+    useState<{ target: string; text: string; assetId: string } | null>(null);
+  const [affirmChecked, setAffirmChecked] = useState(false);
+
+  async function launch(assetId: string, affirmed: boolean) {
+    const scan = direct
+      ? await api.startScan(assetId, type.engines, { direct: true, affirm: affirmed })
+      : await api.startScan(assetId, type.engines);
+    navigate(`scans/${scan.id}`);
+  }
+
   function pickFile(f: File | null) {
     setErr("");
     if (f && type.upload) {
@@ -90,23 +109,51 @@ function ScanForm({ type, customers, onBack }:
     e.preventDefault();
     if (needsUpload && !file) { setErr("Choose a file to upload first."); return; }
     setBusy(true); setErr(""); setProgress(needsUpload ? 0 : null);
+    let createdAssetId: string | null = null;
     try {
       const asset = await api.createAsset({
         customer_id: form.customer_id, name: form.name || type.label,
         kind: type.assetKind, identifier: form.identifier, exposure: form.exposure,
       });
+      createdAssetId = asset.id;
       // For an upload type the artifact must be attached before the scan will start (the server
       // rejects a scan of an asset with no artifact), so upload first, then scan.
       if (needsUpload && file) {
         await api.uploadArtifact(asset.id, file, (frac) => setProgress(frac));
       }
-      const scan = await api.startScan(asset.id, type.engines);
-      navigate(`scans/${scan.id}`);
+      await launch(asset.id, false);
+    } catch (e) {
+      // The first owner-direct scan of a target needs a legal affirmation: the server says so with
+      // a 409, and we show the affirmation modal rather than a raw error. The asset is already
+      // created, so the modal re-launches against the same asset id (no duplicate asset).
+      const ae = e as ApiError;
+      const detail = ae.detail as { code?: string; target?: string; affirmation?: string } | undefined;
+      if (direct && ae.status === 409 && detail?.code === "owner_direct_affirmation_required") {
+        setAffirmModal({
+          target: detail.target ?? form.identifier,
+          text: detail.affirmation ?? "I affirm I have the legal right to scan this target.",
+          assetId: (createdAssetId ?? ""),
+        });
+        setAffirmChecked(false);
+      } else {
+        setErr((e as Error).message);
+      }
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  }
+
+  async function confirmAffirmation() {
+    if (!affirmModal || !affirmChecked) return;
+    setBusy(true); setErr("");
+    try {
+      await launch(affirmModal.assetId, true);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusy(false);
-      setProgress(null);
+      setAffirmModal(null);
     }
   }
 
@@ -175,6 +222,20 @@ function ScanForm({ type, customers, onBack }:
           )}
         </div>
 
+        {ownerDirect.data?.eligible && (
+          <label className="owner-direct-toggle">
+            <input type="checkbox" checked={direct}
+                   onChange={(e) => setDirect(e.target.checked)} data-testid="owner-direct" />
+            <span>
+              Run as owner-direct — scan this target without verified ownership.
+              <span className="muted">
+                {" "}Owner-only. You will affirm you have the legal right to scan it, and the scan is
+                recorded as owner-direct in the audit log.
+              </span>
+            </span>
+          </label>
+        )}
+
         {err && <p className="err" role="alert">{err}</p>}
         <button type="submit"
                 disabled={busy || (needsUpload ? !file : !form.identifier)}>
@@ -183,6 +244,35 @@ function ScanForm({ type, customers, onBack }:
             : (needsUpload ? "Upload & scan" : "Start scan")}
         </button>
       </form>
+
+      {affirmModal && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true"
+             aria-label="Owner-direct scan affirmation">
+          <div className="modal">
+            <h3>Confirm owner-direct scan</h3>
+            <p>
+              You are about to run an active security scan against <strong>{affirmModal.target}</strong>{" "}
+              without verified ownership, under your authority as the tenant owner.
+            </p>
+            <label className="affirm-check">
+              <input type="checkbox" checked={affirmChecked} data-testid="affirm-check"
+                     onChange={(e) => setAffirmChecked(e.target.checked)} />
+              <span>{affirmModal.text}</span>
+            </label>
+            <p className="muted">
+              This affirmation and the scan are written to the audit log, which cannot be edited or
+              deleted.
+            </p>
+            <div className="modal-actions">
+              <button type="button" onClick={() => setAffirmModal(null)}>Cancel</button>
+              <button type="button" disabled={!affirmChecked || busy}
+                      onClick={confirmAffirmation}>
+                {busy ? "Starting…" : "Affirm & scan"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </Card>
   );
 }

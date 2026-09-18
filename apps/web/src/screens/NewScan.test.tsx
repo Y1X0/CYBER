@@ -6,7 +6,7 @@
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ARTIFACT_MAX_BYTES, api } from "../api";
+import { ApiError, ARTIFACT_MAX_BYTES, api } from "../api";
 import * as router from "../router";
 import { NewScanScreen } from "./NewScan";
 
@@ -91,8 +91,57 @@ describe("new scan — artifact upload", () => {
 
   it("shows no file picker for a URL-based scanner (Website)", async () => {
     vi.spyOn(api, "customers").mockResolvedValue(page([CUSTOMER]) as never);
+    vi.spyOn(api, "ownerDirectPreflight").mockResolvedValue({ eligible: false } as never);
     render(<NewScanScreen preselect="website" />);
     await screen.findByText(/Website URL/i);
     expect(screen.queryByTestId("artifact-file")).not.toBeInTheDocument();
+  });
+});
+
+describe("new scan — owner-direct", () => {
+  async function openWebsiteForm(eligible: boolean) {
+    vi.spyOn(api, "customers").mockResolvedValue(page([CUSTOMER]) as never);
+    vi.spyOn(api, "ownerDirectPreflight").mockResolvedValue({ eligible } as never);
+    render(<NewScanScreen preselect="website" />);
+    await screen.findByText(/Website URL/i);
+  }
+
+  it("hides the owner-direct control when the caller is not eligible", async () => {
+    await openWebsiteForm(false);
+    expect(screen.queryByTestId("owner-direct")).not.toBeInTheDocument();
+  });
+
+  it("offers owner-direct, then requires the affirmation before scanning", async () => {
+    await openWebsiteForm(true);
+    vi.spyOn(api, "createAsset").mockResolvedValue(
+      { id: "asset-3", customer_id: "cust-1", name: "site", kind: "web",
+        identifier: "https://example.com", exposure: "public" } as never);
+    const nav = vi.spyOn(router, "navigate").mockImplementation(() => {});
+    // First dispatch (affirm=false) is refused with the affirmation-required 409; the second
+    // (affirm=true) succeeds. This is the server-driven affirmation step.
+    const start = vi.spyOn(api, "startScan")
+      .mockRejectedValueOnce(new ApiError(409, "affirmation required", {
+        code: "owner_direct_affirmation_required", target: "https://example.com",
+        affirmation: "I affirm I have the legal right to scan https://example.com.",
+      }))
+      .mockResolvedValueOnce({ id: "scan-3" } as never);
+
+    // Eligible → the control appears; opt in, fill the URL, and start.
+    fireEvent.click(await screen.findByTestId("owner-direct"));
+    fireEvent.change(screen.getByLabelText(/Website URL/i),
+      { target: { value: "https://example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: /start scan/i }));
+
+    // The affirmation modal appears rather than a raw error, carrying the server's exact text.
+    expect(await screen.findByText(/Confirm owner-direct scan/i)).toBeInTheDocument();
+    expect(screen.getByText(/legal right to scan https:\/\/example\.com/i)).toBeInTheDocument();
+
+    // Affirm, then confirm — the second dispatch carries affirm=true against the same asset.
+    fireEvent.click(screen.getByTestId("affirm-check"));
+    fireEvent.click(screen.getByRole("button", { name: /affirm & scan/i }));
+
+    await waitFor(() => expect(start).toHaveBeenLastCalledWith(
+      "asset-3", ["dast"], { direct: true, affirm: true }));
+    expect(nav).toHaveBeenCalledWith("scans/scan-3");
   });
 });

@@ -106,7 +106,9 @@ def test_no_authorization_skips_the_active_engine_and_says_what_is_missing():
     _run(ctx)
 
     run = _dast_run(ctx)
-    assert run["status"] == "skipped"
+    # BLOCKED, not "skipped": an authorization refusal is a state the customer can act on (verify
+    # ownership), surfaced distinctly from a skipped engine so it never reads as a clean result.
+    assert run["status"] == "blocked"
     assert ctx["host"] in run["error"]
     assert "prove ownership" in run["error"]
 
@@ -118,7 +120,7 @@ def test_artifact_consent_does_not_authorize_touching_the_network():
     _run(ctx)
 
     run = _dast_run(ctx)
-    assert run["status"] == "skipped"
+    assert run["status"] == "blocked"
     assert "artifact" in run["error"]
 
 
@@ -128,7 +130,7 @@ def test_a_revoked_authorization_stops_authorizing():
     ctx = _estate(authorization={"method": "ownership_verified", "by_asset": True,
                                  "revoked": True})
     _run(ctx)
-    assert _dast_run(ctx)["status"] == "skipped"
+    assert _dast_run(ctx)["status"] == "blocked"
 
 
 def test_an_expired_authorization_stops_authorizing():
@@ -137,7 +139,7 @@ def test_an_expired_authorization_stops_authorizing():
     _run(ctx)
 
     run = _dast_run(ctx)
-    assert run["status"] == "skipped"
+    assert run["status"] == "blocked"
     assert "expired or revoked" in run["error"]
 
 
@@ -145,7 +147,7 @@ def test_another_domains_proof_does_not_authorize_this_one():
     ctx = _estate(authorization={"method": "ownership_verified",
                                  "targets": [{"type": "domain", "value": "somewhere-else.test"}]})
     _run(ctx)
-    assert _dast_run(ctx)["status"] == "skipped"
+    assert _dast_run(ctx)["status"] == "blocked"
 
 
 def test_the_refusal_is_audited_with_its_reason():
@@ -163,6 +165,52 @@ def test_the_refusal_is_audited_with_its_reason():
         ).all()
     assert rows
     assert any(ctx["host"] in str(row.metadata_.get("reason", "")) for row in rows)
+
+
+# ── owner-direct bypasses the ownership gate for that one scan ────────────────────────────────────
+def _set_basis(ctx, basis: str) -> None:
+    from guardian_db.models import Scan
+    from guardian_db.session import session_scope
+
+    with session_scope() as db:
+        db.get(Scan, ctx["scan"]).authorization_basis = basis
+
+
+def test_owner_direct_basis_runs_the_active_engine_without_any_authorization():
+    """The owner-direct capability: with basis "owner-direct" on the scan, the active engine runs
+    against an UNVERIFIED target — the ownership gate is bypassed for this scan only. The basis is a
+    column the API set after a server-side owner re-check; the worker only honors it, never sets it."""
+    ctx = _estate()  # no authorization at all
+    _set_basis(ctx, "owner-direct")
+    _run(ctx)
+
+    run = _dast_run(ctx)
+    # Not blocked: the engine actually ran (completed or failed on its own merits), never gated.
+    assert run["status"] != "blocked"
+    assert run["status"] != "skipped"
+
+
+def test_owner_direct_bypass_is_audited_per_engine():
+    from guardian_db.models import AuditLog
+    from guardian_db.session import session_scope
+
+    ctx = _estate()
+    _set_basis(ctx, "owner-direct")
+    _run(ctx)
+
+    with session_scope() as db:
+        rows = db.query(AuditLog).filter(
+            AuditLog.tenant_id == ctx["tenant"],
+            AuditLog.action == "scan.engine.owner_direct_authorized",
+        ).all()
+    assert rows, "an owner-direct engine run must record that it bypassed the ownership gate"
+
+
+def test_a_verified_ownership_basis_still_blocks_an_unauthorized_active_engine():
+    """The bypass is strictly owner-direct: the default basis still enforces the gate."""
+    ctx = _estate()  # basis defaults to verified-ownership; no authorization
+    _run(ctx)
+    assert _dast_run(ctx)["status"] == "blocked"
 
 
 # ── the artifact plane is unaffected ──────────────────────────────────────────────────────────────

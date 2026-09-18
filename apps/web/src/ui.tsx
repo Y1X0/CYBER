@@ -48,6 +48,7 @@ export const ENGINE_STATE: Record<string, { label: string; tone: string }> = {
   queued: { label: "Queued", tone: "wait" },
   inconclusive: { label: "Inconclusive", tone: "warn" },
   not_checked: { label: "Not checked", tone: "bad" },
+  blocked: { label: "Blocked — not authorized", tone: "bad" },
 };
 
 export function StatusPill({ tone, children }: { tone: string; children: ReactNode }) {

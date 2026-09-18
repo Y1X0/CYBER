@@ -61,6 +61,10 @@ def _build_summary(db: Session, scan: Scan) -> dict:
     return {
         "total_findings": total,
         "severity_counts": counts,
+        # The basis on which the scan was authorized, so the report states plainly WHY the target
+        # could be scanned: "verified-ownership" (the normal gate) or "owner-direct" (the tenant
+        # owner ran it against an unverified target on their own affirmed authority).
+        "authorization_basis": scan.authorization_basis or "verified-ownership",
         "top_risks": [
             {"title": row.title, "severity": row.severity, "risk_score": row.risk_score}
             for row in top

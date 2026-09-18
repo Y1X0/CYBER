@@ -38,6 +38,15 @@ class Scan(Base, TimestampMixin):
     ref: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="queued", nullable=False)
     requested_engines: Mapped[list[str]] = mapped_column(ARRAY(String), default=list)
+    # On what authority this scan's active engines were permitted to run: "verified-ownership"
+    # (the normal per-engine ownership gate, for every user) or "owner-direct" (the tenant OWNER
+    # ran it against an unverified target under the owner-direct capability). Set once by the API
+    # at dispatch — after a server-side owner-role re-check — and never by the worker or the client;
+    # the worker reads it to decide whether to bypass the ownership gate. Defaults to the safe value.
+    authorization_basis: Mapped[str] = mapped_column(
+        String(20), default="verified-ownership", server_default="verified-ownership",
+        nullable=False,
+    )
     # Denormalized severity counts for fast list views.
     stats: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
