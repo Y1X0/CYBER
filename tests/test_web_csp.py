@@ -56,7 +56,7 @@ def test_render_yaml_sets_host_enforced_headers_for_the_web_site():
     # `headers:` for the guardian-web static site. Assert the security header set is there, that the
     # CSP names the API origin, and that the SPA is wired to the API cross-origin (VITE_API_BASE +
     # the API's CORS allowlist).
-    assert "name: guardian-web" in _RENDER and "runtime: static" in _RENDER
+    assert "name: guardian-console" in _RENDER and "runtime: static" in _RENDER
     for header in ("Content-Security-Policy", "X-Frame-Options", "X-Content-Type-Options",
                    "Referrer-Policy", "Permissions-Policy"):
         assert header in _RENDER, f"render.yaml must set {header} on the web site"

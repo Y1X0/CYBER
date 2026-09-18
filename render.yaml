@@ -95,12 +95,13 @@ services:
       - key: GUARDIAN_SANDBOX_ENGINES
         value: "true"
 
-      # CORS allowlist for the browser SPA. The web dashboard (guardian-web static site below) is a
-      # SEPARATE origin from this API, so its exact origin must be listed here or the browser blocks
-      # every cross-origin call. Set this to the guardian-web site's URL once Render assigns it
-      # (e.g. https://guardian-web-xxxx.onrender.com), comma-separated for multiple. sync:false so it
-      # is provided in the dashboard rather than guessed here. NEVER use "*" — that plus credentials
+      # CORS allowlist for the browser SPA. The web dashboard (guardian-console static site below) is
+      # a SEPARATE origin from this API, so its exact origin must be listed here or the browser
+      # blocks every cross-origin call. Set to the live console origin — currently
+      # https://guardian-console.onrender.com (comma-separated for multiple). sync:false so it is
+      # provided in the dashboard rather than committed here. NEVER use "*" — that plus credentials
       # is refused by the app, and even for bearer-token calls a wildcard is needless exposure.
+      # (Live value already set on guardian-api: https://guardian-console.onrender.com.)
       - key: GUARDIAN_CORS_ORIGINS
         sync: false
 
@@ -138,17 +139,22 @@ services:
       #     logs `login_global_breaker_tripped` and increments a metric but never returns 429.
 
   # ── Web dashboard (SPA) ──────────────────────────────────────────────────────────────────────────
-  # The React/Vite SPA in apps/web, deployed as a Render STATIC SITE. It is a SEPARATE ORIGIN from
+  # The React/Vite SPA in apps/web, deployed as a Render STATIC SITE. This block names the LIVE
+  # service `guardian-console` (https://guardian-console.onrender.com), which already exists and
+  # auto-deploys from this branch; naming it here lets a Blueprint sync adopt it and apply the
+  # `headers:` / `routes:` below rather than create a duplicate. It is a SEPARATE ORIGIN from
   # guardian-api, so: (a) VITE_API_BASE points the SPA at the API origin (its default "" would call
-  # its own static origin, which has no API); (b) the CSP connect-src lists that exact API origin;
-  # (c) the API's GUARDIAN_CORS_ORIGINS (above) must list THIS site's origin.
+  # its own static origin, which has no API — set live on the service); (b) the CSP connect-src lists
+  # that exact API origin; (c) the API's GUARDIAN_CORS_ORIGINS (above) lists THIS site's origin.
   #
-  # The security headers are set HERE, in Render's own `headers:` mechanism — a static host does not
+  # The security headers below are set in Render's own `headers:` mechanism — a static host does not
   # honour apps/web/public/_headers (that is the Netlify/Cloudflare convention, kept only as a
   # fallback), and frame-ancestors / X-Frame-Options are header-only (a <meta> CSP cannot carry
-  # them). curl -I https://<this-site> must show them.
+  # them). They take effect on guardian-console only once this Blueprint is synced/adopted (or the
+  # same headers are added on the service in the dashboard); until then the built <meta> CSP still
+  # carries the fetch directives (incl. connect-src to the exact API origin).
   - type: web
-    name: guardian-web
+    name: guardian-console
     runtime: static
     plan: free
     branch: claude/security-guardian-architecture-p1315d  # cutover to main — docs/deployment/11-branch-cutover.md
