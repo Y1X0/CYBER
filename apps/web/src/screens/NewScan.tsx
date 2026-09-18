@@ -111,17 +111,31 @@ function ScanForm({ type, customers, onBack }:
     setBusy(true); setErr(""); setProgress(needsUpload ? 0 : null);
     let createdAssetId: string | null = null;
     try {
-      const asset = await api.createAsset({
-        customer_id: form.customer_id, name: form.name || type.label,
-        kind: type.assetKind, identifier: form.identifier, exposure: form.exposure,
-      });
-      createdAssetId = asset.id;
+      // Scanning a target you already have should just work: if createAsset reports the asset
+      // already exists (409), reuse the existing one the server names instead of dead-ending.
+      let assetId: string;
+      try {
+        const asset = await api.createAsset({
+          customer_id: form.customer_id, name: form.name || type.label,
+          kind: type.assetKind, identifier: form.identifier, exposure: form.exposure,
+        });
+        assetId = asset.id;
+      } catch (e) {
+        const ae = e as ApiError;
+        const d = ae.detail as { code?: string; asset_id?: string } | undefined;
+        if (ae.status === 409 && d?.code === "asset_exists" && d.asset_id) {
+          assetId = d.asset_id;
+        } else {
+          throw e;
+        }
+      }
+      createdAssetId = assetId;
       // For an upload type the artifact must be attached before the scan will start (the server
       // rejects a scan of an asset with no artifact), so upload first, then scan.
       if (needsUpload && file) {
-        await api.uploadArtifact(asset.id, file, (frac) => setProgress(frac));
+        await api.uploadArtifact(assetId, file, (frac) => setProgress(frac));
       }
-      await launch(asset.id, false);
+      await launch(assetId, false);
     } catch (e) {
       // The first owner-direct scan of a target needs a legal affirmation: the server says so with
       // a 409, and we show the affirmation modal rather than a raw error. The asset is already

@@ -8,6 +8,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from guardian_common.crypto import encrypt_json
 from guardian_db.audit import record_audit
 from guardian_db.models import Asset, Customer
+from guardian_db.session import set_tenant
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from guardian_api.deps import Identity, client_ip, get_current_identity, get_db, require_staff_write
@@ -26,6 +29,32 @@ def _assert_customer_in_tenant(
     return customer
 
 
+def _existing_asset(db: Session, tenant_id: uuid.UUID, body: AssetCreate) -> Asset | None:
+    """The asset that would collide with `body` on uq_asset_identity (tenant, customer, kind,
+    identifier), or None. Tenant scoping is redundant with RLS but explicit."""
+    return db.execute(
+        select(Asset).where(
+            Asset.tenant_id == tenant_id,
+            Asset.customer_id == body.customer_id,
+            Asset.kind == body.kind,
+            Asset.identifier == body.identifier,
+        )
+    ).scalar_one_or_none()
+
+
+def _asset_exists_409(existing: Asset | None) -> HTTPException:
+    """A clean 409 that names the existing asset, so a caller can scan it instead of dead-ending.
+    A target you already have is the same target, not a server error."""
+    return HTTPException(
+        status.HTTP_409_CONFLICT,
+        detail={
+            "code": "asset_exists",
+            "message": "an asset with this identifier already exists for this customer",
+            "asset_id": str(existing.id) if existing is not None else None,
+        },
+    )
+
+
 @router.post("", response_model=AssetOut, status_code=201)
 def create_asset(
     body: AssetCreate,
@@ -35,6 +64,13 @@ def create_asset(
     ip: str | None = Depends(client_ip),
 ) -> AssetOut:
     _assert_customer_in_tenant(db, body.customer_id, identity.tenant_id)
+    # A duplicate identifier used to raise the raw uq_asset_identity IntegrityError as a 500, which
+    # dead-ended the New Scan flow whenever the target already existed. Pre-check and return a clean
+    # 409 naming the existing asset (the caller scans that one instead); a concurrent create that
+    # slips past the pre-check is caught on flush and mapped to the same 409.
+    existing = _existing_asset(db, identity.tenant_id, body)
+    if existing is not None:
+        raise _asset_exists_409(existing)
     asset = Asset(
         tenant_id=identity.tenant_id,
         customer_id=body.customer_id,
@@ -47,7 +83,14 @@ def create_asset(
         secret_ref=encrypt_json(body.secret) if body.secret else None,
     )
     db.add(asset)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError:
+        # Lost a race with a concurrent create. Rollback clears the transaction-local RLS tenant
+        # GUC, so re-bind it before looking the winner up, then return the same clean 409.
+        db.rollback()
+        set_tenant(db, identity.tenant_id)
+        raise _asset_exists_409(_existing_asset(db, identity.tenant_id, body)) from None
     record_audit(
         db,
         action="asset.create",

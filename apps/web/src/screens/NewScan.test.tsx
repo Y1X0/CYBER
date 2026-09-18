@@ -111,6 +111,22 @@ describe("new scan — owner-direct", () => {
     expect(screen.queryByTestId("owner-direct")).not.toBeInTheDocument();
   });
 
+  it("reuses the existing asset when the target already exists (409), instead of dead-ending", async () => {
+    await openWebsiteForm(false);
+    // createAsset reports the target already exists; the flow should scan the named existing asset.
+    vi.spyOn(api, "createAsset").mockRejectedValue(new ApiError(409, "asset already exists", {
+      code: "asset_exists", asset_id: "asset-existing" }));
+    const start = vi.spyOn(api, "startScan").mockResolvedValue({ id: "scan-9" } as never);
+    const nav = vi.spyOn(router, "navigate").mockImplementation(() => {});
+
+    fireEvent.change(screen.getByLabelText(/Website URL/i),
+      { target: { value: "https://sallehly.com/" } });
+    fireEvent.click(screen.getByRole("button", { name: /start scan/i }));
+
+    await waitFor(() => expect(start).toHaveBeenCalledWith("asset-existing", ["dast"]));
+    expect(nav).toHaveBeenCalledWith("scans/scan-9");
+  });
+
   it("offers owner-direct, then requires the affirmation before scanning", async () => {
     await openWebsiteForm(true);
     vi.spyOn(api, "createAsset").mockResolvedValue(
