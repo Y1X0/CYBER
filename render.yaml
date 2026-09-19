@@ -41,7 +41,10 @@ services:
     buildCommand: bash infra/render/build.sh
     startCommand: bash infra/render/start.sh
     healthCheckPath: /health
-    autoDeployTrigger: commit
+    # Auto-deploy OFF, matching the live service: on the free tier the API is redeployed on purpose
+    # (an env change or a manual trigger), not on every push, so a work-in-progress commit never
+    # restarts the running control plane. A Blueprint sync must not flip this on.
+    autoDeployTrigger: "off"
     envVars:
       - key: PYTHON_VERSION
         value: "3.12"
@@ -170,7 +173,8 @@ services:
     buildCommand: bash infra/render/build.sh
     startCommand: bash infra/render/start-scan-plane.sh
     healthCheckPath: /health
-    autoDeployTrigger: commit
+    # Auto-deploy OFF, like guardian-api: the scan plane is redeployed on purpose, not on every push.
+    autoDeployTrigger: "off"
     envVars:
       - key: PYTHON_VERSION
         value: "3.12"
