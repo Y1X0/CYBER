@@ -282,7 +282,11 @@ databases:
     postgresMajorVersion: "16"
 
 # Render calls this resource type `redis` in blueprints even though the product is now Key Value.
-services_note: |
-  The broker is declared in the dashboard rather than here because a free Key Value instance and a
-  free Postgres cannot both be created by a blueprint in every account state. guardian-queue
-  (frankfurt, free) already exists; point GUARDIAN_REDIS_URL at its external rediss:// URL.
+#
+# THE BROKER (guardian-queue) is intentionally NOT declared here. It is a plain YAML comment, not a
+# `services_note:` key — Render's Blueprint schema (file.Spec) only accepts a fixed set of top-level
+# fields (services, databases, envVarGroups, previews, version), so any other key fails validation.
+# A free Key Value instance and a free Postgres cannot both be created by a blueprint in every
+# account state, so guardian-queue (frankfurt, free) is created in the dashboard and already exists;
+# guardian-api's GUARDIAN_REDIS_URL points at its external rediss:// URL, and guardian-scan shares
+# that same value via fromService.
