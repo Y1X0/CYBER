@@ -13,10 +13,14 @@
 # start on the next request; a scan queued while asleep runs when the instance wakes, because the
 # request that queues it is itself what wakes it.
 #
-# THE WORKER. It runs inside the web service (see infra/render/start.sh), not as a Background
-# Worker, because Render bills those. That closes BLOCKER-1 — scans complete without a human
-# dispatching a workflow — at the cost of resource isolation, not of the architecture's plane
-# separation: `api` and `worker-default` already share one secret set in docker-compose.prod.yml.
+# THE WORKERS. The control worker runs inside guardian-api (see infra/render/start.sh), not as a
+# Background Worker, because Render bills those. That closes BLOCKER-1 — scans complete without a
+# human dispatching a workflow. Untrusted ENGINE execution runs on a SECOND free service,
+# `guardian-scan` (infra/render/start-scan-plane.sh), so a heavy DAST scan spends its RAM on its own
+# 512 MB instance and cannot OOM-kill the API. That split preserves the plane separation the
+# architecture maintains AND recovers resource isolation for the one plane that parses attacker bytes;
+# `api` and the control worker still share one secret set (docker-compose.prod.yml), while the scan
+# plane holds neither the JWT secret nor the KMS master.
 #
 # TLS IS NOT OPTIONAL HERE. The settings validator refuses to boot outside local/dev unless Redis
 # is `rediss://` with credentials and Postgres pins an sslmode that actually encrypts. Render's
@@ -137,6 +141,84 @@ services:
       #     shed request never holds a worker thread long);
       #   * an ALERT-ONLY failed-login breaker (GUARDIAN_GLOBAL_LOGIN_BREAKER_PER_MINUTE, default 300)
       #     logs `login_global_breaker_tripped` and increments a metric but never returns 429.
+
+  # ── Isolated scan-plane worker (ISSUE-3 / capacity split) ────────────────────────────────────────
+  # Untrusted engine execution (DAST/API/mobile parsing customer-controlled bytes) runs HERE, on its
+  # own free 512 MB instance, instead of beside the API. Splitting it off is the capacity fix: a heavy
+  # DAST scan spends its RAM on THIS instance, so it can no longer OOM-kill guardian-api. guardian-api
+  # keeps the API + control worker + beat and offloads each engine to this service over the shared
+  # `scan` queue (GUARDIAN_SCAN_OFFLOAD=true, set on its control worker in infra/render/start.sh).
+  #
+  # THE SECRET BOUNDARY IS THE POINT, not just isolation. This plane is DB-less and holds NEITHER the
+  # JWT secret NOR the credential KMS master (GUARDIAN_ENCRYPTION_KEY) — neither is listed below, and
+  # config.py refuses to boot a scan_plane that carries either. It holds only the broker-seal key, and
+  # that key MUST be the SAME value guardian-api uses (control seals the job, this plane unseals it) —
+  # which is why it is pulled from guardian-api with `fromService` rather than generated afresh here.
+  # Same for the broker URL: one shared Redis, pulled from guardian-api so the two always agree.
+  #
+  # WHY `web`, NOT `worker`. Render bills type=background_worker (402 on free), so this is a web
+  # service and must bind a port; infra/render/start-scan-plane.sh runs a tiny /health responder
+  # alongside the worker for exactly that. That endpoint is also the keepalive target — a free web
+  # service sleeps after 15 min idle, and a scan offloaded to a sleeping plane would block until the
+  # offload timeout, so guardian-keepalive.yml pings this /health too.
+  - type: web
+    name: guardian-scan
+    runtime: python
+    plan: free
+    region: frankfurt
+    branch: claude/security-guardian-architecture-p1315d  # cutover to main — docs/deployment/11-branch-cutover.md
+    buildCommand: bash infra/render/build.sh
+    startCommand: bash infra/render/start-scan-plane.sh
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: GUARDIAN_ENV
+        value: production
+      - key: GUARDIAN_LOG_LEVEL
+        value: INFO
+
+      # This IS the scan plane: mark it, sandbox its engines, and keep the recon plane off (a Render
+      # instance has no CAP_NET_ADMIN for the recon egress allowlist).
+      - key: GUARDIAN_SCAN_PLANE
+        value: "true"
+      - key: GUARDIAN_SANDBOX_ENGINES
+        value: "true"
+      - key: GUARDIAN_RECON_PLANE
+        value: "false"
+
+      # DB-less. Set EMPTY, not unset: the settings default is a non-empty localhost DSN that would
+      # fail the production TLS check. Holding no DB URL also exempts this plane from the RLS app-role
+      # requirement (see config.py _enforce_production_invariants), correctly — it never touches the DB.
+      - key: GUARDIAN_DATABASE_URL
+        value: ""
+      - key: GUARDIAN_APP_DATABASE_URL
+        value: ""
+
+      # Shared broker + shared seal key, pulled from guardian-api so they MATCH by construction: the
+      # control plane seals each engine job with the broker-seal key and this plane unseals it with the
+      # SAME key — a mismatch would fail every unseal and every offloaded scan. (A Blueprint sync
+      # resolves `fromService` to guardian-api's live value; standing this up outside a Blueprint sync,
+      # set both to guardian-api's exact values by hand.)
+      - key: GUARDIAN_REDIS_URL
+        fromService:
+          type: web
+          name: guardian-api
+          envVarKey: GUARDIAN_REDIS_URL
+      - key: GUARDIAN_BROKER_SEAL_KEY
+        fromService:
+          type: web
+          name: guardian-api
+          envVarKey: GUARDIAN_BROKER_SEAL_KEY
+
+      # Local scratch workspace for this instance only. Network engines (DAST/API) need no shared
+      # artifact disk; artifact engines (mobile/iOS) are the deferred object-storage follow-up.
+      - key: GUARDIAN_SCAN_WORKSPACE_DIR
+        value: /tmp/guardian-scan
+
+      # DELIBERATELY ABSENT: GUARDIAN_JWT_SECRET and GUARDIAN_ENCRYPTION_KEY. config.py refuses to
+      # start a scan_plane that carries either — that refusal is the boundary, enforced in code.
 
   # ── Web dashboard (SPA) ──────────────────────────────────────────────────────────────────────────
   # The React/Vite SPA in apps/web, deployed as a Render STATIC SITE. This block names the LIVE

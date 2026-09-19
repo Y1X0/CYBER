@@ -51,20 +51,31 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Wake the control plane
+      - name: Wake the control plane and the scan plane
         env:
-          URL: https://guardian-api-s1jd.onrender.com/health
+          # Both free web services sleep after 15 min idle. guardian-api is the API + control worker;
+          # guardian-scan is the isolated scan-plane worker (render.yaml). The scan plane matters as
+          # much as the API here: a scan offloaded to a SLEEPING scan plane blocks until the offload
+          # timeout, so the engine never runs. One line per service — add the scan plane's real
+          # /health URL once the service is created (its Render subdomain).
+          URLS: |
+            https://guardian-api-s1jd.onrender.com/health
         run: |
           set -uo pipefail
-          # --max-time 90 because a cold start legitimately takes most of a minute; a shorter
-          # timeout would report the wake-up as a failure and teach us to ignore this job.
-          code="$(curl -sS -o /tmp/body -w '%{http_code}' --max-time 90 "$URL" || echo 000)"
-          echo "GET /health -> ${code}"
-          head -c 300 /tmp/body || true
-          echo
-          # A non-200 is reported, not swallowed. A keep-alive that cannot fail tells us the
-          # service is up whether or not it is, which is worse than having no keep-alive.
-          if [ "$code" != "200" ]; then
-            echo "::error::/health answered ${code} — the control plane is not serving."
-            exit 1
-          fi
+          fail=0
+          while IFS= read -r url; do
+            [ -n "$url" ] || continue
+            # --max-time 90 because a cold start legitimately takes most of a minute; a shorter
+            # timeout would report the wake-up as a failure and teach us to ignore this job.
+            code="$(curl -sS -o /tmp/body -w '%{http_code}' --max-time 90 "$url" || echo 000)"
+            echo "GET ${url} -> ${code}"
+            head -c 200 /tmp/body || true
+            echo
+            # A non-200 is reported, not swallowed. A keep-alive that cannot fail tells us the
+            # service is up whether or not it is, which is worse than having no keep-alive.
+            if [ "$code" != "200" ]; then
+              echo "::error::${url} answered ${code} — that plane is not serving."
+              fail=1
+            fi
+          done <<< "$URLS"
+          exit "$fail"
