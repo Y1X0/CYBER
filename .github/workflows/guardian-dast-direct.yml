@@ -1,0 +1,83 @@
+# Run the REAL DAST engine directly against a target, with no control plane, no queue, no API auth.
+#
+# WHY THIS EXISTS. The normal path (console → API → sealed job → scan queue → scan plane) needs an
+# authenticated owner session and the broker-seal key to create and seal an authorized scan; those
+# are exactly the pieces an operator holds and an automated run does not. This workflow is a
+# diagnostic that invokes the same DastEngine from the same pinned scanner image directly, so the
+# engine, its crawler, and every active check (including CSRF / stored-XSS / session-id-in-URL) run
+# for real against a live target — it just skips the API/auth/queue wrapper. It reports the findings
+# it produces: severity + check id per finding.
+#
+# SCOPE. workflow_dispatch only, and only meant for intentionally-vulnerable, sanctioned test targets
+# (e.g. demo.testfire.net). The engine is GET-only with non-destructive payloads; it holds NO JWT and
+# NO KMS master (none are provided here).
+name: Guardian DAST Direct
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Full URL to scan (must include http:// or https://)"
+        required: true
+        default: "http://demo.testfire.net"
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Log in to GHCR
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: Pull the verified scanner image (engine-fix build be11a9c)
+        env:
+          IMAGE: ghcr.io/y1x0/cyber-scanner@sha256:f552d8478c858184d97cf4576f9c77d75d731b4c636657a5c70592fd1fcf1aa1
+        run: docker pull "$IMAGE"
+
+      - name: Run the DAST engine directly and print findings
+        env:
+          IMAGE: ghcr.io/y1x0/cyber-scanner@sha256:f552d8478c858184d97cf4576f9c77d75d731b4c636657a5c70592fd1fcf1aa1
+          TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          cat > /tmp/dast_probe.py <<'PY'
+          import logging, os, sys
+          from collections import Counter
+
+          # Route structlog/stdlib INFO to stdout so dast_active_complete is visible if configured.
+          logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+
+          from guardian_scanner.engines.base import ScanContext
+          from guardian_scanner.engines.dast_engine import DastEngine
+
+          target = os.environ["TARGET"].strip()
+          print(f"=== DAST direct run against {target} ===", flush=True)
+          ctx = ScanContext(scan_id="adhoc-direct", asset_kind="web",
+                            asset_identifier=target, asset_config={})
+          try:
+              findings = list(DastEngine().run(ctx))
+          except Exception as exc:  # noqa: BLE001 - surface the honest failure
+              print(f"ENGINE_RAISED {type(exc).__name__}: {exc}", flush=True)
+              sys.exit(2)
+
+          by_sev, by_check = Counter(), Counter()
+          print(f"TOTAL_FINDINGS {len(findings)}", flush=True)
+          for f in findings:
+              sev = getattr(f.base_severity, "value", str(f.base_severity))
+              loc = f.location or {}
+              rule = loc.get("rule", "(passive)")
+              param = loc.get("parameter", "")
+              endpoint = loc.get("endpoint", "")
+              by_sev[sev] += 1
+              by_check[rule] += 1
+              print(f"FINDING [{sev:8}] rule={rule} cwe={f.cwe_id} owasp={f.owasp_ref} "
+                    f"param={param!r} endpoint={endpoint} :: {f.title}", flush=True)
+          print("SUMMARY_BY_SEVERITY " + str(dict(by_sev)), flush=True)
+          print("SUMMARY_BY_CHECK " + str(dict(by_check)), flush=True)
+          PY
+          docker run --rm -e TARGET="$TARGET" --entrypoint python \
+            -v /tmp/dast_probe.py:/tmp/dast_probe.py:ro \
+            "$IMAGE" /tmp/dast_probe.py
