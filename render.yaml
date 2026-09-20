@@ -105,6 +105,21 @@ services:
       - key: GUARDIAN_SANDBOX_ENGINES
         value: "true"
 
+      # ── On-demand scan plane (free GitHub Actions muscle) ────────────────────────────────────────
+      # Engine execution is offloaded to the guardian-scan-plane workflow instead of an in-instance
+      # worker: GUARDIAN_EXTERNAL_SCAN_PLANE=true tells start.sh to skip the in-instance scan worker
+      # and tells run_scan there is no local consumer. With a dispatch token also set, run_scan starts
+      # that GitHub runner ITSELF when a scan is claimed, so an operator only opens the console and
+      # enters a URL. The token is a fine-grained PAT (this repo, Actions: Read and write only) — a
+      # control-plane secret that never reaches the DB-less scan plane. Without it, scans still work
+      # but wait for a manually-started workflow window. sync:false so it is set on the service, never
+      # committed here. GUARDIAN_SCAN_PLANE_WORKFLOW_REF defaults to the pilot branch (see config.py);
+      # set it after the cutover to main.
+      - key: GUARDIAN_EXTERNAL_SCAN_PLANE
+        value: "true"
+      - key: GUARDIAN_GITHUB_DISPATCH_TOKEN
+        sync: false
+
       # CORS allowlist for the browser SPA. The web dashboard (guardian-console static site below) is
       # a SEPARATE origin from this API, so its exact origin must be listed here or the browser
       # blocks every cross-origin call. Set to the live console origin — currently

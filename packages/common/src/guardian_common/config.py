@@ -256,6 +256,29 @@ class Settings(BaseSettings):
     # scan inputs live here — never a credential or key, which cross sealed over the broker.
     scan_workspace_dir: str = ""
 
+    # External scan plane on GitHub Actions (free-tier capacity). True when engine execution is
+    # offloaded to the guardian-scan-plane workflow rather than an in-instance worker — mirrors
+    # GUARDIAN_EXTERNAL_SCAN_PLANE, which infra/render/start.sh reads to skip the in-instance scan
+    # worker. Read here so run_scan knows there is no local consumer and can provision the runner.
+    external_scan_plane: bool = False
+
+    # On-demand provisioning of that runner, so an operator only starts a scan in the console. When
+    # this token is set AND external_scan_plane is on, run_scan triggers the guardian-scan-plane
+    # workflow (workflow_dispatch) before it offloads, so the runner spins up on its own. It NEVER
+    # starts a scan — the human already created the (authorized) scan; this only provisions the
+    # worker for an already-queued, already-authorized engine job. Best-effort: with no token, or on
+    # any error, the scan just waits for a manually-started window, as before. Use a fine-grained
+    # PAT scoped to this repo with Actions: Read and write only — it lives on the control plane,
+    # never on the DB-less scan plane. Empty disables the auto-dispatch (the safe default).
+    github_dispatch_token: str = ""
+    github_repo: str = "Y1X0/CYBER"
+    scan_plane_workflow_file: str = "guardian-scan-plane.yml"
+    # The git ref the workflow_dispatch runs against. Defaults to the pilot branch; set to the
+    # target branch after the cutover to main.
+    scan_plane_workflow_ref: str = "claude/security-guardian-architecture-p1315d"
+    # How long the auto-started scan-plane window stays open (minutes), matching the workflow input.
+    scan_plane_window_minutes: int = 30
+
     # Recon execution plane marker (6C.4). True ONLY on the isolated recon worker, which holds no DB
     # credentials and runs `recon_collect` (probing). The DB-bound orchestrator `run_discovery` runs
     # where this is False. Each task refuses to run on the wrong plane, so a misroute fails loudly.

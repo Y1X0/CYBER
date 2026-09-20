@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from guardian_common.config import get_settings
 from guardian_common.crypto import decrypt_json
 from guardian_common.logging import get_logger
+from guardian_common.scan_plane_dispatch import ensure_scan_plane_running
 from guardian_core import authorization as authz
 from guardian_core import safescan
 from guardian_core.enums import ACTIVE_ENGINES, AuthorizationBasis, EngineKey, ScanStatus
@@ -377,6 +378,15 @@ def run_scan(self, scan_id: str) -> dict:  # noqa: ANN001
             return {"scan_id": scan_id, "status": scan.status, "claimed": False}
         session.expire(scan)
         session.flush()
+
+        # Engine execution is offloaded to the external scan plane in this deployment (ISSUE-3 /
+        # free-tier capacity), which has no in-instance consumer — so provision the GitHub Actions
+        # runner on demand here, the moment a scan is claimed. That is what lets an operator just
+        # open the console and enter a URL. Best-effort and self-gating: a no-op unless
+        # external_scan_plane + a dispatch token are set, and it never raises (a dispatch problem
+        # only means the engine waits for a manually-started window, exactly as before).
+        if get_settings().scan_offload:
+            ensure_scan_plane_running()
 
         workspace, inline, cleanup = None, None, None
         # Resolved inside the try below so a failure writing it lands in the terminal-FAILED handler
