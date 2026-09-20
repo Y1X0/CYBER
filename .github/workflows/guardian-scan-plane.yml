@@ -1,0 +1,209 @@
+# Guardian scan plane — run untrusted engine execution on a GitHub runner, for free.
+#
+# WHAT THIS IS. An operator-triggered, one-shot scan-plane consumer (ISSUE-3): it drains the `scan`
+# queue — the queue `run_scan` offloads untrusted engine execution to — and runs those engines
+# (DAST, API, SAST-of-uploads, etc.) on a GitHub-hosted runner, which has far more RAM than the free
+# 512 MB Render instance. The control plane stays on Render: guardian-api's `run_scan` claims the
+# scan, authorizes, decrypts tenant credentials, seals each engine job, and persists the findings —
+# it just hands the engine's `run()` to this queue. So the heavy, memory-hungry, attacker-byte-
+# parsing part runs here; the DB and the master keys never do.
+#
+# THE SECRET BOUNDARY — the whole reason this is a SEPARATE workflow from guardian-burst-worker.yml.
+# This job holds ONLY the Redis broker URL and the broker-seal key. It has NO GUARDIAN_JWT_SECRET and
+# NO GUARDIAN_ENCRYPTION_KEY — they are not referenced, so they never reach the runner. config.py
+# refuses to boot a scan_plane that carries either, so a mis-set secret crashes the job loudly rather
+# than running untrusted engine code next to a master key. (guardian-burst-worker.yml runs a control
+# worker too, which legitimately needs those secrets; this workflow deliberately does not.)
+#
+# HOW A SCAN REACHES IT. guardian-api must offload engines rather than run them in-instance — set
+# GUARDIAN_EXTERNAL_SCAN_PLANE=true on the guardian-api service (see infra/render/start.sh) so it
+# does NOT start an in-instance scan worker. Then: start THIS workflow (it consumes `scan` for N
+# minutes), and within that window create the scan in the console. run_scan on guardian-api offloads
+# the engine here, this runner executes it and seals the result back, and run_scan completes. A scan
+# created while no window is open waits until run_scan's offload timeout and then degrades — so open
+# the window first.
+#
+# WORKFLOW_DISPATCH ONLY — NEVER A SCHEDULE. Like guardian-burst-worker.yml: a schedule that can begin
+# active security testing against real hosts must never exist. Nobody should discover their systems
+# were probed because a cron fired. Every run here is a human pressing "Run workflow".
+name: Guardian Scan Plane
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long the scan plane stays up to execute engines (max 300)."
+        type: string
+        required: false
+        default: "30"
+
+permissions:
+  contents: read
+  packages: read
+
+# Two scan planes draining the same queue would not double-run a job (Redis hands each message to one
+# consumer), but there is no reason to run two. Queue a second trigger behind the first.
+concurrency:
+  group: guardian-scan-plane
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    environment: production
+    # Ceiling above the window so `timeout` is what ends the run, not the runner (a runner-killed job
+    # skips the graceful Celery shutdown and can strand a task mid-flight).
+    timeout-minutes: 310
+
+    steps:
+      - name: Resolve window length
+        id: cfg
+        env:
+          RAW: ${{ inputs.minutes || '30' }}
+        run: |
+          # Default rather than fail on empty/non-numeric input; clamp because the job ceiling is fixed.
+          mins="${RAW//[^0-9]/}"
+          [ -n "$mins" ] || mins=30
+          [ "$mins" -ge 1 ] || mins=1
+          if [ "$mins" -gt 300 ]; then mins=300; fi
+          echo "minutes=$mins" >> "$GITHUB_OUTPUT"
+          echo "Scan-plane window: ${mins} minute(s)"
+
+      # Full history so the revision guard below can prove the image's ancestry with git merge-base.
+      - name: Check out repository (for the image-revision guard)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Log in to GHCR
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      # Pinned by digest, not tag: the exact artifact guardian-deploy-worker.yml built and pushed.
+      # Same digest guardian-burst-worker.yml runs. To repin after a rebuild: run
+      # guardian-deploy-worker.yml (mode: publish), read the @sha256 it prints, replace the digest.
+      - name: Pull the verified scanner image
+        id: image
+        run: |
+          IMAGE="ghcr.io/y1x0/cyber-scanner@sha256:c2a09b39713a51e018fc5e1201d71f1eca7e59c4395d07ad9b7dfd7fcef8f26b"
+          echo "ref=$IMAGE" >> "$GITHUB_OUTPUT"
+          docker pull "$IMAGE"
+
+      # AUD-P1-6 guard: refuse any scanner image whose source commit predates the worker file-read
+      # fix (f65c09f). The revision is read from the image's own org.opencontainers.image.revision
+      # label and its ancestry proved against this checkout, so no value is trusted that the repo
+      # cannot verify. Identical to the guard in guardian-burst-worker.yml.
+      - name: Refuse a scanner image that predates the AUD-P1-6 fix
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          MIN_REVISION="f65c09fc03ee1ee0ff34d6dafaf9822baa195465"  # AUD-P1-6: worker arbitrary file read
+          REV="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE" 2>/dev/null || true)"
+          if [ -z "$REV" ] || [ "$REV" = "<no value>" ]; then
+            echo "##[error]scanner image has no org.opencontainers.image.revision label — cannot prove it postdates the AUD-P1-6 fix. Rebuild + repin."
+            exit 1
+          fi
+          echo "Image source revision: $REV"
+          if ! git cat-file -e "${REV}^{commit}" 2>/dev/null; then
+            echo "##[error]image revision $REV is not a commit in this repository — refusing an image whose provenance cannot be verified."
+            exit 1
+          fi
+          if git merge-base --is-ancestor "$MIN_REVISION" "$REV"; then
+            echo "OK: image includes the AUD-P1-6 fix ($MIN_REVISION)."
+          else
+            echo "##[error]scanner image was built at $REV, which PREDATES the AUD-P1-6 worker file-read fix ($MIN_REVISION). Rebuild from current HEAD and repin the digest."
+            exit 1
+          fi
+
+      # Only two settings are required, and that is the point: the scan plane needs the broker to
+      # receive jobs and the seal key to unseal them. A missing one must stop the run — started
+      # anyway, Celery connects to "" and the window ends having executed nothing.
+      - name: Check required settings are present (Redis + seal key ONLY)
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+        run: |
+          missing=""
+          for k in GUARDIAN_REDIS_URL GUARDIAN_BROKER_SEAL_KEY; do
+            [ -n "${!k}" ] || missing="$missing $k"
+          done
+          if [ -n "$missing" ]; then
+            echo "##[error]missing required settings:$missing — set them in the 'production' environment."
+            exit 1
+          fi
+          echo "Required scan-plane settings present (values not shown). No JWT secret or KMS master is set or needed."
+
+      # Show how many engine jobs are waiting before the window opens — read-only, allowed to fail.
+      - name: Report scan-queue depth before the window
+        continue-on-error: true
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+        run: |
+          cat > /tmp/qdepth.py <<'PY'
+          import os, redis
+          from guardian_common.config import celery_redis_url
+          r = redis.from_url(celery_redis_url(os.environ["GUARDIAN_REDIS_URL"]))
+          print(f"  scan     {r.llen('scan')} engine job(s) pending")
+          PY
+          sed -i 's/^          //' /tmp/qdepth.py
+          docker run --rm -e GUARDIAN_REDIS_URL -v /tmp/qdepth.py:/tmp/qdepth.py:ro \
+            "${{ steps.image.outputs.ref }}" python /tmp/qdepth.py || echo "  (scan-queue depth unavailable)"
+
+      - name: Run the scan plane (engine execution only — no JWT / no KMS master)
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+        run: |
+          set -o pipefail
+          SECONDS_LIMIT=$(( ${{ steps.cfg.outputs.minutes }} * 60 ))
+
+          # This consumes ONLY `scan` (untrusted engine execution). DB URLs are set EMPTY (not omitted)
+          # to keep the plane DB-less past the production TLS validator; GUARDIAN_SCAN_PLANE=true marks
+          # it, and NO GUARDIAN_JWT_SECRET / GUARDIAN_ENCRYPTION_KEY is passed — config refuses a
+          # scan_plane that carries either, so a leak would crash the run here rather than run engines
+          # beside a master key.
+          #
+          # --pool=solo + concurrency 1: single allocator (the tool-plane uid_nft guard proves it by
+          # construction) and isolation over throughput, same as the provisioned worker.
+          # --without-gossip/--without-mingle: no fleet to coordinate with; mingle would block startup
+          # waiting for peers that never answer, wasting the window.
+          # SIGTERM (timeout default) is Celery's graceful stop: finish the in-flight engine, then exit.
+          set +e
+          timeout --signal=TERM --kill-after=120s "${SECONDS_LIMIT}s" \
+            docker run --rm \
+              -e GUARDIAN_ENV=production \
+              -e GUARDIAN_REDIS_URL -e GUARDIAN_BROKER_SEAL_KEY \
+              -e GUARDIAN_DATABASE_URL= -e GUARDIAN_APP_DATABASE_URL= \
+              -e GUARDIAN_SCAN_PLANE=true -e GUARDIAN_SANDBOX_ENGINES=true \
+              "${{ steps.image.outputs.ref }}" \
+              celery -A guardian_scanner.celery_app.celery_app worker \
+                --queues scan \
+                --pool=solo \
+                --concurrency 1 \
+                --without-gossip --without-mingle \
+                --loglevel INFO
+          rc=$?
+          set -e
+
+          # 124/143 are `timeout` ending the window on schedule — this workflow working, not a failure.
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ] || [ "$rc" -eq 0 ]; then
+            echo "Scan-plane window ended cleanly (exit ${rc})."
+          else
+            echo "##[error]scan-plane worker exited ${rc} before the window closed (likely a config/secret error above)"
+            exit "$rc"
+          fi
+
+      - name: Report scan-queue depth after the window
+        if: always()
+        continue-on-error: true
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+        run: |
+          cat > /tmp/qdepth.py <<'PY'
+          import os, redis
+          from guardian_common.config import celery_redis_url
+          r = redis.from_url(celery_redis_url(os.environ["GUARDIAN_REDIS_URL"]))
+          print(f"  scan     {r.llen('scan')} engine job(s) pending")
+          PY
+          sed -i 's/^          //' /tmp/qdepth.py
+          docker run --rm -e GUARDIAN_REDIS_URL -v /tmp/qdepth.py:/tmp/qdepth.py:ro \
+            "${{ steps.image.outputs.ref }}" python /tmp/qdepth.py || echo "  (scan-queue depth unavailable)"

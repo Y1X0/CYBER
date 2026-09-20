@@ -141,3 +141,13 @@ def test_render_single_worker_embeds_beat_exactly_once():
     ]
     assert not standalone_beat, (
         f"start.sh must not launch a separate beat alongside the embedded one: {standalone_beat}")
+
+
+def test_render_start_can_push_scan_plane_off_instance():
+    # The in-instance scan worker is gated behind GUARDIAN_EXTERNAL_SCAN_PLANE so heavy engine
+    # execution can be pushed to an off-instance consumer (the GitHub Actions scan-plane workflow)
+    # with an env flag + redeploy, not a code change. Offload stays on in BOTH modes, so run_scan
+    # always hands engines to the `scan` queue (consumed in-instance, or off-instance by the runner).
+    start = (_ROOT / "infra/render/start.sh").read_text()
+    assert "GUARDIAN_EXTERNAL_SCAN_PLANE" in start, "start.sh must gate the in-instance scan worker"
+    assert "GUARDIAN_SCAN_OFFLOAD=true" in start, "run_scan must offload engines to the scan queue"
