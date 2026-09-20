@@ -132,6 +132,29 @@ jobs:
           fi
           echo "Required scan-plane settings present (values not shown). No JWT secret or KMS master is set or needed."
 
+      # Fail fast if the broker is not guardian-queue. guardian-api publishes each offloaded engine
+      # job to guardian-queue (frankfurt); a scan plane pointed at any other Redis would connect fine,
+      # sit idle, and let every scan silently time out — the exact failure a run on 2026-09-20 caught
+      # (the secret pointed at an ohio-keyvalue instance). Compare ONLY the host; never print the
+      # credential/instance-id/password. If guardian-queue is ever recreated in another region, update
+      # EXPECTED_HOST here (and in guardian-burst-worker.yml).
+      - name: Assert the broker is guardian-queue (fail fast on a mismatch)
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+        run: |
+          EXPECTED_HOST="frankfurt-keyvalue.render.com"
+          # Strip scheme, then user:pass@, then port/path — leaving only the host. Nothing sensitive
+          # survives, so echoing $host is safe (the host is not a credential).
+          host="$(printf '%s' "$GUARDIAN_REDIS_URL" | sed -E 's#^[a-zA-Z]+://##; s#^[^@]*@##; s#[:/].*$##')"
+          echo "Broker host the scan plane will use: ${host:-<empty>}"
+          if [ "$host" != "$EXPECTED_HOST" ]; then
+            echo "##[error]GUARDIAN_REDIS_URL points at '${host:-<empty>}', not guardian-queue ('${EXPECTED_HOST}')."
+            echo "##[error]guardian-api offloads engine jobs to guardian-queue; a scan plane on a different broker sits idle and every scan times out."
+            echo "##[error]Fix: set the 'production' env GUARDIAN_REDIS_URL to guardian-queue's External rediss:// URL (Render -> guardian-queue -> Connect -> External), and make GUARDIAN_BROKER_SEAL_KEY equal guardian-api's."
+            exit 1
+          fi
+          echo "OK: broker matches guardian-queue (${EXPECTED_HOST})."
+
       # Show how many engine jobs are waiting before the window opens — read-only, allowed to fail.
       - name: Report scan-queue depth before the window
         continue-on-error: true

@@ -152,6 +152,27 @@ jobs:
           fi
           echo "All required settings present (values not shown)."
 
+      # Fail fast if the broker is not guardian-queue. This burst runs a control worker AND a scan-plane
+      # sidecar against GUARDIAN_REDIS_URL; if that secret points at a Redis other than the one
+      # guardian-api uses (guardian-queue, frankfurt), the burst drains a queue nobody is filling and
+      # reports success having done nothing — the mismatch a 2026-09-20 run of guardian-scan-plane.yml
+      # caught (the secret pointed at an ohio-keyvalue instance). Compare ONLY the host; never print the
+      # credential. Keep EXPECTED_HOST in sync with guardian-scan-plane.yml.
+      - name: Assert the broker is guardian-queue (fail fast on a mismatch)
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+        run: |
+          EXPECTED_HOST="frankfurt-keyvalue.render.com"
+          host="$(printf '%s' "$GUARDIAN_REDIS_URL" | sed -E 's#^[a-zA-Z]+://##; s#^[^@]*@##; s#[:/].*$##')"
+          echo "Broker host this burst will use: ${host:-<empty>}"
+          if [ "$host" != "$EXPECTED_HOST" ]; then
+            echo "##[error]GUARDIAN_REDIS_URL points at '${host:-<empty>}', not guardian-queue ('${EXPECTED_HOST}')."
+            echo "##[error]guardian-api's queue lives on guardian-queue; a burst on a different broker drains nothing and falsely reports success."
+            echo "##[error]Fix: set the 'production' env GUARDIAN_REDIS_URL to guardian-queue's External rediss:// URL (Render -> guardian-queue -> Connect -> External)."
+            exit 1
+          fi
+          echo "OK: broker matches guardian-queue (${EXPECTED_HOST})."
+
       # The pinned image (built at cd01ace) contains `celery_redis_url`, which normalises a `rediss://`
       # broker URL in-process (appending `ssl_cert_reqs=required` when absent) before Celery constructs
       # the result backend. The workflow-level normalisation shim that used to sit here — needed only
