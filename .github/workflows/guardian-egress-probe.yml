@@ -1,0 +1,54 @@
+# One-off connectivity diagnostic: can a GitHub-hosted runner reach external scan targets at all?
+#
+# The free GitHub Actions scan plane is only useful if its runners can actually open connections to
+# the applications we point it at. A 2026-09-20 scan of testphp.vulnweb.com failed with a plain
+# ConnectTimeout on :80, which raised the question: is GitHub's egress filtered, or was that host
+# specific? This probe answers it — it makes HEAD requests and raw TCP connects to a handful of
+# well-known, intentionally-public targets and prints which are reachable. It NEVER scans anything;
+# it only checks whether a connection can be established. workflow_dispatch only.
+name: Guardian Egress Probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: HTTP HEAD reachability (status, or 000 = could not connect)
+        run: |
+          set -u
+          targets=(
+            "https://www.google.com/"              # control: general egress works at all
+            "http://testphp.vulnweb.com/"          # Acunetix test app (HTTP)
+            "https://testphp.vulnweb.com/"
+            "http://demo.testfire.net/"            # IBM AltoroMutual test app (HTTP)
+            "https://demo.testfire.net/"
+            "http://scanme.nmap.org/"              # nmap's sanctioned target (HTTP)
+            "https://juice-shop.herokuapp.com/"    # OWASP Juice Shop demo (HTTPS)
+          )
+          for t in "${targets[@]}"; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 25 -I "$t" 2>/dev/null || echo 000)"
+            printf 'HEAD %-42s -> %s\n' "$t" "$code"
+          done
+
+      - name: Raw TCP connect (does the socket open on :80 / :443?)
+        run: |
+          set -u
+          for hp in \
+            "www.google.com:443" \
+            "testphp.vulnweb.com:80" "testphp.vulnweb.com:443" \
+            "demo.testfire.net:80" "demo.testfire.net:443" \
+            "scanme.nmap.org:80" \
+            "juice-shop.herokuapp.com:443" ; do
+            h="${hp%:*}"; p="${hp#*:}"
+            if timeout 12 bash -c "exec 3<>/dev/tcp/${h}/${p}" 2>/dev/null; then
+              echo "TCP ${hp} -> OPEN"
+            else
+              echo "TCP ${hp} -> BLOCKED/timeout"
+            fi
+          done
