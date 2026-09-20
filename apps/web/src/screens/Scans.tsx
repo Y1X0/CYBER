@@ -133,7 +133,10 @@ export function ScanDetailScreen({ id }: { id: string }) {
               <Async
                 loader={engines}
                 empty={<p className="muted">
-                  No engine has started yet, so nothing has been checked.
+                  {waiting
+                    ? "No engine has started yet, so nothing has been checked."
+                    : "This scan recorded no engine runs, so nothing was checked — this is not "
+                      + "a clean result."}
                 </p>}
               >
                 {(runs: EngineRun[]) => (

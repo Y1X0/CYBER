@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 # A per-scan random marker is appended by the scanner; this is the recognizable stem.
 MARKER_STEM = "gdn"
@@ -363,6 +363,86 @@ def evaluate_cors(headers: dict) -> Verdict:
     return NO
 
 
+# ── cross-site request forgery (CSRF) ─────────────────────────────────────────────────────────────
+# A hidden field whose name marks it as a synchronizer / anti-CSRF token. Framework conventions:
+# Django `csrfmiddlewaretoken`, Rails `authenticity_token`, .NET `__RequestVerificationToken`, plus
+# the generic csrf/xsrf/_token/nonce forms.
+_CSRF_FIELD = re.compile(
+    r"(?i)(?:csrf|xsrf|_token|authenticity_token|__requestverificationtoken|"
+    r"anti[-_]?forgery|verification[-_]?token|nonce)"
+)
+
+
+def samesite_protective(set_cookie: str) -> bool:
+    """A cookie declaring SameSite=Strict or SameSite=Lax — a real CSRF mitigation. `SameSite=None`,
+    or no SameSite at all, provides none, and is treated as unprotective by both the CSRF check and
+    the passive cookie posture check."""
+    match = re.search(r"(?i)\bsamesite\s*=\s*(strict|lax|none)\b", set_cookie or "")
+    return bool(match) and match.group(1).lower() in ("strict", "lax")
+
+
+def evaluate_csrf(method: str, field_names, cookies_observed) -> Verdict:
+    """A state-changing (POST) form with no anti-CSRF token, on a session that has no SameSite
+    fallback — so a page on another origin can forge the request and the browser attaches the
+    session cookie. Detected purely from the crawled form and the cookies already seen; nothing is
+    submitted (a POST form is never sent — see the scanner).
+
+    Deliberately conservative to stay low-false-positive: it fires only when a session actually
+    exists (a cookie was observed) AND that cookie carries no SameSite=Strict/Lax. A tokenless POST
+    on an app with no cookies (an unauthenticated search, or the login form itself) is not flagged:
+    there is no session for a forged request to ride.
+    """
+    if (method or "").upper() != "POST":
+        return NO
+    names = [n for n in (field_names or ()) if n]
+    if any(_CSRF_FIELD.search(n) for n in names):
+        return NO
+    cookies = [c for c in (cookies_observed or []) if c]
+    if not cookies:
+        return NO
+    if any(samesite_protective(c) for c in cookies):
+        return NO
+    return Verdict(
+        True,
+        indicator="a state-changing POST form carries no anti-CSRF token and the session cookie "
+                  "has no SameSite=Strict/Lax fallback",
+        excerpt=f"form fields: {', '.join(names)[:200]}",
+        confidence="medium",
+    )
+
+
+# ── session identifier exposed in the URL ─────────────────────────────────────────────────────────
+# Names that carry a session / authentication token. In a URL these leak into server logs, the
+# Referer header, browser history and shared links (CWE-598 / CWE-200). The common-word names
+# (`sid`, `session`) are reported at lower confidence because they are sometimes something else.
+SESSION_URL_PARAMS: tuple[str, ...] = (
+    "jsessionid", "phpsessid", "aspsessionid", "asp.net_sessionid", "cfid", "cftoken",
+    "sessionid", "session_id", "sessiontoken", "session_token", "auth_token", "access_token",
+    "sid", "session", "sessid",
+)
+_LOW_CONFIDENCE_SESSION = frozenset({"sid", "session", "cfid", "cftoken"})
+
+
+def evaluate_session_in_url(url: str) -> Verdict:
+    """A session identifier is present in the URL — as a query parameter, or as a `;name=` matrix
+    parameter in the path (e.g. `/page;jsessionid=…`)."""
+    parsed = urlparse(url or "")
+    query_names = {k.lower() for k, _ in parse_qsl(parsed.query, keep_blank_values=True)}
+    # A `;name=value` matrix parameter lands in urlparse().params (not the path); e.g. jsessionid.
+    matrix = (parsed.params or "").lower()
+    path = parsed.path.lower()
+    for name in SESSION_URL_PARAMS:
+        if name in query_names or f"{name}=" in matrix or f";{name}=" in path:
+            return Verdict(
+                True,
+                indicator=f"the URL carries a session identifier (`{name}`), which leaks into "
+                          "logs, the Referer header, browser history and shared links",
+                excerpt=url[:200],
+                confidence="medium" if name in _LOW_CONFIDENCE_SESSION else "high",
+            )
+    return NO
+
+
 # ── the catalogue ─────────────────────────────────────────────────────────────────────────────────
 CHECKS: dict[str, Check] = {
     "xss-reflected": Check(
@@ -468,6 +548,48 @@ CHECKS: dict[str, Check] = {
                     "wildcard origin with credentials.",
         references={"owasp": "A05:2021", "cwe": "CWE-942"},
     ),
+    "csrf-missing-token": Check(
+        id="csrf-missing-token",
+        title="Cross-site request forgery (no anti-CSRF token)",
+        category="web-misconfig",
+        cwe="CWE-352",
+        owasp="A01:2021",
+        severity="high",
+        description="A state-changing POST form has no anti-CSRF (synchronizer) token, and the "
+                    "session cookie carries no SameSite=Strict/Lax fallback, so a page on another "
+                    "site can forge the request in a logged-in victim's browser.",
+        remediation="Add a per-session anti-CSRF token to state-changing forms and verify it "
+                    "server-side; set session cookies SameSite=Lax or Strict as defence in depth.",
+        references={"owasp": "A01:2021", "cwe": "CWE-352"},
+    ),
+    "session-id-in-url": Check(
+        id="session-id-in-url",
+        title="Session identifier exposed in URL",
+        category="web-misconfig",
+        cwe="CWE-598",
+        owasp="A07:2021",
+        severity="medium",
+        description="A session or authentication identifier appears in the URL, where it leaks "
+                    "into server logs, the Referer header, browser history and shared links — any "
+                    "of which lets someone replay the session.",
+        remediation="Carry the session in a cookie with Secure/HttpOnly/SameSite; never place a "
+                    "session or token in the URL.",
+        references={"owasp": "A07:2021", "cwe": "CWE-598"},
+    ),
+    "xss-stored": Check(
+        id="xss-stored",
+        title="Stored cross-site scripting",
+        category="injection",
+        cwe="CWE-79",
+        owasp="A03:2021",
+        severity="high",
+        description="A value submitted through a form was persisted and later returned unescaped "
+                    "on another page, so an attacker's markup runs in every visitor's browser, "
+                    "not only their own.",
+        remediation="Escape output for its context on every page that renders stored data, and set "
+                    "a Content-Security-Policy that forbids inline script.",
+        references={"owasp": "A03:2021", "cwe": "CWE-79"},
+    ),
 }
 
 
@@ -476,12 +598,16 @@ __all__ = [
     "CORS_ORIGIN",
     "MARKER_STEM",
     "REDIRECT_HOST",
+    "SESSION_URL_PARAMS",
     "Check",
     "Probe",
     "Verdict",
     "command_probes",
     "evaluate_command",
     "evaluate_cors",
+    "evaluate_csrf",
+    "evaluate_session_in_url",
+    "samesite_protective",
     "evaluate_redirect",
     "evaluate_sql_boolean",
     "evaluate_sql_error",

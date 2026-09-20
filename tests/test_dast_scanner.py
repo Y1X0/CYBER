@@ -289,3 +289,88 @@ def test_the_scan_carries_its_own_coverage_numbers():
     assert result.requests_made > 0
     assert result.parameters_tested >= 3
     assert result.targets_tested >= 3
+
+
+# ── CSRF (inventory + cookies, never a submission) ──────────────────────────────────────────────────
+def test_csrf_fires_on_a_tokenless_post_form_and_never_submits_it():
+    """The POST form is inventoried and its cookies inspected; the check makes no request, so the
+    state-changing action is never triggered."""
+    body = '<form action="/transfer" method="post"><input name="amount"></form>'
+    insecure = {"content-type": "text/html", "set-cookie": "session=abc; Path=/; HttpOnly"}
+    sent: list[str] = []
+    scanner = ActiveScanner(fetch=_site({"/": (200, insecure, body)}, record=sent),
+                            authorized_hosts=HOSTS, rate_per_second=0, max_requests=200)
+    result = scanner.scan(["https://app.example.com/"], max_pages=10)
+
+    assert any(i.check_id == "csrf-missing-token" for i in result.issues)
+    assert not any("/transfer" in url for url in sent)
+
+
+def test_csrf_does_not_fire_when_the_form_carries_an_anti_csrf_token():
+    body = ('<form action="/transfer" method="post"><input name="amount">'
+            '<input type="hidden" name="csrf_token" value="x"></form>')
+    insecure = {"content-type": "text/html", "set-cookie": "session=abc; HttpOnly"}
+    scanner = ActiveScanner(fetch=_site({"/": (200, insecure, body)}), authorized_hosts=HOSTS,
+                            rate_per_second=0)
+    result = scanner.scan(["https://app.example.com/"], max_pages=10)
+    assert not any(i.check_id == "csrf-missing-token" for i in result.issues)
+
+
+def test_csrf_does_not_fire_when_the_session_cookie_is_samesite_protective():
+    body = '<form action="/transfer" method="post"><input name="amount"></form>'
+    protected = {"content-type": "text/html", "set-cookie": "session=abc; HttpOnly; SameSite=Lax"}
+    scanner = ActiveScanner(fetch=_site({"/": (200, protected, body)}), authorized_hosts=HOSTS,
+                            rate_per_second=0)
+    result = scanner.scan(["https://app.example.com/"], max_pages=10)
+    assert not any(i.check_id == "csrf-missing-token" for i in result.issues)
+
+
+# ── session identifier in a URL ─────────────────────────────────────────────────────────────────────
+def test_a_session_id_in_a_crawled_url_is_reported():
+    pages = {
+        "/": (200, HTML, '<a href="/dash?jsessionid=9F3A2B7C">dashboard</a>'),
+        "/dash": (200, HTML, "ok"),
+    }
+    scanner = ActiveScanner(fetch=_site(pages), authorized_hosts=HOSTS, rate_per_second=0)
+    result = scanner.scan(["https://app.example.com/"], max_pages=10)
+    assert any(i.check_id == "session-id-in-url" for i in result.issues)
+
+
+# ── stored XSS (submit via a GET form, then re-fetch and see it persisted) ──────────────────────────
+def test_stored_xss_is_detected_when_a_marker_persists_to_another_page():
+    stored: list[str] = []
+
+    def index(_query, _headers):
+        return ('<a href="/entries">entries</a>'
+                '<form action="/guestbook" method="get"><input name="msg"></form>')
+
+    def guestbook(query, _headers):
+        value = dict(cr.parse_qsl(query)).get("msg", "")
+        if value:
+            stored.append(value)  # persisted, unescaped, server-side
+        return "<html><body>posted</body></html>"
+
+    def entries(_query, _headers):
+        return "<html><body>" + "".join(stored) + "</body></html>"  # renders stored data unescaped
+
+    pages = {
+        "/": (200, HTML, index),
+        "/guestbook": (200, HTML, guestbook),
+        "/entries": (200, HTML, entries),
+    }
+    scanner = ActiveScanner(fetch=_site(pages), authorized_hosts=HOSTS, rate_per_second=0,
+                            max_requests=500)
+    result = scanner.scan(["https://app.example.com/"], max_pages=10)
+
+    stored_hits = [i for i in result.issues if i.check_id == "xss-stored"]
+    assert stored_hits
+    assert any("entries" in i.url for i in stored_hits)
+
+
+def test_no_stored_xss_pass_without_a_form_submission():
+    """The re-fetch pass runs only after a marker is submitted through a form; a query-only app
+    never triggers it (and cannot persist a reflected value)."""
+    scanner = ActiveScanner(fetch=_site(_vulnerable_app()), authorized_hosts=HOSTS,
+                            rate_per_second=0, max_requests=500)
+    result = scanner.scan(["https://app.example.com/"], max_pages=20)
+    assert not any(i.check_id == "xss-stored" for i in result.issues)

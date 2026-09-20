@@ -167,6 +167,13 @@ class ActiveScanner:
         self.result = ScanResult()
         self._marker = new_marker()
         self._cors_seen: set[str] = set()
+        self._csrf_seen: set[str] = set()
+        # Set-Cookie values observed across every response (crawl + checks). Used by the CSRF check
+        # to decide whether the session has a SameSite fallback — never a request of its own.
+        self._cookies_seen: list[str] = []
+        # Whether an XSS marker was submitted through a *form* field. Persistence (stored XSS) is
+        # only possible via a submission, so the re-fetch pass runs only when this is true.
+        self._xss_submitted_via_form = False
 
     # ── transport ────────────────────────────────────────────────────────────────────────────────
     def _request(self, url: str, headers: dict | None = None) -> Response | None:
@@ -198,6 +205,11 @@ class ActiveScanner:
         # this number answers "how much of the application did we see", and an attempt that failed
         # saw none of it — which is what lets the engine tell "unreachable" from "clean".
         self.result.requests_made += 1
+        # Passively observe Set-Cookie from every response — the CSRF check reads these to decide
+        # whether the session has a SameSite fallback. No extra request is ever made for this.
+        set_cookie = response.headers.get("set-cookie")
+        if set_cookie:
+            self._cookies_seen.append(str(set_cookie))
         return response
 
     # ── the scan ─────────────────────────────────────────────────────────────────────────────────
@@ -213,13 +225,18 @@ class ActiveScanner:
             max_pages=max_pages, max_depth=max_depth,
         )
 
+        # Passive, request-free: a session identifier sitting in any crawled URL.
+        self._check_session_urls()
+
         seen: set[tuple[str, str]] = set()
         for target in self.result.crawl.targets:
             if target.method != "GET":
                 # A POST form's action is not requested at all — not even the once-per-endpoint
                 # CORS probe. A bare GET to `/transfer` submits nothing, but it is still traffic
                 # aimed at an endpoint whose whole purpose is to change something, and the
-                # discipline is worth more than the coverage.
+                # discipline is worth more than the coverage. The CSRF check inspects the form the
+                # crawler already parsed and the cookies already seen; it sends nothing.
+                self._check_csrf(target)
                 continue
             self._check_cors(target)
             if not target.testable:
@@ -234,6 +251,9 @@ class ActiveScanner:
                 self._test_parameter(target, param)
                 if self._stopped():
                     return self.result
+        # Stored XSS: only after a marker was actually submitted through a form, re-fetch the
+        # crawled pages (plain GET, no payload) and see whether the marker persisted.
+        self._check_stored_xss()
         return self.result
 
     def _stopped(self) -> bool:
@@ -280,6 +300,10 @@ class ActiveScanner:
             response = self._request(self._url_for(target, param, probe.payload))
             if response is None:
                 return
+            # Submitting the marker through a form field is what could persist it; note that so the
+            # stored-XSS re-fetch pass runs. (Query-parameter reflection cannot persist.)
+            if param.where == "form":
+                self._xss_submitted_via_form = True
             verdict = c.evaluate_xss(self._marker, probe.payload, response.body,
                                      str(response.headers.get("content-type", "")))
             if verdict.fired:
@@ -365,6 +389,59 @@ class ActiveScanner:
             return
         self._cors_seen.add(key)
         self._test_cors(target)
+
+    def _check_csrf(self, target: Target) -> None:
+        """A state-changing POST form without an anti-CSRF token, on a session with no SameSite
+        fallback. Inspects the form the crawler already parsed and the cookies already observed —
+        it makes NO request, so the POST is never submitted.
+        """
+        key = normalize(target.url)
+        if key in self._csrf_seen:
+            return
+        self._csrf_seen.add(key)
+        verdict = c.evaluate_csrf(target.method, [p.name for p in target.params],
+                                  self._cookies_seen)
+        if verdict.fired:
+            self._record("csrf-missing-token", target, Param(name="form", where="form"),
+                         c.Probe(payload="", label="post-form"), verdict, 0)
+
+    def _check_session_urls(self) -> None:
+        """A session identifier in a crawled URL. Request-free — it reads URLs already gathered.
+        Reported once (it is a site-wide design issue, not a per-URL one)."""
+        for target in (self.result.crawl.targets if self.result.crawl else []):
+            verdict = c.evaluate_session_in_url(target.url)
+            if verdict.fired:
+                self._record("session-id-in-url", target, Param(name="(url)", where="query"),
+                             c.Probe(payload="", label="url"), verdict, 0)
+                return
+
+    def _check_stored_xss(self) -> None:
+        """Persistence: re-fetch each crawled GET page (plain, no payload) and see whether the
+        marker submitted earlier through a form now renders unescaped — i.e. it was stored and is
+        served to other visitors. Runs only after a form submission that could persist it, and
+        stays within the request budget.
+        """
+        if not self._xss_submitted_via_form:
+            return
+        seen: set[str] = set()
+        for target in (self.result.crawl.targets if self.result.crawl else []):
+            if target.method != "GET":
+                continue
+            key = normalize(target.url)
+            if key in seen:
+                continue
+            seen.add(key)
+            response = self._request(target.url)
+            if response is None:
+                if self._stopped():
+                    return
+                continue
+            verdict = c.evaluate_xss(self._marker, "", response.body,
+                                     str(response.headers.get("content-type", "")))
+            if verdict.fired:
+                self._record("xss-stored", target, Param(name="(stored)", where="query"),
+                             c.Probe(payload=self._marker, label="persisted-marker"),
+                             verdict, response.status)
 
 
 __all__ = [

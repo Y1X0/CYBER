@@ -34,7 +34,7 @@ from guardian_core.evidence import Evidence, EvidenceKind
 from guardian_core.findings import RawFinding
 
 from guardian_scanner import sandbox
-from guardian_scanner.dast.checks import CHECKS
+from guardian_scanner.dast.checks import CHECKS, samesite_protective
 from guardian_scanner.dast.scanner import ActiveScanner, Issue, Response, ScanResult
 from guardian_scanner.engines.base import EngineHealth, ScanContext
 
@@ -168,8 +168,10 @@ class DastEngine:
                 yield self._f(f"Cookie without HttpOnly flag: {cname}", Severity.MEDIUM,
                               "CWE-1004", url, "Cookie is accessible to JavaScript (XSS theft).")
             if not cookie.get("samesite"):
-                yield self._f(f"Cookie without SameSite attribute: {cname}", Severity.LOW,
-                              "CWE-352", url, "Cookie lacks CSRF-mitigating SameSite.")
+                yield self._f(f"Cookie without SameSite=Strict/Lax: {cname}", Severity.LOW,
+                              "CWE-352", url,
+                              "Cookie lacks CSRF-mitigating SameSite=Strict/Lax "
+                              "(absent, or SameSite=None).")
 
     # ── active testing ───────────────────────────────────────────────────────────────────────────
     def _active(self, ctx: ScanContext) -> Iterable[RawFinding]:
@@ -338,7 +340,8 @@ class DastEngine:
                 "name": name,
                 "secure": "secure" in value.lower(),
                 "httponly": "httponly" in value.lower(),
-                "samesite": "samesite" in value.lower() or None,
+                # SameSite=None is no CSRF mitigation, so treat only Strict/Lax as protective.
+                "samesite": samesite_protective(value),
             }
             for name, value in _set_cookies(response.headers)
         ]

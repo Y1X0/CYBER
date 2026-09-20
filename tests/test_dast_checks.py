@@ -230,6 +230,60 @@ def test_a_wildcard_with_credentials_is_reported_as_a_misconfiguration():
     assert verdict.confidence == "medium"
 
 
+# ── CSRF ────────────────────────────────────────────────────────────────────────────────────────
+_INSECURE_COOKIE = "session=abc; Path=/; HttpOnly"
+_SAMESITE_COOKIE = "session=abc; Path=/; HttpOnly; SameSite=Lax"
+
+
+def test_a_post_form_with_no_token_and_no_samesite_fires():
+    verdict = c.evaluate_csrf("POST", ["amount", "to"], [_INSECURE_COOKIE])
+    assert verdict.fired is True
+    assert verdict.confidence == "medium"
+
+
+def test_a_post_form_with_an_anti_csrf_token_does_not_fire():
+    for token in ("csrfmiddlewaretoken", "authenticity_token", "__RequestVerificationToken",
+                  "_token", "xsrf_token"):
+        assert c.evaluate_csrf("POST", ["amount", token], [_INSECURE_COOKIE]).fired is False
+
+
+def test_a_post_form_does_not_fire_when_the_cookie_is_samesite_protective():
+    """SameSite=Strict/Lax is a real CSRF mitigation even without a token."""
+    assert c.evaluate_csrf("POST", ["amount"], [_SAMESITE_COOKIE]).fired is False
+
+
+def test_samesite_none_is_not_protective():
+    assert c.samesite_protective("session=abc; SameSite=None") is False
+    assert c.evaluate_csrf("POST", ["amount"], ["session=abc; SameSite=None"]).fired is True
+
+
+def test_a_get_form_is_not_a_csrf_finding():
+    assert c.evaluate_csrf("GET", ["q"], [_INSECURE_COOKIE]).fired is False
+
+
+def test_a_tokenless_post_with_no_cookies_does_not_fire():
+    """No session cookie means no session for a forged request to ride — low-false-positive."""
+    assert c.evaluate_csrf("POST", ["email"], []).fired is False
+
+
+# ── session identifier in the URL ─────────────────────────────────────────────────────────────────
+def test_a_jsessionid_in_the_query_fires():
+    verdict = c.evaluate_session_in_url("https://app.example.com/a?jsessionid=9F3A")
+    assert verdict.fired is True and verdict.confidence == "high"
+
+
+def test_a_jsessionid_matrix_param_in_the_path_fires():
+    assert c.evaluate_session_in_url("https://app.example.com/page;jsessionid=9F3A").fired is True
+
+
+def test_a_common_word_session_param_fires_at_lower_confidence():
+    assert c.evaluate_session_in_url("https://app.example.com/x?sid=1").confidence == "medium"
+
+
+def test_a_url_with_no_session_identifier_does_not_fire():
+    assert c.evaluate_session_in_url("https://app.example.com/search?q=shoes&page=2").fired is False
+
+
 # ── the catalogue ─────────────────────────────────────────────────────────────────────────────────
 def test_every_check_carries_what_a_report_needs():
     for check in c.CHECKS.values():
