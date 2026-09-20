@@ -158,12 +158,51 @@ def test_engine_fails_closed_when_pin_blocks(monkeypatch):
         list(DastEngine().run(_ctx("http://intranet.example/")))
 
 
-def test_non_http_scheme_is_ignored(monkeypatch):
+def test_non_http_scheme_is_recorded_not_checked(monkeypatch):
+    """A non-http(s) scheme on a web asset cannot be actively scanned — and must FAIL, not return [].
+
+    This used to assert `== []`. An empty list is exactly what the orchestrator records as a clean
+    engine run, so a target that was never testable read to the customer as "we looked and it is
+    fine". Now it raises → the run is `not_checked`, never a silent 0-findings pass.
+    """
     def _forbid(*_a, **_k):
-        raise AssertionError("no client for a non-http scheme")
+        raise AssertionError("no client should be created for a non-http scheme")
 
     monkeypatch.setattr("httpx.Client", _forbid)
-    assert list(DastEngine().run(_ctx("ftp://public.example/"))) == []
+    with pytest.raises(dast_engine.DastScanError, match=r"no http"):
+        list(DastEngine().run(_ctx("ftp://public.example/")))
+
+
+def test_scheme_less_target_is_recorded_not_checked(monkeypatch):
+    """The testphp.vulnweb.com case: a bare hostname with no scheme.
+
+    Active testing used to be skipped silently (a bare `return`), so a target that was never scanned
+    came back as 0 findings — indistinguishable from clean. It must fail instead, and the message
+    must name the fix (add http:// or https://).
+    """
+    def _forbid(*_a, **_k):
+        raise AssertionError("no client should be created for a scheme-less target")
+
+    monkeypatch.setattr("httpx.Client", _forbid)
+    with pytest.raises(dast_engine.DastScanError, match=r"no http"):
+        list(DastEngine().run(_ctx("testphp.vulnweb.example")))
+
+
+def test_offline_snapshot_is_a_clean_passive_pass_not_unreachable(monkeypatch):
+    """Reordering guard: offline-snapshot mode assesses posture from a recorded response and must
+    stay a clean passive pass — it must NOT be turned into an 'unreachable' failure by the new
+    scheme/host raises, and must not need a scheme on the identifier."""
+    def _forbid(*_a, **_k):
+        raise AssertionError("offline snapshot must not open a live client")
+
+    monkeypatch.setattr("httpx.Client", _forbid)
+    ctx = ScanContext(
+        scan_id="s", asset_kind="web", asset_identifier="example.com",
+        asset_config={"http_snapshot": {"url": "http://example.com", "headers": {}, "cookies": []}},
+    )
+    findings = list(DastEngine().run(ctx))
+    # Passive posture on a plaintext-HTTP snapshot still reports, and run() does not raise.
+    assert any("plaintext HTTP" in f.title for f in findings)
 
 
 # ── the underlying validator (reused from sandbox) rejects internal, accepts public ──────────────

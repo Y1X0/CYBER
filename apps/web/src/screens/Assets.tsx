@@ -5,10 +5,30 @@ import { Asset, Customer, api } from "../api";
 import { navigate } from "../router";
 import { Async, Card, EmptyState, useAsync, when } from "../ui";
 
+// A web/api target is fetched exactly as entered and redirects are NOT followed, so the scheme is
+// load-bearing: an HTTP-only host silently treated as https:// is unreachable and reads as a clean
+// 0-findings scan. Guide the operator to state the scheme rather than have one guessed. Returns a
+// live hint (or null when the target is fine). The API enforces the same rule with a 422.
+export function targetSchemeHint(kind: string, identifier: string): string | null {
+  if (kind !== "web" && kind !== "api") return null;
+  const v = identifier.trim();
+  if (!v) return null;
+  const lower = v.toLowerCase();
+  if (lower.startsWith("http://") || lower.startsWith("https://")) return null;
+  if (lower.includes("://")) {
+    return `Only http:// and https:// targets can be scanned — “${v.split("://")[0]}://” cannot.`;
+  }
+  return `Include the scheme: http://${v} for a plain-HTTP host, or https://${v} for one served `
+    + "over TLS. They are scanned differently and redirects are not followed, so pick the one the "
+    + "site actually serves.";
+}
+
 const KINDS = [
   { value: "repo", label: "Source repository", hint: "A git URL, or code you supply" },
-  { value: "web", label: "Web application", hint: "An https:// URL" },
-  { value: "api", label: "API", hint: "A base URL with an OpenAPI document" },
+  { value: "web", label: "Web application",
+    hint: "A full URL including the scheme — http:// or https:// (HTTP-only hosts must use http://)" },
+  { value: "api", label: "API",
+    hint: "A base URL including http:// or https://, with an OpenAPI document" },
   { value: "cloud", label: "Cloud account", hint: "Assessed from a collector export" },
   { value: "host", label: "Host", hint: "A hostname or address" },
   { value: "mobile_app", label: "Mobile app (Android)",
@@ -107,7 +127,7 @@ function NewAsset({ customers, onDone }: { customers: Customer[]; onDone: () => 
     setBusy(true);
     setErr("");
     try {
-      await api.createAsset(form);
+      await api.createAsset({ ...form, identifier: form.identifier.trim() });
       onDone();
     } catch (e) {
       setErr((e as Error).message);
@@ -144,7 +164,13 @@ function NewAsset({ customers, onDone }: { customers: Customer[]; onDone: () => 
       <label>Identifier
         <input value={form.identifier}
                onChange={(e) => setForm({ ...form, identifier: e.target.value })}
-               required placeholder="https://example.com or https://github.com/acme/app.git" />
+               required
+               placeholder={form.kind === "web" || form.kind === "api"
+                 ? "http://host or https://host — include the scheme"
+                 : "https://github.com/acme/app.git, or an uploaded artefact id"} />
+        {targetSchemeHint(form.kind, form.identifier) && (
+          <small className="warn">{targetSchemeHint(form.kind, form.identifier)}</small>
+        )}
       </label>
       <label>Exposure
         <select value={form.exposure}

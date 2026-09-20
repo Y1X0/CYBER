@@ -6,7 +6,7 @@ import datetime as dt
 import uuid
 
 from guardian_core.enums import AssetKind
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 
 _ASSET_KINDS = {k.value for k in AssetKind}
 
@@ -88,6 +88,36 @@ class AssetCreate(BaseModel):
         if v not in _ASSET_KINDS:
             raise ValueError(f"unknown asset kind: {v}")
         return v
+
+    @model_validator(mode="after")
+    def _require_explicit_web_scheme(self) -> AssetCreate:
+        """A web/api target must carry an explicit http:// or https:// scheme.
+
+        The DAST and API engines fetch the identifier exactly as stored and do NOT follow redirects,
+        so the protocol is load-bearing: a plain-HTTP host entered (or silently defaulted) as
+        https:// is simply unreachable, and an unreachable target used to read as a clean
+        0-findings scan. Rather than guess a scheme — defaulting to https:// breaks HTTP-only hosts
+        (e.g. testphp.vulnweb.com), defaulting to http:// mis-scans HTTPS-only ones behind a
+        redirect — we require the operator to state it, so the choice is deliberate and visible.
+        Other kinds (repo git URLs, inline artefacts, cloud accounts) are unaffected.
+        """
+        if self.kind in ("web", "api") and self.identifier:
+            ident = self.identifier.strip()
+            lowered = ident.lower()
+            if lowered.startswith(("http://", "https://")):
+                self.identifier = ident  # keep as entered (scheme visible), just trimmed
+            elif "://" in lowered:
+                scheme = lowered.split("://", 1)[0]
+                raise ValueError(
+                    f"unsupported scheme '{scheme}://' for a {self.kind} target — use http:// or "
+                    f"https://"
+                )
+            else:
+                raise ValueError(
+                    f"a {self.kind} target must include a scheme: enter 'http://{ident}' for a "
+                    f"plain-HTTP host or 'https://{ident}' for one served over TLS"
+                )
+        return self
 
     @field_validator("config", "secret")
     @classmethod

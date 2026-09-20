@@ -178,17 +178,31 @@ class DastEngine:
         settings = ctx.settings or {}
         if settings.get("dast_active") is False:
             return
+        # Offline-snapshot mode: one recorded response, no live application to reach. The passive
+        # posture drawn from that snapshot IS a real assessment, so this is a legitimate clean pass,
+        # not an unreachable target. This check must come before the scheme/host checks below, which
+        # only make sense for a live scan.
+        if ctx.asset_config.get("http_snapshot") and not settings.get("dast_live"):
+            return
+
+        # From here a live active scan is expected. Every way it CANNOT run raises DastScanError
+        # rather than returning quietly: a target we could not reach must be recorded as
+        # "not checked", never as a clean 0-findings pass. The passive half (_load) is allowed to
+        # stay silent on a fetch failure only because this half refuses to.
         url = ctx.asset_identifier
         if not url.startswith(("http://", "https://")):
-            return
-        if ctx.asset_config.get("http_snapshot") and not settings.get("dast_live"):
-            # An offline snapshot describes one response. Active testing needs a live application,
-            # and pretending otherwise would report a clean active scan that never happened.
-            return
+            raise DastScanError(
+                f"the target {url!r} has no http:// or https:// scheme, so the application was NOT "
+                f"actively scanned. Set the asset to a full URL — e.g. http://{url} for a "
+                f"plain-HTTP host, or https://{url} for one with TLS."
+            )
 
         host = (urlparse(url).hostname or "").lower()
         if not host:
-            return
+            raise DastScanError(
+                f"the target {url!r} has no host, so the application could not be actively scanned "
+                f"— it was NOT tested."
+            )
 
         scanner = ActiveScanner(
             fetch=self._transport(),
@@ -203,8 +217,10 @@ class DastEngine:
 
         if result.requests_made == 0:
             raise DastScanError(
-                f"the application at {url} could not be reached: "
-                f"{'; '.join(result.errors[:3]) or 'no response'}"
+                f"the application at {url} could not be reached, so it was NOT scanned: "
+                f"{'; '.join(result.errors[:3]) or 'no response'}. If the host serves plain HTTP, "
+                f"use an http:// URL; if it serves HTTPS, check that 443 is open and the "
+                f"certificate is valid."
             )
 
         log.info("dast_active_complete", url=url, requests=result.requests_made,
