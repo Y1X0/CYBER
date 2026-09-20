@@ -148,6 +148,31 @@ jobs:
           docker run --rm -e GUARDIAN_REDIS_URL -v /tmp/qdepth.py:/tmp/qdepth.py:ro \
             "${{ steps.image.outputs.ref }}" python /tmp/qdepth.py || echo "  (scan-queue depth unavailable)"
 
+      # Make the secret boundary VISIBLE, not just implied by a successful boot. List the GUARDIAN_*
+      # env KEYS the scan-plane container actually sees (values redacted) using the exact env the
+      # worker step uses, and hard-fail if a master key is present. The proof is what is ABSENT:
+      # GUARDIAN_JWT_SECRET and GUARDIAN_ENCRYPTION_KEY must not appear.
+      - name: Prove the scan plane holds NO JWT secret and NO KMS master
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+        run: |
+          SCAN_ENV="-e GUARDIAN_ENV=production -e GUARDIAN_REDIS_URL -e GUARDIAN_BROKER_SEAL_KEY \
+            -e GUARDIAN_DATABASE_URL= -e GUARDIAN_APP_DATABASE_URL= \
+            -e GUARDIAN_SCAN_PLANE=true -e GUARDIAN_SANDBOX_ENGINES=true"
+          echo "GUARDIAN_* keys visible to the scan-plane container (values redacted):"
+          # shellcheck disable=SC2086
+          docker run --rm $SCAN_ENV --entrypoint sh "${{ steps.image.outputs.ref }}" \
+            -c 'printenv | grep "^GUARDIAN_" | sed "s/=.*/=<redacted>/" | sort'
+          echo "---"
+          # shellcheck disable=SC2086
+          if docker run --rm $SCAN_ENV --entrypoint sh "${{ steps.image.outputs.ref }}" \
+            -c 'printenv | grep -qE "^(GUARDIAN_JWT_SECRET|GUARDIAN_ENCRYPTION_KEY)="'; then
+            echo "##[error]a master secret (JWT/ENCRYPTION) is present in the scan-plane env — boundary violated"
+            exit 1
+          fi
+          echo "OK: GUARDIAN_JWT_SECRET and GUARDIAN_ENCRYPTION_KEY are ABSENT from the scan-plane container."
+
       - name: Run the scan plane (engine execution only — no JWT / no KMS master)
         env:
           GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
