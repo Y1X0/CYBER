@@ -21,21 +21,24 @@
 # COST. Roughly 4,300 runs a month at a few seconds each, well inside the free Actions allowance,
 # and it keeps the service inside Render's 750 free instance-hours (one always-on service is ~730).
 #
-# STATUS: the automatic schedule is DISABLED. This runs on `workflow_dispatch` only now — trigger it
-# by hand from the Actions tab to warm the instance when needed. The 10-minute cron was removed as
-# part of the deployment cutover (see docs/deployment/11-branch-cutover.md): the pilot deploys from
-# the `claude/security-guardian-architecture-p1315d` branch, and once it deploys from `main` the
-# keep-alive strategy is revisited with the target plan (a paid always-on instance needs no
-# keep-alive; a free instance can re-enable the cron by restoring the `schedule:` block below).
+# STATUS: the automatic schedule is ENABLED — one /health GET every ten minutes keeps the free
+# instance warm so the console always shows live scan status instead of a stale "QUEUED" left over
+# from a slept instance. This is the free-tier keep-alive strategy: while guardian-api runs on
+# Render's free plan it must be kept warm, and a browser fetch against a cold instance is rejected
+# outright (the holding page Render serves while starting carries no CORS headers), which reads to a
+# user as a stuck scan. When the pilot moves to a paid always-on plan (deploying from `main`, see
+# docs/deployment/11-branch-cutover.md) this cron becomes unnecessary and can be removed again.
 #
-# TO RE-ENABLE THE CRON: restore the `schedule:` block under `on:`. TO STOP IT ENTIRELY: disable the
-# workflow in the Actions tab, or delete this file. Nothing depends on it.
+# TO STOP IT: comment out the `schedule:` block under `on:` (workflow_dispatch remains for manual
+# warm-ups), disable the workflow in the Actions tab, or delete this file. Nothing depends on it.
 
 name: Guardian Keep-Alive
 
 on:
-  # schedule:                 # DISABLED (see the note above). workflow_dispatch only.
-  #   - cron: "*/10 * * * *"
+  schedule:
+    # Every ten minutes — comfortably inside Render's 15-minute free-tier idle window. See the COST
+    # note above: ~4,300 short runs/month, well within the free Actions allowance.
+    - cron: "*/10 * * * *"
   workflow_dispatch:
 
 # Read-only. This workflow has no reason to touch the repository.

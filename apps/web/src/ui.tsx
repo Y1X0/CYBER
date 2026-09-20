@@ -124,35 +124,90 @@ export function Spinner({ label = "Querying" }: { label?: string }) {
   return <div className="state state-loading" role="status">{label}</div>;
 }
 
+/**
+ * The control plane is a free-tier instance that sleeps when idle, and a request against a cold
+ * instance is rejected before any HTTP status exists (the holding page Render serves while starting
+ * carries no CORS headers). That is `ApiError(status: 0)` from the client. It reads identically to
+ * "the server is gone", but it is not — it is "starting, try again in a moment". Naming it lets the
+ * UI show a waking state and retry, instead of an error the customer cannot act on or, worse, a
+ * stale scan status that looks stuck.
+ */
+export function isBackendWaking(error: Error | null): boolean {
+  return error instanceof ApiError && error.status === 0;
+}
+
+export function WakingState({ retry }: { retry?: () => void }) {
+  return (
+    <div className="state state-loading" role="status" aria-live="polite">
+      <h4>The backend is waking up…</h4>
+      <p className="muted">
+        The control plane sleeps when idle to stay on the free tier, so the first request after a
+        quiet spell takes up to a minute while it starts. This is not a stuck scan — the status will
+        refresh itself the moment the backend answers.
+      </p>
+      {retry && <button onClick={retry}>Retry now</button>}
+    </div>
+  );
+}
+
 export interface Loader<T> {
   data: T | null;
   error: Error | null;
   loading: boolean;
+  // True while the last attempt failed because the backend was unreachable (a sleeping free-tier
+  // instance) and we are auto-retrying. It is not an error state: a cold start recovers on its own.
+  waking: boolean;
   reload: () => void;
 }
 
-/** Fetch on mount (and on `deps` change), keeping the three states apart. */
+// A cold start on Render's free plan takes ~30–50s; auto-retry with a short backoff spans that
+// window, then falls through to a real error if the backend truly is not answering.
+const _WAKE_RETRIES = 8;
+
+/** Fetch on mount (and on `deps` change), keeping the states apart and riding out a cold start. */
 export function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []): Loader<T> {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [loading, setLoading] = useState(true);
+  const [waking, setWaking] = useState(false);
   const [nonce, setNonce] = useState(0);
 
   const reload = useCallback(() => setNonce((n) => n + 1), []);
 
   useEffect(() => {
     let live = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let attempt = 0;
     setLoading(true);
     setError(null);
-    fn()
-      .then((value) => { if (live) { setData(value); setError(null); } })
-      .catch((e: Error) => { if (live) { setError(e); setData(null); } })
-      .finally(() => { if (live) setLoading(false); });
-    return () => { live = false; };
+    setWaking(false);
+
+    const run = () => {
+      fn()
+        .then((value) => {
+          if (!live) return;
+          setData(value); setError(null); setWaking(false); setLoading(false);
+        })
+        .catch((e: Error) => {
+          if (!live) return;
+          // A sleeping instance is a transient state, not a failure — ride it out.
+          if (isBackendWaking(e) && attempt < _WAKE_RETRIES) {
+            attempt += 1;
+            setWaking(true);
+            setLoading(false);
+            timer = setTimeout(run, Math.min(2000 * attempt, 8000));
+            return;
+          }
+          setError(e); setData(null); setWaking(false); setLoading(false);
+        });
+    };
+    run();
+
+    return () => { live = false; if (timer) clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [...deps, nonce]);
 
-  return { data, error, loading, reload };
+  return { data, error, loading, waking, reload };
 }
 
 /** True for `[]` and for a paged `{rows: []}` — the two shapes the API client returns. */
@@ -164,9 +219,11 @@ function isEmpty(data: unknown): boolean {
   return false;
 }
 
-/** Render a loader's three states. `children` only ever sees real, loaded data. */
+/** Render a loader's states. `children` only ever sees real, loaded data. */
 export function Async<T>({ loader, children, empty }:
   { loader: Loader<T>; children: (data: T) => ReactNode; empty?: ReactNode }) {
+  // A sleeping backend on first load is a waking state, not an error and not an empty result.
+  if (loader.waking && loader.data === null) return <WakingState retry={loader.reload} />;
   if (loader.loading && loader.data === null) return <Spinner />;
   if (loader.error) return <ErrorState error={loader.error} retry={loader.reload} />;
   if (loader.data === null) return <Spinner />;

@@ -83,6 +83,18 @@ export function ScanDetailScreen({ id }: { id: string }) {
         return (
           <>
             <JourneyStrip active="scan" scanId={s.id} />
+            {/* The scan record loaded, but a later refresh couldn't reach a sleeping backend. Say so,
+                so a status shown here is never mistaken for live — a slept instance must not make a
+                finished scan look stuck. */}
+            {scan.waking && (
+              <div className="notice" role="status" aria-live="polite">
+                <strong>Reconnecting to the backend…</strong>
+                <p className="muted">
+                  It sleeps when idle (free tier) and is waking up now. The status below is the last
+                  value fetched and will refresh on its own once it answers — not a stuck scan.
+                </p>
+              </div>
+            )}
             <Card title={
               <>Scan <span className="mono">{s.id.slice(0, 8)}</span>{" "}
                 <StatusPill tone={state.tone}>{state.label}</StatusPill></>
