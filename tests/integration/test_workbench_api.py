@@ -314,6 +314,117 @@ def test_the_dossier_shows_the_correlation_group_and_its_other_members():
     assert [row["id"] for row in body["related"]] == [str(second)]
 
 
+def test_the_dossier_exposes_confidence_ordinal_and_edge_evidence():
+    """Slice 3: the persisted Slice-1 confidence and Slice-2 ordered members + per-edge evidence
+    reach the API, exactly as stored — no transformation."""
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx = _tenant()
+    first = _finding(ctx, evidence={"detail": {"redacted": "AK********EY"}},
+                     location={"engine": "secrets", "path": "app/config.py"})
+    second = _finding(ctx, category="insecure-code",
+                      evidence={"detail": {"redacted": "AK********EY"}},
+                      location={"engine": "sast", "path": "app/config.py"})
+    correlate_tenant(str(ctx["tenant"]))
+
+    client, hdr = _client(ctx)
+    corr = client.get(f"/api/v1/findings/{first}", headers=hdr).json()["correlation"]
+
+    assert corr["confidence"] == "confirmed"            # value match → confirmed (Slice 1)
+    members = corr["members"]
+    assert len(members) == 2
+    assert [m["ordinal"] for m in members] == [0, 1]    # ordered, distinct, starting at 0
+    assert {m["finding_id"] for m in members} == {str(first), str(second)}
+
+    primary = next(m for m in members if m["role"] == "primary")
+    assert primary["ordinal"] == 0
+    assert primary["edge_source_finding_id"] is None    # the root carries no incoming edge
+    assert primary["edge_rationale"] is None
+    assert primary["edge_confidence"] is None
+
+    edged = [m for m in members if m["edge_rationale"] is not None]
+    assert len(edged) == 1
+    edge = edged[0]
+    assert edge["edge_confidence"] == "confirmed"
+    assert "same redacted secret value" in edge["edge_rationale"].lower()
+    assert edge["edge_source_finding_id"] == primary["finding_id"]
+    assert any(m["is_self"] and m["finding_id"] == str(first) for m in members)
+
+
+def test_correlation_confidence_is_not_derived_from_severity_or_finding_confidence():
+    """Position-only match stays STRONG_EVIDENCE even for two CRITICAL members: the relationship
+    tier is about the link, never the findings' severity."""
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx = _tenant()
+    a = _finding(ctx, severity="critical", risk=99, evidence={"detail": {}},
+                 location={"engine": "secrets", "path": "app/.env", "line": 3})
+    _finding(ctx, severity="critical", risk=99, category="insecure-code", evidence={"detail": {}},
+             location={"engine": "sast", "path": "app/.env", "line": 3})
+    correlate_tenant(str(ctx["tenant"]))
+
+    client, hdr = _client(ctx)
+    corr = client.get(f"/api/v1/findings/{a}", headers=hdr).json()["correlation"]
+
+    assert corr["confidence"] == "strong_evidence"
+    edged = [m for m in corr["members"] if m["edge_confidence"]]
+    assert edged and all(m["edge_confidence"] == "strong_evidence" for m in edged)
+
+
+def test_historical_correlation_without_edges_returns_null_edge_fields():
+    """A member row written before Slice 2 (no ordinal/edge given) surfaces with NULL edge fields —
+    the API must never fabricate missing evidence."""
+    from guardian_db.models import Finding, FindingCorrelation, FindingCorrelationMember
+    from guardian_db.session import session_scope
+
+    ctx = _tenant()
+    a = _finding(ctx)
+    b = _finding(ctx, category="insecure-code")
+    with session_scope() as db:
+        group = FindingCorrelation(
+            tenant_id=ctx["tenant"], customer_id=ctx["customer"], rule="same-secret",
+            fingerprint=uuid.uuid4().hex[:32], title="legacy", description="",
+            kind="duplicate", severity="high", risk_score=70, rationale=["historical"],
+            member_count=2,
+        )
+        db.add(group)
+        db.flush()
+        for fid, role in ((a, "primary"), (b, "duplicate")):
+            db.add(FindingCorrelationMember(correlation_id=group.id, finding_id=fid,
+                                            tenant_id=ctx["tenant"], role=role))
+            db.get(Finding, fid).correlation_id = group.id
+
+    client, hdr = _client(ctx)
+    corr = client.get(f"/api/v1/findings/{a}", headers=hdr).json()["correlation"]
+
+    assert corr["confidence"] == "potential"            # slice-1 server default, not fabricated
+    assert len(corr["members"]) == 2
+    for m in corr["members"]:
+        assert m["edge_source_finding_id"] is None
+        assert m["edge_rationale"] is None
+        assert m["edge_confidence"] is None
+        assert isinstance(m["ordinal"], int)
+
+
+def test_a_correlation_is_never_returned_across_tenants():
+    """Item 2: a correlation belongs to a tenant; another tenant cannot reach it through the
+    member's finding id (IDOR), and nothing about it leaks."""
+    from guardian_scanner.correlation import correlate_tenant
+
+    a_ctx = _tenant()
+    victim = _finding(a_ctx, evidence={"detail": {"redacted": "AK********EY"}},
+                      location={"engine": "secrets"})
+    _finding(a_ctx, category="insecure-code",
+             evidence={"detail": {"redacted": "AK********EY"}}, location={"engine": "sast"})
+    correlate_tenant(str(a_ctx["tenant"]))
+
+    b_ctx = _tenant()
+    client, hdr = _client(b_ctx)
+    resp = client.get(f"/api/v1/findings/{victim}", headers=hdr)
+    assert resp.status_code == 404
+    assert "AK" not in resp.text and "same-secret" not in resp.text
+
+
 def test_a_finding_in_another_tenant_is_not_found():
     mine, theirs = _tenant(), _tenant()
     hidden = _finding(theirs)

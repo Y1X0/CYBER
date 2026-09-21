@@ -607,6 +607,13 @@ h1 { font-size: var(--fs-2xl); }
 }
 .kv dd { margin: 0; font-size: var(--fs-sm); color: var(--text); }
 
+/* ══ correlation (finding relationships — not attack paths) ═════════════════════════════════════ */
+.correlation-members { list-style: none; margin: var(--s-3) 0 0; padding: 0;
+                       display: flex; flex-direction: column; gap: var(--s-2); }
+.correlation-members > li { padding: var(--s-2) var(--s-3); border-left: 2px solid var(--line);
+                            background: var(--surface-2, transparent); border-radius: var(--r-1); }
+.correlation-edge { margin-top: var(--s-1); }
+
 /* ══ forms ════════════════════════════════════════════════════════════════════════════════════ */
 input, select, textarea {
   font-family: var(--font-mono); font-size: var(--fs-sm);

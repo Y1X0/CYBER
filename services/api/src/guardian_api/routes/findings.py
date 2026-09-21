@@ -30,6 +30,7 @@ from guardian_db.models import (
     Asset,
     Finding,
     FindingCorrelation,
+    FindingCorrelationMember,
     FindingEvent,
     FindingVerification,
     ProofRecord,
@@ -117,6 +118,72 @@ def _visible(query, identity: Identity):
         # customer id happened to be null.
         query = query.where(Finding.customer_id == identity.portal_customer_id)
     return query
+
+
+def _correlation_payload(db: Session, identity: Identity, finding: Finding,
+                         group: FindingCorrelation) -> tuple[dict, list[Finding]]:
+    """Serialize a finding's correlation group and its ordered members with per-edge evidence (E1).
+
+    This exposes what the E1 model already persists — the group's confidence (how strongly the
+    RELATIONSHIP is evidenced, NOT vulnerability certainty), and each member's ordinal (a neutral
+    PRESENTATION order, never a causal/attack sequence) and its one incoming relationship edge. It
+    is not an attack path: that is a separate concept (WP-F3 / E4) with its own endpoint.
+
+    Two queries only, so a large group does not fan out into one lookup per member: the member rows,
+    and the member findings this identity may see (tenant- and portal-scoped by `_visible`). Edge
+    text is scrubbed on the way out like every other free-text field. Nothing here is derived from a
+    member's severity or `Finding.confidence`; the persisted tier is passed through unchanged, and a
+    historical member with no recorded edge stays NULL rather than being invented.
+    """
+    member_rows = list(db.execute(
+        select(FindingCorrelationMember)
+        .where(FindingCorrelationMember.correlation_id == group.id,
+               FindingCorrelationMember.tenant_id == identity.tenant_id)
+        .order_by(FindingCorrelationMember.ordinal.asc(),
+                  FindingCorrelationMember.finding_id.asc())
+    ).scalars())
+    visible = {
+        row.id: row for row in db.execute(
+            _visible(select(Finding), identity).where(Finding.correlation_id == group.id)
+        ).scalars()
+    }
+
+    members = []
+    for row in member_rows:
+        member = visible.get(row.finding_id)
+        members.append({
+            "finding_id": str(row.finding_id),
+            "role": row.role,
+            "ordinal": row.ordinal,
+            # The edge is relationship evidence anchored at the primary, NOT an attack step. NULL on
+            # the primary and on rows written before the evidence was recorded — never fabricated.
+            "edge_source_finding_id": (str(row.edge_source_finding_id)
+                                       if row.edge_source_finding_id else None),
+            "edge_rationale": (_scrubbed(finding, {"v": row.edge_rationale})["v"]
+                               if row.edge_rationale else None),
+            "edge_confidence": row.edge_confidence,
+            # Enough to render the member without another round-trip; omitted (None) if this
+            # identity may not see that finding, so a title never leaks across the tenant boundary.
+            "title": member.title if member is not None else None,
+            "category": member.category if member is not None else None,
+            "severity": member.severity if member is not None else None,
+            "is_self": row.finding_id == finding.id,
+        })
+
+    correlation = {
+        "id": str(group.id), "rule": group.rule, "kind": group.kind,
+        # Slice 1: relationship-evidence tier, passed through exactly as persisted.
+        "confidence": group.confidence,
+        "severity": group.severity, "risk_score": group.risk_score,
+        "rationale": [_scrubbed(finding, {"v": line})["v"] for line in (group.rationale or [])],
+        "member_count": group.member_count,
+        "created_at": group.created_at.isoformat() if group.created_at else None,
+        "updated_at": group.updated_at.isoformat() if group.updated_at else None,
+        "members": members,
+    }
+    related = [visible[row.finding_id] for row in member_rows
+               if row.finding_id != finding.id and row.finding_id in visible]
+    return correlation, related
 
 
 # ── list ──────────────────────────────────────────────────────────────────────────────────────────
@@ -285,16 +352,7 @@ def get_finding(
     if finding.correlation_id:
         group = db.get(FindingCorrelation, finding.correlation_id)
         if group is not None and group.tenant_id == identity.tenant_id:
-            correlation = {
-                "id": str(group.id), "rule": group.rule, "kind": group.kind,
-                "severity": group.severity, "risk_score": group.risk_score,
-                "rationale": group.rationale, "member_count": group.member_count,
-            }
-            related = list(db.execute(
-                _visible(select(Finding), identity)
-                .where(Finding.correlation_id == group.id, Finding.id != finding.id)
-                .limit(50)
-            ).scalars())
+            correlation, related = _correlation_payload(db, identity, finding, group)
 
     verifications = [
         {"checked_at": v.checked_at.isoformat() if v.checked_at else None,

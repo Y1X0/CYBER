@@ -190,6 +190,26 @@ export interface Finding {
   created_at?: string;
 }
 
+// How strongly the RELATIONSHIP between correlated findings is evidenced (WP-E1). This is a separate
+// question from whether the underlying vulnerability is real or exploitable.
+export type CorrelationConfidence = "confirmed" | "strong_evidence" | "potential";
+
+// One member of a correlation group. `ordinal` is presentation order only — not a causal/attack
+// sequence. The edge fields describe how this member relates to its source member; they are NULL on
+// the primary (the root) and on historical correlations recorded before edge evidence was captured.
+export interface CorrelationMember {
+  finding_id: string;
+  role: string;
+  ordinal: number;
+  edge_source_finding_id: string | null;
+  edge_rationale: string | null;
+  edge_confidence: CorrelationConfidence | null;
+  title: string | null;
+  category: string | null;
+  severity: string | null;
+  is_self: boolean;
+}
+
 export interface FindingDossier {
   finding: Finding;
   asset: Record<string, string>;
@@ -205,9 +225,15 @@ export interface FindingDossier {
     kev: boolean; maturity: string | null; ransomware: boolean;
     epss: number | null; cvss_base: number | null;
   };
+  // A finding RELATIONSHIP group (WP-E1). This is NOT an attack path — see AttackGraph for those.
+  // `confidence` is how strongly the relationship is evidenced (relationship-evidence, not
+  // vulnerability certainty); `ordinal` is neutral presentation order, never an exploit sequence.
   correlation: null | {
-    id: string; rule: string; kind: string; severity: string;
-    risk_score: number; rationale: string[]; member_count: number;
+    id: string; rule: string; kind: string;
+    confidence: CorrelationConfidence;
+    severity: string; risk_score: number; rationale: string[]; member_count: number;
+    created_at: string | null; updated_at: string | null;
+    members: CorrelationMember[];
   };
   related: Finding[];
   verifications: {

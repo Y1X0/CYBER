@@ -5,7 +5,9 @@
 // customer should never need to call the API to understand why Guardian thinks something matters.
 
 import { useEffect, useState } from "react";
-import { ApiError, Finding, FindingDossier, ProofOfVulnerability, api } from "../api";
+import {
+  ApiError, CorrelationConfidence, Finding, FindingDossier, ProofOfVulnerability, api,
+} from "../api";
 import { explainFinding } from "../findingExplain";
 import { navigate } from "../router";
 import {
@@ -231,27 +233,7 @@ export function FindingDetailScreen({ id }: { id: string }) {
             </Card>
           </div>
 
-          {d.correlation && (
-            <Card title="This is one issue seen several ways">
-              <p>
-                {d.correlation.member_count} finding(s) describe the same underlying problem
-                ({d.correlation.rule}).
-              </p>
-              {d.correlation.rationale.map((r, i) => <p key={i} className="muted">{r}</p>)}
-              {d.related.length > 0 && (
-                <ul>
-                  {d.related.map((r) => (
-                    <li key={r.id}>
-                      <button className="link" onClick={() => navigate(`findings/${r.id}`)}>
-                        {r.title}
-                      </button>{" "}
-                      <SeverityBadge severity={r.severity} />
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </Card>
-          )}
+          {d.correlation && <CorrelationCard correlation={d.correlation} />}
 
           <ProofCard id={id} />
 
@@ -313,6 +295,97 @@ function ProvenanceBadge({ source }: { source?: string }) {
   if (source === "manual")
     return <StatusPill tone="ok">analyst</StatusPill>;
   return <StatusPill tone="ok">automated</StatusPill>;
+}
+
+// Human-readable labels for the machine-readable E1 rule ids. The rule id is preserved and shown
+// too — these only make the relationship legible, they do not invent new classifications.
+const CORRELATION_RULE_LABEL: Record<string, string> = {
+  "same-secret": "Same credential",
+  "same-cve-on-asset": "Same CVE on the same asset",
+  "injection-corroborated": "Static and dynamic analysis agree",
+  "shipped-and-running": "Vulnerable component deployed and reachable",
+  "exposed-repository-secret": "Committed credential publicly retrievable",
+};
+
+// Relationship-evidence tiers (WP-E1). This is how strongly the *link* is evidenced — NOT whether
+// the vulnerability itself is confirmed. The label is deliberately about the relationship.
+const CORRELATION_CONFIDENCE: Record<
+  CorrelationConfidence, { label: string; tone: string }
+> = {
+  confirmed: { label: "Confirmed relationship", tone: "ok" },
+  strong_evidence: { label: "Strong evidence", tone: "warn" },
+  potential: { label: "Potential relationship", tone: "muted" },
+};
+
+function ConfidenceBadge({ confidence }: { confidence: CorrelationConfidence }) {
+  const c = CORRELATION_CONFIDENCE[confidence] ?? { label: confidence, tone: "muted" };
+  return <StatusPill tone={c.tone}>{c.label}</StatusPill>;
+}
+
+// The E1 correlation panel. It presents finding RELATIONSHIPS, and is deliberately distinct from the
+// attack-path view: members are listed in a neutral order (never "1 → 2 → 3"), and an edge is
+// labelled "relationship evidence", never an attack step. A correlation is not an attack path.
+export function CorrelationCard(
+  { correlation }: { correlation: NonNullable<FindingDossier["correlation"]> },
+) {
+  const ruleLabel = CORRELATION_RULE_LABEL[correlation.rule] ?? correlation.rule;
+  return (
+    <Card title="Related findings">
+      <p>
+        {correlation.member_count} finding(s) describe the same underlying problem.{" "}
+        <span className="muted">This is a relationship between findings, not an attack path.</span>
+      </p>
+      <dl className="kv">
+        <dt>Relationship</dt>
+        <dd>{ruleLabel} <span className="muted mono">({correlation.rule})</span></dd>
+        <dt>Confidence</dt>
+        <dd>
+          <ConfidenceBadge confidence={correlation.confidence} />{" "}
+          <span className="muted">
+            how strongly the relationship is evidenced — not whether the vulnerability is exploitable
+          </span>
+        </dd>
+      </dl>
+      {correlation.rationale.map((r, i) => <p key={i} className="muted">{r}</p>)}
+
+      <ul className="correlation-members">
+        {(() => { let related = 0; return correlation.members.map((m) => {
+          // Number the RELATED findings independently of the one being viewed, and never with an
+          // arrow — the order is neutral presentation, not an exploitation sequence.
+          const label = m.is_self ? "This finding" : `Related finding ${(related += 1)}`;
+          return (
+          <li key={m.finding_id}>
+            <div>
+              <span className="muted">{label}</span>
+              {" · "}
+              {m.is_self ? (
+                <strong>{m.title ?? "this finding"}</strong>
+              ) : (
+                <button className="link" onClick={() => navigate(`findings/${m.finding_id}`)}>
+                  {m.title ?? `Finding ${m.finding_id.slice(0, 8)}`}
+                </button>
+              )}
+              {m.severity && <> <SeverityBadge severity={m.severity} /></>}
+              {m.category && <span className="muted"> · {m.category}</span>}
+            </div>
+            {m.edge_rationale ? (
+              <div className="muted correlation-edge">
+                Relationship evidence: {m.edge_rationale}
+                {m.edge_confidence && (
+                  <> · <ConfidenceBadge confidence={m.edge_confidence} /></>
+                )}
+              </div>
+            ) : m.role !== "primary" ? (
+              <div className="muted correlation-edge">
+                Relationship evidence not available for this historical correlation.
+              </div>
+            ) : null}
+          </li>
+          );
+        }); })()}
+      </ul>
+    </Card>
+  );
 }
 
 function ProofCard({ id }: { id: string }) {
