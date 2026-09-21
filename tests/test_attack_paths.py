@@ -238,3 +238,43 @@ def test_every_step_carries_the_finding_it_rests_on():
             assert step.finding_id
             assert step.rationale
             assert step.grants
+
+
+# ── rank-before-cap (WP-E4 truncation fix) ──────────────────────────────────────────────────────────
+# The output cap is applied AFTER ranking, so the chains returned are the highest-scoring ones, not
+# whichever the enumeration reached first. Before this fix a real, high-score path could be dropped
+# because it enumerated after the cap was already full — and a finding-level filter over that set
+# would then report "no attack path" for a finding whose path existed.
+def test_the_highest_scoring_chain_survives_the_cap_even_if_it_enumerates_late():
+    # A low-value chain on an alphabetically-earlier entry (enumerated first) and a high-value chain
+    # on a later entry (enumerated last). With room for only one, the RANKED top chain must win.
+    findings = [
+        _f("rce_a", "aaa", cwe="CWE-78"), _f("sec_a", "aaa", cwe="CWE-798"),
+        _f("rce_z", "zzz", cwe="CWE-78"), _f("sec_z", "zzz", cwe="CWE-798"),
+    ]
+    crit = {"aaa": "low", "zzz": "critical"}
+    result = build_chains(findings, reachable={}, entry_assets={"aaa", "zzz"},
+                          criticality=crit, max_chains=1)
+    assert len(result.chains) == 1
+    assert result.truncated is True
+    kept = result.chains[0]
+    assert {s.asset_id for s in kept.steps} == {"zzz"}     # the critical-asset chain, not "aaa"
+    full = build_chains(findings, reachable={}, entry_assets={"aaa", "zzz"},
+                        criticality=crit, max_chains=10)
+    assert kept.score == max(c.score for c in full.chains)
+
+
+def test_reaching_the_enumeration_bound_marks_the_result_truncated():
+    findings = [_f("rce", "web", cwe="CWE-78")]
+    findings += [_f(f"s{i}", "web", cwe="CWE-798") for i in range(10)]
+    result = build_chains(findings, reachable={}, entry_assets={"web"}, max_enumerated=3)
+    assert result.truncated is True
+    assert len(result.chains) <= 3
+
+
+def test_a_complete_small_estate_is_not_reported_truncated():
+    # Everything fits: enumerated fully and returned fully, so a finding-level "no path" would be
+    # trustworthy here.
+    findings = [_f("rce", "web", cwe="CWE-78"), _f("secret", "web", cwe="CWE-798")]
+    result = build_chains(findings, reachable={}, entry_assets={"web"})
+    assert result.truncated is False

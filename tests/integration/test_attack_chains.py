@@ -337,3 +337,12 @@ def test_the_existing_attack_chains_authorization_is_unchanged():
     ctx = _estate(link_assets=True)
     client, hdr = _portal_client(ctx["slug"])
     assert client.get("/api/v1/graph/attack-chains", headers=hdr).status_code == 403
+
+
+def test_the_adapter_surfaces_truncation_from_the_full_computation():
+    # With room for only one chain, the tenant computation is truncated; the finding endpoint must
+    # surface that (so the console does not present an empty/partial result as conclusive).
+    ctx = _estate(link_assets=True)
+    client, hdr = _client(ctx["slug"])
+    body = _finding_chains(client, hdr, ctx["iam"], limit=1).json()
+    assert body["truncated"] is True

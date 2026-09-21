@@ -194,8 +194,12 @@ def get_finding_attack_chains(
     The finding is verified to belong to the caller's tenant first (404 otherwise, matching the
     dossier). Then the tenant's chains are computed ONCE and filtered in memory to those containing
     the finding — no per-finding recomputation, so a finding dossier does not fan out into repeated
-    E4 runs. `truncated`/`unchainable_findings` reflect the full tenant computation and are returned
-    unchanged; a chain cut by the computation limit is reported through `truncated`, never hidden.
+    E4 runs. E4 ranks chains by score and returns the top ones, so a real high-score path is not
+    dropped merely for enumerating late; whatever the cap still leaves out is reported through
+    `truncated`. `truncated`/`unchainable_findings` describe the FULL tenant computation, not this
+    finding — so when `truncated` is true an empty `chains` here is NOT proof the finding has no
+    path (a lower-ranked or unenumerated chain may contain it); the console says so rather than
+    claiming the finding is unreachable.
     """
     finding = db.execute(
         select(Finding).where(Finding.id == finding_id, Finding.tenant_id == identity.tenant_id)

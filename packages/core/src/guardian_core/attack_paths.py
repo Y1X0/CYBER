@@ -295,6 +295,11 @@ class ChainResult:
 
 MAX_CHAIN_LENGTH = 4
 MAX_CHAINS = 50
+# How many candidate chains to enumerate and score before ranking. The output cap (`max_chains`) is
+# applied AFTER ranking, so the chains returned are the highest-scoring ones — not merely the first
+# ones the enumeration happened to reach. This bound keeps enumeration finite on a large estate;
+# reaching it sets `truncated`, because chains beyond it were never scored.
+MAX_ENUMERATED = 2000
 
 
 def build_chains(
@@ -306,6 +311,7 @@ def build_chains(
     criticality: dict[str, str] | None = None,
     max_length: int = MAX_CHAIN_LENGTH,
     max_chains: int = MAX_CHAINS,
+    max_enumerated: int = MAX_ENUMERATED,
 ) -> ChainResult:
     """Chain findings into ordered attack paths.
 
@@ -325,31 +331,45 @@ def build_chains(
             continue
         by_asset.setdefault(finding.asset_id, []).append(finding)
 
-    chains: list[Chain] = []
-    truncated = False
-
+    # Enumerate candidate chains first (bounded by `max_enumerated`), THEN rank by score, THEN keep
+    # the top `max_chains`. Capping during enumeration would return whatever was reached first — in
+    # entry-asset and depth-first order, not score order — so a genuinely high-scoring path could
+    # be dropped while lower-scoring ones were kept, and a finding-level filter over that set could
+    # then report "no attack path" for a finding whose path simply enumerated late.
+    candidates: list[tuple[Step, ...]] = []
+    enumeration_truncated = False
     for entry in sorted(entry_assets):
         starts = [f for f in by_asset.get(entry, [])
                   if not (profile_for(f).requires - {Capability.NETWORK_ACCESS})]  # type: ignore[union-attr]
         for start in starts:
             for chain in _extend(start, entry, by_asset, reachable, max_length):
-                if len(chains) >= max_chains:
-                    truncated = True
+                if len(candidates) >= max_enumerated:
+                    enumeration_truncated = True
                     break
-                last_asset = chain[-1].asset_id
-                likelihood, impact, score = score_chain(
-                    chain, asset_criticality=criticality.get(last_asset, "medium"))
-                chains.append(Chain(steps=chain, entry_node_id=entry,
-                                    entry_key=entry_keys.get(entry, entry),
-                                    likelihood=likelihood, impact=impact, score=score))
-            if truncated:
+                candidates.append(chain)
+            if enumeration_truncated:
                 break
-        if truncated:
+        if enumeration_truncated:
             break
 
-    # Worst first, then longest, then by id so the order never depends on dictionary iteration.
-    chains.sort(key=lambda c: (-c.score, -c.length, c.steps[0].finding_id))
-    return ChainResult(chains=tuple(chains), truncated=truncated, unmapped=tuple(sorted(unmapped)))
+    chains: list[Chain] = []
+    for steps in candidates:
+        entry = steps[0].asset_id
+        likelihood, impact, score = score_chain(
+            steps, asset_criticality=criticality.get(steps[-1].asset_id, "medium"))
+        chains.append(Chain(steps=steps, entry_node_id=entry,
+                            entry_key=entry_keys.get(entry, entry),
+                            likelihood=likelihood, impact=impact, score=score))
+
+    # Worst first, then longest, then by the full step sequence so ties are deterministic regardless
+    # of enumeration order — the ranking, not dictionary or DFS iteration, decides what survives.
+    chains.sort(key=lambda c: (-c.score, -c.length, tuple(s.finding_id for s in c.steps)))
+    kept = chains[:max_chains]
+    # `truncated` means the returned list is NOT the complete set of chains: either enumeration hit
+    # its bound (chains beyond it were never scored), or more chains were scored than are returned.
+    # A finding-level caller must therefore not read an empty result as proof of "no path".
+    truncated = enumeration_truncated or len(chains) > max_chains
+    return ChainResult(chains=tuple(kept), truncated=truncated, unmapped=tuple(sorted(unmapped)))
 
 
 def _extend(
@@ -419,6 +439,7 @@ def describe(chain: Chain) -> str:
 __all__ = [
     "MAX_CHAINS",
     "MAX_CHAIN_LENGTH",
+    "MAX_ENUMERATED",
     "IMPLIES",
     "Capability",
     "Chain",

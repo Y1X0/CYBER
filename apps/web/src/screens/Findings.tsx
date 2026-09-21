@@ -414,10 +414,20 @@ function StaffAttackPaths({ findingId }: { findingId: string }) {
       <Async loader={loader}>
         {(data: AttackChains) => (
           data.chains.length === 0 ? (
-            <p className="muted">
-              This finding does not appear in any computed attack path. That is not proof it is
-              unreachable — see the Attack paths view for the whole estate.
-            </p>
+            data.truncated ? (
+              // The tenant-wide computation hit its limit, so an empty result is NOT conclusive:
+              // a path involving this finding may exist but was not among those scored.
+              <p className="muted">
+                Attack-path analysis for this tenant was truncated at the computation limit, so
+                this is not conclusive — a path involving this finding may exist but was not among
+                the chains scored. See the Attack paths view for the whole estate.
+              </p>
+            ) : (
+              <p className="muted">
+                This finding does not appear in any computed attack path. That is not proof it is
+                unreachable — see the Attack paths view for the whole estate.
+              </p>
+            )
           ) : (
             <>
               {data.chains.map((chain, i) => (

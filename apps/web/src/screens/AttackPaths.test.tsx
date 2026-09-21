@@ -112,4 +112,17 @@ describe("finding attack paths (E4)", () => {
     expect(await screen.findByText(/does not appear in any computed attack path/i))
       .toBeInTheDocument();
   });
+
+  it("does not claim 'no path' when the computation was truncated", async () => {
+    vi.spyOn(api, "me").mockResolvedValue(STAFF as never);
+    vi.spyOn(api, "attackChainsForFinding").mockResolvedValue(
+      { chains: [], truncated: true, unchainable_findings: 0 } as never);
+
+    render(<FindingAttackPaths findingId="f-secret" />);
+
+    // The honest truncated state, NOT a definitive "no attack path".
+    expect(await screen.findByText(/truncated at the computation limit/i)).toBeInTheDocument();
+    expect(screen.getByText(/may exist but was not among the chains scored/i)).toBeInTheDocument();
+    expect(screen.queryByText(/does not appear in any computed attack path/i)).toBeNull();
+  });
 });
