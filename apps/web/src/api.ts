@@ -649,6 +649,10 @@ export const api = {
   // ── analysis ──────────────────────────────────────────────────────────────────────────────────
   attackChains: (maxLength = 4) =>
     req<AttackChains>(`/graph/attack-chains?max_length=${maxLength}`),
+  // The attack chains (WP-E4) a single finding participates in. Staff-only on the backend — a
+  // computed, tenant-wide attack path, deliberately distinct from an E1 finding correlation.
+  attackChainsForFinding: (findingId: string, maxLength = 4) =>
+    req<AttackChains>(`/graph/findings/${findingId}/attack-chains?max_length=${maxLength}`),
   services: () => req<ServicesResp>("/graph/services"),
   compliance: (framework?: string) =>
     req<Compliance>(`/compliance${framework ? `?framework=${framework}` : ""}`),

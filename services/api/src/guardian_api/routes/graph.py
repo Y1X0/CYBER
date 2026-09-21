@@ -17,7 +17,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from guardian_core.enums import NodeType
 from guardian_db.graph_read import DbGraphProjector
-from guardian_db.models import GraphNode
+from guardian_db.models import Finding, GraphNode
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -169,6 +169,50 @@ def get_attack_chains(
     out = DbGraphProjector(db).attack_chains(
         tenant_id=str(identity.tenant_id), max_length=max_length, limit=limit
     )
+    return AttackChainsOut.model_validate(out)
+
+
+@router.get("/findings/{finding_id}/attack-chains", response_model=AttackChainsOut)
+def get_finding_attack_chains(
+    finding_id: uuid.UUID,
+    identity: Identity = Depends(_staff),
+    db: Session = Depends(get_db),
+    max_length: int = Query(default=4, ge=2, le=6),
+    limit: int = Query(default=50, ge=1, le=200),
+) -> AttackChainsOut:
+    """The attack chains (WP-E4) a specific finding participates in — a staff-only, read-time
+    adapter over the same computation as `/attack-chains`.
+
+    This is deliberately NOT a finding correlation (WP-E1): it is a computed *attack path*, which is
+    tenant-wide and staff-only, and it is not persisted here. E4 stays authoritative — nothing about
+    ordering, reliability, rationale, or scoring is recomputed or reinterpreted.
+
+    Staff-only for a security reason, not convenience: a chain is tenant-wide and may name findings
+    across several customers of the tenant, so it must never be served through the customer-scoped
+    portal finding view. The staff gate (`_staff`) is the same one `/attack-chains` uses.
+
+    The finding is verified to belong to the caller's tenant first (404 otherwise, matching the
+    dossier). Then the tenant's chains are computed ONCE and filtered in memory to those containing
+    the finding — no per-finding recomputation, so a finding dossier does not fan out into repeated
+    E4 runs. `truncated`/`unchainable_findings` reflect the full tenant computation and are returned
+    unchanged; a chain cut by the computation limit is reported through `truncated`, never hidden.
+    """
+    finding = db.execute(
+        select(Finding).where(Finding.id == finding_id, Finding.tenant_id == identity.tenant_id)
+    ).scalar_one_or_none()
+    if finding is None:
+        # Same 404 the dossier gives — a finding in another tenant is indistinguishable from one
+        # that does not exist, so a caller cannot probe for foreign finding ids.
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "finding not found")
+
+    out = DbGraphProjector(db).attack_chains(
+        tenant_id=str(identity.tenant_id), max_length=max_length, limit=limit
+    )
+    target = str(finding_id)
+    out["chains"] = [
+        chain for chain in out["chains"]
+        if any(step["finding_id"] == target for step in chain["steps"])
+    ]
     return AttackChainsOut.model_validate(out)
 
 

@@ -226,3 +226,114 @@ def test_a_portal_contact_cannot_read_the_attack_graph():
     del hdr["Authorization"]
 
     assert client.get("/api/v1/graph/attack-chains", headers=hdr).status_code in (401, 403)
+
+
+# ── the per-finding read-time adapter (WP-E4, Slice 5) ──────────────────────────────────────────────
+def _portal_client(tenant_slug: str):
+    """A customer-portal contact for the estate's customer — non-staff."""
+    from fastapi.testclient import TestClient
+    from guardian_api.main import app
+    from guardian_common.config import get_settings
+    from guardian_common.security import create_access_token
+    from guardian_db.models import Customer, CustomerContact, Tenant, User
+    from guardian_db.session import session_scope
+
+    with session_scope() as db:
+        tenant = db.query(Tenant).filter(Tenant.slug == tenant_slug).one()
+        customer = db.query(Customer).filter(Customer.tenant_id == tenant.id).first()
+        user = User(email=f"p-{tenant_slug}@x.invalid", name="Portal", status="active")
+        db.add(user)
+        db.flush()
+        db.add(CustomerContact(customer_id=customer.id, user_id=user.id, role="customer_viewer"))
+        db.flush()
+        user_id = user.id
+
+    settings = get_settings()
+    token = create_access_token(subject=str(user_id), secret=settings.jwt_secret,
+                                algorithm=settings.jwt_algorithm)
+    return TestClient(app), {"Authorization": f"Bearer {token}"}
+
+
+def _finding_chains(client, hdr, finding_id: str, **params):
+    return client.get(f"/api/v1/graph/findings/{finding_id}/attack-chains", headers=hdr,
+                      params=params)
+
+
+def test_the_adapter_returns_only_chains_that_contain_the_finding():
+    ctx = _estate(link_assets=True)
+    client, hdr = _client(ctx["slug"])
+
+    resp = _finding_chains(client, hdr, ctx["iam"])
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["chains"]
+    # Every returned chain names the requested finding; step order and finding ids are E4's own.
+    for chain in body["chains"]:
+        ids = [s["finding_id"] for s in chain["steps"]]
+        assert ctx["iam"] in ids
+    # The classic ordered path is present and preserved (rce → secret → iam), not reordered.
+    routes = [[s["finding_id"] for s in c["steps"]] for c in body["chains"]]
+    assert [ctx["rce"], ctx["secret"], ctx["iam"]] in routes
+
+
+def test_the_adapter_preserves_e4_reliability_rationale_and_scores():
+    ctx = _estate(link_assets=True)
+    client, hdr = _client(ctx["slug"])
+
+    full = client.get("/api/v1/graph/attack-chains", headers=hdr).json()
+    scoped = _finding_chains(client, hdr, ctx["iam"]).json()
+
+    # A scoped chain is byte-for-byte one of the full computation's chains — nothing recomputed.
+    full_with_iam = [c for c in full["chains"]
+                     if ctx["iam"] in [s["finding_id"] for s in c["steps"]]]
+    assert scoped["chains"] == full_with_iam
+    top = scoped["chains"][0]
+    assert top["steps"][0]["reliability"] > 0        # E4 reliability preserved
+    assert top["steps"][0]["rationale"]              # E4 rationale preserved
+    assert 0 < top["score"] <= 100 and 0 < top["likelihood"] <= 100  # E4 scores preserved
+
+
+def test_a_finding_in_no_chain_returns_an_empty_but_valid_result():
+    # No graph edge between the assets → the cloud finding is in no chain, but the call still succeeds.
+    ctx = _estate(link_assets=False)
+    client, hdr = _client(ctx["slug"])
+
+    resp = _finding_chains(client, hdr, ctx["iam"])
+    assert resp.status_code == 200
+    assert resp.json()["chains"] == []
+
+
+def test_the_adapter_never_returns_another_tenants_chain():
+    mine = _estate(link_assets=True)
+    theirs = _estate(link_assets=True)
+    client, hdr = _client(mine["slug"])
+
+    # A foreign finding id → 404 (indistinguishable from non-existent), never another tenant's path.
+    assert _finding_chains(client, hdr, theirs["iam"]).status_code == 404
+
+    # And my own chains never contain a foreign finding id.
+    body = _finding_chains(client, hdr, mine["iam"]).json()
+    foreign = {theirs["rce"], theirs["secret"], theirs["iam"]}
+    seen = {s["finding_id"] for c in body["chains"] for s in c["steps"]}
+    assert not (seen & foreign)
+
+
+def test_a_nonexistent_finding_is_404():
+    ctx = _estate(link_assets=True)
+    client, hdr = _client(ctx["slug"])
+    assert _finding_chains(client, hdr, str(uuid.uuid4())).status_code == 404
+
+
+def test_a_portal_contact_cannot_read_a_findings_attack_chains():
+    """The whole point of Slice 5: E4 stays staff-only. A portal contact — even for the finding's own
+    customer — must not reach the per-finding adapter, because a chain is tenant-wide."""
+    ctx = _estate(link_assets=True)
+    client, hdr = _portal_client(ctx["slug"])
+    assert _finding_chains(client, hdr, ctx["iam"]).status_code == 403
+
+
+def test_the_existing_attack_chains_authorization_is_unchanged():
+    """Regression: the staff gate on the original endpoint is not weakened by the new one."""
+    ctx = _estate(link_assets=True)
+    client, hdr = _portal_client(ctx["slug"])
+    assert client.get("/api/v1/graph/attack-chains", headers=hdr).status_code == 403

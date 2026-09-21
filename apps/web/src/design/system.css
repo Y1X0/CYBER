@@ -614,6 +614,15 @@ h1 { font-size: var(--fs-2xl); }
                             background: var(--surface-2, transparent); border-radius: var(--r-1); }
 .correlation-edge { margin-top: var(--s-1); }
 
+/* ══ attack paths (E4 — computed ordered paths, distinct from E1 correlations) ══════════════════ */
+.attack-path { margin: var(--s-3) 0; padding: var(--s-2) var(--s-3);
+               border: 1px solid var(--line); border-radius: var(--r-1); }
+.attack-path-meta { margin-bottom: var(--s-2); }
+.attack-path-steps { margin: 0; padding-left: var(--s-5);
+                     display: flex; flex-direction: column; gap: var(--s-2); }
+.attack-path-steps > li.on { border-left: 2px solid var(--accent, currentColor);
+                             padding-left: var(--s-2); margin-left: calc(var(--s-2) * -1); }
+
 /* ══ forms ════════════════════════════════════════════════════════════════════════════════════ */
 input, select, textarea {
   font-family: var(--font-mono); font-size: var(--fs-sm);

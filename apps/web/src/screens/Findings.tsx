@@ -6,7 +6,8 @@
 
 import { useEffect, useState } from "react";
 import {
-  ApiError, CorrelationConfidence, Finding, FindingDossier, ProofOfVulnerability, api,
+  ApiError, AttackChain, AttackChains, CorrelationConfidence, Finding, FindingDossier,
+  ProofOfVulnerability, api,
 } from "../api";
 import { explainFinding } from "../findingExplain";
 import { navigate } from "../router";
@@ -235,6 +236,8 @@ export function FindingDetailScreen({ id }: { id: string }) {
 
           {d.correlation && <CorrelationCard correlation={d.correlation} />}
 
+          <FindingAttackPaths findingId={id} />
+
           <ProofCard id={id} />
 
           <Card title="Verification history" actions={<RetestButton id={id} onDone={loader.reload} />}>
@@ -385,6 +388,83 @@ export function CorrelationCard(
         }); })()}
       </ul>
     </Card>
+  );
+}
+
+// ── E4 attack paths (WP-E4) — a STAFF-ONLY, read-time view, distinct from E1 correlations ──────────
+// An attack path is a computed, ordered, tenant-wide sequence of findings an attacker could use. It
+// is NOT a finding relationship (E1) and NOT a confirmed exploit. It is staff-only because a chain
+// can name findings across several customers of a tenant, while this dossier is customer-scoped for
+// portal users — so a portal contact must never see it. The backend enforces this (403); the UI
+// gate below simply avoids calling a staff-only endpoint as a portal user.
+export function FindingAttackPaths({ findingId }: { findingId: string }) {
+  const me = useAsync(() => api.me(), []);
+  if (!me.data || !me.data.staff_role) return null;   // portal/customer contacts: never rendered
+  return <StaffAttackPaths findingId={findingId} />;
+}
+
+function StaffAttackPaths({ findingId }: { findingId: string }) {
+  const loader = useAsync(() => api.attackChainsForFinding(findingId), [findingId]);
+  return (
+    <Card title="Attack paths">
+      <p className="muted">
+        Ordered attacker steps this finding takes part in (computed from the discovery graph).
+        This is an attack path, not a finding relationship, and not a confirmed exploit.
+      </p>
+      <Async loader={loader}>
+        {(data: AttackChains) => (
+          data.chains.length === 0 ? (
+            <p className="muted">
+              This finding does not appear in any computed attack path. That is not proof it is
+              unreachable — see the Attack paths view for the whole estate.
+            </p>
+          ) : (
+            <>
+              {data.chains.map((chain, i) => (
+                <AttackPathChain key={i} chain={chain} focus={findingId} />
+              ))}
+              {data.truncated && (
+                <p className="muted">
+                  Some chains were truncated by the computation limit; this list may be incomplete.
+                </p>
+              )}
+            </>
+          )
+        )}
+      </Async>
+    </Card>
+  );
+}
+
+function AttackPathChain({ chain, focus }: { chain: AttackChain; focus: string }) {
+  return (
+    <div className="attack-path">
+      <div className="attack-path-meta">
+        {/* E4's own metrics, labelled as E4 — never reusing the E1 relationship-confidence badge. */}
+        <StatusPill tone="warn">{`Path score ${chain.score}`}</StatusPill>{" "}
+        <span className="muted">
+          {`Likelihood ${chain.likelihood}% · Impact ${chain.impact} · ${chain.length} steps`}
+        </span>
+      </div>
+      <ol className="attack-path-steps">
+        <li className="muted">Entry: {chain.entry || "an internet-reachable asset"}</li>
+        {chain.steps.map((step, i) => (
+          <li key={i} className={step.finding_id === focus ? "on" : undefined}>
+            <div>
+              <strong>{step.title}</strong>{" "}
+              {step.cwe_id && <span className="muted mono">{step.cwe_id}</span>}
+              {step.finding_id === focus && <span className="muted"> · this finding</span>}
+            </div>
+            <div className="muted">{step.rationale}</div>
+            <div className="muted">
+              {`Path reliability: ${step.reliability}%`}
+              {step.grants.length > 0 && ` · grants ${step.grants.join(", ")}`}
+            </div>
+          </li>
+        ))}
+      </ol>
+      <p className="muted">{chain.narrative}</p>
+    </div>
   );
 }
 
