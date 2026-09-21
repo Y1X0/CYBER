@@ -218,6 +218,79 @@ def test_confidence_defaults_to_potential_for_pre_slice1_rows():
         assert row.confidence == "potential"
 
 
+# ── ordered members + per-edge evidence (WP-E1, slice 2) ────────────────────────────────────────────
+def test_member_ordinal_and_edge_evidence_persist_and_reload():
+    """The ordinal and the one incoming edge each non-primary member carries survive the round-trip;
+    the primary is ordinal 0 with no incoming edge."""
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx = _tenant()
+    _finding(ctx, engine="secrets", redacted="AK**EY")
+    _finding(ctx, engine="sast", category="insecure-code", redacted="AK**EY")
+    correlate_tenant(str(ctx["tenant"]))
+
+    group = _correlations(ctx["tenant"])[0]
+    members = _members(group.id)
+    assert sorted(m.ordinal for m in members) == [0, 1]
+
+    primary = next(m for m in members if m.role == "primary")
+    assert primary.ordinal == 0
+    assert primary.edge_source_finding_id is None      # the root has no incoming edge
+    assert primary.edge_rationale is None
+    assert primary.edge_confidence is None
+
+    edged = [m for m in members if m.edge_rationale is not None]
+    assert len(edged) == 1                              # star of one edge for a 2-member group
+    edge = edged[0]
+    assert edge.ordinal == 1
+    assert edge.edge_confidence == "confirmed"
+    assert "same redacted secret value" in edge.edge_rationale.lower()
+    assert edge.edge_source_finding_id == primary.finding_id
+
+
+def test_re_running_updates_members_without_duplicating_edges():
+    """Item 15: a re-scan must update member rows in place (composite PK), never add a second edge."""
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx = _tenant()
+    _finding(ctx, engine="secrets", redacted="AK**EY")
+    _finding(ctx, engine="sast", category="insecure-code", redacted="AK**EY")
+    correlate_tenant(str(ctx["tenant"]))
+    correlate_tenant(str(ctx["tenant"]))
+
+    group = _correlations(ctx["tenant"])[0]
+    members = _members(group.id)
+    assert len(members) == 2
+    assert len([m for m in members if m.edge_rationale is not None]) == 1
+
+
+def test_pre_slice2_member_row_reads_back_with_default_ordinal_and_no_edge():
+    """A member row inserted the pre-slice-2 way (no ordinal/edge given) reads back with the safe
+    default ordinal and NULL edge — the migration never fabricates a historical relationship."""
+    from guardian_db.models import FindingCorrelation, FindingCorrelationMember
+    from guardian_db.session import session_scope
+
+    ctx = _tenant()
+    fid = _finding(ctx, engine="secrets", redacted="AK**EY")
+    with session_scope() as db:
+        corr = FindingCorrelation(
+            tenant_id=ctx["tenant"], customer_id=ctx["customer"], rule="same-secret",
+            fingerprint=uuid.uuid4().hex[:32], title="legacy", description="",
+            kind="duplicate", severity="high", risk_score=70, rationale=[], member_count=1,
+        )
+        db.add(corr)
+        db.flush()
+        member = FindingCorrelationMember(
+            correlation_id=corr.id, finding_id=fid, tenant_id=ctx["tenant"], role="primary",
+        )
+        db.add(member)
+        db.flush()
+        assert member.ordinal == 0
+        assert member.edge_source_finding_id is None
+        assert member.edge_rationale is None
+        assert member.edge_confidence is None
+
+
 def test_one_tenants_findings_never_join_anothers_group():
     from guardian_scanner.correlation import correlate_tenant
 

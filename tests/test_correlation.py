@@ -398,3 +398,158 @@ def test_correlation_confidence_is_deterministic_and_order_independent():
     first = group_same_secret([a, b])[0].confidence
     second = group_same_secret([b, a])[0].confidence
     assert first is second is CorrelationConfidence.CONFIRMED
+
+
+# ── ordered members + per-edge evidence (WP-E1, slice 2) ────────────────────────────────────────────
+# A group now carries a deterministic presentation `ordered` and a set of `edges`. An edge is a
+# pairwise RELATIONSHIP between two members, anchored at the primary — it is NOT a causal/attack step
+# and NOT implied by the ordinal. Every edge's rationale and confidence are owned by the rule that
+# matched, derived from the evidence, never from member severity/count or Finding.confidence.
+
+def _edge_to(group, dest):
+    return next((e for e in group.edges if e.dest == dest), None)
+
+
+def _others(group):
+    return [m for m in group.members if m != group.primary]
+
+
+def test_member_order_is_deterministic_and_input_order_independent():
+    a = _secret("secrets", "AK**EY")
+    b = _secret("sast", "AK**EY")
+    c = _secret("container", "AK**EY")
+    first = group_same_secret([a, b, c])[0].ordered
+    second = group_same_secret([c, a, b])[0].ordered
+    third = group_same_secret([b, c, a])[0].ordered
+    assert first == second == third
+
+
+def test_order_is_primary_first_then_stable_identifier():
+    g = group_same_secret([_secret("secrets", "AK**EY"), _secret("sast", "AK**EY"),
+                           _secret("container", "AK**EY")])[0]
+    assert g.ordered[0] == g.primary
+    # deterministic, from a stable identifier already available (the finding id) — not insertion
+    # order and not a timestamp.
+    assert g.ordered[1:] == sorted(_others(g), key=str)
+
+
+def test_ordinal_is_presentation_only_not_a_causal_sequence():
+    """A duplicate/corroboration group is ordered so a report can render it; the ordering must not be
+    read as an attack path. The edges describe evidence, never causation."""
+    g = group_same_secret([_secret("secrets", "AK**EY"), _secret("sast", "AK**EY")])[0]
+    assert g.kind == "duplicate"
+    prose = " ".join(e.rationale.lower() for e in g.edges)
+    for causal in ("attack path", "leads to", "causes", "exploit chain", "pivot"):
+        assert causal not in prose
+
+
+# Edge evidence, per rule ----------------------------------------------------------------------------
+def test_same_secret_value_edge_is_confirmed_and_names_the_value_match():
+    g = group_same_secret([_secret("secrets", "AK**EY"), _secret("sast", "AK**EY")])[0]
+    edge = _edge_to(g, _others(g)[0])
+    assert edge is not None
+    assert edge.source == g.primary
+    assert edge.confidence is CorrelationConfidence.CONFIRMED
+    assert "same redacted secret value" in edge.rationale.lower()
+
+
+def test_same_secret_position_edge_is_strong_evidence():
+    g = group_same_secret([_secret_at("secrets", "/app/.env", 3),
+                           _secret_at("sast", "/app/.env", 3)])[0]
+    edge = _edge_to(g, _others(g)[0])
+    assert edge.confidence is CorrelationConfidence.STRONG_EVIDENCE
+    assert "same file location" in edge.rationale.lower()
+
+
+def test_same_cve_on_asset_edge_names_cve_and_asset():
+    g = group_same_cve_on_asset([
+        FakeFinding(category="vuln-dep", cve_ids=["CVE-2024-1"], location={"engine": "sca"}),
+        FakeFinding(category="vuln-service", cve_ids=["CVE-2024-1"],
+                    location={"engine": "service_cve"}),
+    ])[0]
+    edge = _edge_to(g, _others(g)[0])
+    assert edge.confidence is CorrelationConfidence.STRONG_EVIDENCE
+    assert "same cve on the same asset" in edge.rationale.lower()
+
+
+def test_injection_edge_explains_static_dynamic_corroboration_without_claiming_same_sink():
+    g = group_injection_corroborated([
+        FakeFinding(category="injection", cwe_id="CWE-89", location={"engine": "sast"}),
+        FakeFinding(category="injection", cwe_id="CWE-89", location={"engine": "dast"}),
+    ])[0]
+    edge = _edge_to(g, _others(g)[0])
+    assert edge.confidence is CorrelationConfidence.STRONG_EVIDENCE
+    assert "static and dynamic" in edge.rationale.lower()
+    assert "same sink" in edge.rationale.lower()  # explicitly disclaims proving the same sink
+    assert "CWE-89" in edge.rationale
+
+
+def test_shipped_and_running_edge_does_not_claim_component_identity():
+    g = group_shipped_and_running([
+        FakeFinding(category="vuln-dep", cve_ids=["CVE-2024-9"], location={"engine": "sca"}),
+        FakeFinding(category="vuln-service", cve_ids=["CVE-2024-9"],
+                    location={"engine": "service_cve"}),
+    ])[0]
+    edge = _edge_to(g, _others(g)[0])
+    assert edge.confidence is CorrelationConfidence.POTENTIAL
+    assert "not proven" in edge.rationale.lower()
+    assert "same component" in edge.rationale.lower()
+    assert "confirmed" not in edge.rationale.lower()
+
+
+def test_exposed_repository_secret_edge_does_not_claim_secret_belongs_to_repo():
+    g = group_exposed_repository_secret([
+        FakeFinding(category="web-misconfig",
+                    location={"engine": "web_checks", "rule": "web-check-git-exposed"}),
+        FakeFinding(category="secret", location={"engine": "secrets", "rule": "aws-key"},
+                    evidence={"detail": {"redacted": "AK****"}}),
+    ])[0]
+    edge = _edge_to(g, _others(g)[0])
+    assert edge.confidence is CorrelationConfidence.POTENTIAL
+    assert "not proven" in edge.rationale.lower()
+    assert "inside" in edge.rationale.lower()  # not proven the credential is inside the exposure
+
+
+# Negative / robustness cases ------------------------------------------------------------------------
+def test_unrelated_findings_produce_no_edges():
+    findings = [
+        FakeFinding(category="vuln-dep", cve_ids=["CVE-2023-1"], location={"engine": "sca"}),
+        FakeFinding(category="misconfig", location={"rule": "iac-s3-public-acl"}),
+    ]
+    assert correlate(findings) == []
+
+
+def test_edge_confidence_ignores_member_severity_and_risk():
+    g = group_same_secret([
+        _secret_at("secrets", "/a/.env", 1, severity="critical", risk_score=99),
+        _secret_at("sast", "/a/.env", 1, severity="critical", risk_score=99),
+    ])[0]
+    assert g.edges[0].confidence is CorrelationConfidence.STRONG_EVIDENCE
+
+
+def test_edge_confidence_ignores_member_count():
+    g = group_same_secret([_secret("secrets", "V"), _secret("sast", "V"),
+                           _secret("container", "V"), _secret("iac", "V")])[0]
+    assert len(g.edges) == 3  # star: one edge from the primary to every other member
+    assert all(e.confidence is CorrelationConfidence.CONFIRMED for e in g.edges)
+
+
+def test_every_member_but_the_primary_has_exactly_one_incoming_edge():
+    g = group_same_secret([_secret("secrets", "V"), _secret("sast", "V"),
+                           _secret("container", "V")])[0]
+    dests = [e.dest for e in g.edges]
+    assert sorted(dests) == sorted(_others(g))          # every non-primary is a destination once
+    assert g.primary not in dests                        # the primary is the root, never a dest
+    assert all(e.source == g.primary for e in g.edges)   # anchored at the primary
+
+
+def test_edges_are_stable_across_repeated_runs():
+    a = _secret("secrets", "AK**EY")
+    b = _secret("sast", "AK**EY")
+    first = group_same_secret([a, b])[0]
+    second = group_same_secret([b, a])[0]
+
+    def signature(g):
+        return sorted((str(e.source), str(e.dest), e.rationale, e.confidence.value)
+                      for e in g.edges)
+    assert signature(first) == signature(second)

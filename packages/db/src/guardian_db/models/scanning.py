@@ -18,7 +18,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from guardian_db.base import Base, TimestampMixin, uuid_pk
@@ -232,6 +232,19 @@ class FindingCorrelationMember(Base, TimestampMixin):
     tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), nullable=False)
     role: Mapped[str] = mapped_column(String(20), default="corroborating", nullable=False,
                                       server_default="corroborating")
+    # Deterministic PRESENTATION order within the correlation (WP-E1 slice 2): the primary is 0,
+    # the rest follow by finding-id. NOT a causal/attack sequence — E1 asserts no directionality.
+    ordinal: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
+    # The single incoming RELATIONSHIP edge this member carries, anchored at the primary. NULL on
+    # the primary (the root) and on rows that predate slice 2 until correlation next re-runs. The
+    # source is always a co-member of this same group; kept as a plain id (integrity maintained by
+    # the correlation engine, which rewrites members every run) rather than a second FK to findings.
+    edge_source_finding_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True),
+                                                                     nullable=True)
+    # Why the edge exists (evidence, not speculation) and how strongly that pair is evidenced
+    # (confirmed | strong_evidence | potential) — the edge's own tier, independent of the group's.
+    edge_rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    edge_confidence: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
 
 class FindingVerification(Base, TimestampMixin):

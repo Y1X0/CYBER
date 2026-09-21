@@ -44,6 +44,21 @@ The two "chain" rules are deliberately POTENTIAL, not CONFIRMED: their evidence 
 (the customer), so the chain is plausible but unproven. Forcing them to CONFIRMED would be the
 manufactured-tier failure this model exists to prevent. A future rule must state its own tier from
 its own evidence — nothing inherits a tier from `kind`.
+
+ORDERED MEMBERS + PER-EDGE EVIDENCE (WP-E1, slice 2). A group now also carries:
+
+* ``ordered`` — a deterministic PRESENTATION order (the primary first, then the remaining members by
+  their finding-id string). It is stable across runs and independent of input iteration or database
+  insertion order. It is NOT a causal or attack sequence: an ordered list of correlated findings is
+  not an attack path, and E1 deliberately does not assert directionality. The future E4→E1 bridge
+  owns real ordered attack paths; this ordinal only makes a report render the same way every time.
+* ``edges`` — the pairwise RELATIONSHIPS the rule actually evidenced, each with its own rationale
+  and its own ``CorrelationConfidence``. Every edge is anchored at the primary (``source``) purely
+  so each non-primary member has one incoming edge to read; ``source``→``dest`` is NOT "source
+  caused dest". Each rule owns its edges — there is no generic fallback that stamps one rationale on
+  every rule — and an edge's tier follows the evidence for THAT pair, which is why a corroboration
+  group's cross-side edge (static⟷dynamic) can be STRONG_EVIDENCE while a same-side edge between two
+  static findings is only POTENTIAL.
 """
 
 from __future__ import annotations
@@ -78,6 +93,25 @@ _DYNAMIC_ENGINES = {"dast", "api", "web_checks"}
 
 
 @dataclass
+class MemberEdge:
+    """A pairwise RELATIONSHIP between two members of one correlation (WP-E1, slice 2).
+
+    ``source``→``dest`` is an anchoring convention, NOT causation: every edge is anchored at the
+    group's primary so each non-primary member has exactly one incoming edge to read. E1 does not
+    assert that the source caused, enabled, or precedes the destination — that directional, causal
+    reading belongs to attack paths (the future E4→E1 bridge), deliberately not here.
+
+    ``rationale`` describes the evidence for the pair; ``confidence`` is that pair's own
+    ``CorrelationConfidence``, following the evidence — never the members' severity or count.
+    """
+
+    source: uuid.UUID
+    dest: uuid.UUID
+    rationale: str
+    confidence: CorrelationConfidence
+
+
+@dataclass
 class Group:
     """A correlation before it is persisted."""
 
@@ -94,6 +128,15 @@ class Group:
     confidence: CorrelationConfidence
     rationale: list[str] = field(default_factory=list)
     customer_id: uuid.UUID | None = None
+    # Deterministic PRESENTATION order (primary first, then remaining members by id string). Filled
+    # by __post_init__ when a rule does not set it. NOT a causal/attack sequence.
+    ordered: list[uuid.UUID] = field(default_factory=list)
+    # Pairwise relationships the rule evidenced, each anchored at the primary. Each rule owns these.
+    edges: list[MemberEdge] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.ordered:
+            self.ordered = _presentation_order(self.primary, self.members)
 
     def fingerprint(self) -> str:
         """Stable across runs, so a re-scan updates the group rather than making a second one."""
@@ -186,8 +229,15 @@ def group_same_secret(findings: list[Finding]) -> list[Group]:
             continue
         customer_id, identity = key
         # CONFIRMED only when the same redacted VALUE matched; position-only is STRONG_EVIDENCE.
-        confidence = (CorrelationConfidence.CONFIRMED if basis_of[key] == "value"
+        value_matched = basis_of[key] == "value"
+        confidence = (CorrelationConfidence.CONFIRMED if value_matched
                       else CorrelationConfidence.STRONG_EVIDENCE)
+        edge_rationale = (
+            "Both findings reference the same redacted secret value."
+            if value_matched else
+            "Both findings reference the same file location (path:line); no value was available "
+            "to compare."
+        )
         groups.append(_duplicate_group(
             rule="same-secret",
             title="One credential reported by several engines",
@@ -199,6 +249,7 @@ def group_same_secret(findings: list[Finding]) -> list[Group]:
             members=members,
             customer_id=customer_id,
             confidence=confidence,
+            edge_rationale=edge_rationale,
         ))
     return groups
 
@@ -226,6 +277,7 @@ def group_same_cve_on_asset(findings: list[Finding]) -> list[Group]:
             # Same CVE id + same asset is a strong match, but the rule does not prove the two
             # engines saw the *same component instance*, so it is not CONFIRMED.
             confidence=CorrelationConfidence.STRONG_EVIDENCE,
+            edge_rationale="Both findings reference the same CVE on the same asset.",
         ))
     return groups
 
@@ -258,6 +310,23 @@ def group_shipped_and_running(findings: list[Finding]) -> list[Group]:
             f"{cve} is both shipped in the codebase and answering on a reachable service — the "
             "vulnerable component is already running, not merely scheduled to be deployed"
         ))
+        member_ids = [f.id for f in members][:MAX_GROUP_SIZE]
+        primary_id = _primary(members).id
+        shipped_ids = {f.id for f in sides["shipped"]}
+        edges = _bipartite_edges(
+            primary_id, member_ids, shipped_ids,
+            # The cross-side pair is the whole point — and it is only POTENTIAL: the same CVE id
+            # does not prove the running service IS the shipped dependency.
+            cross_rationale=(
+                f"The same CVE ({cve}) is shipped as a dependency and is answering on a reachable "
+                "service; not proven to be the same component."
+            ),
+            cross_confidence=CorrelationConfidence.POTENTIAL,
+            same_rationale=(
+                f"The same CVE ({cve}) reported on the same side (both shipped, or both running)."
+            ),
+            same_confidence=CorrelationConfidence.POTENTIAL,
+        )
         groups.append(Group(
             rule="shipped-and-running",
             kind="chain",
@@ -267,13 +336,13 @@ def group_shipped_and_running(findings: list[Finding]) -> list[Group]:
                 "answering. Patching the dependency does not fix the running instance until it is "
                 "redeployed."
             ),
-            members=[f.id for f in members][:MAX_GROUP_SIZE],
-            primary=_primary(members).id,
+            members=member_ids,
+            primary=primary_id,
             severity=severity, risk_score=score, rationale=rationale,
             # Keyed on (customer, CVE) only: the running service is NOT proven to be the shipped
             # component, so the chain is plausible but unconfirmed.
             confidence=CorrelationConfidence.POTENTIAL,
-            customer_id=customer_id,
+            customer_id=customer_id, edges=edges,
         ))
     return groups
 
@@ -303,6 +372,25 @@ def group_injection_corroborated(findings: list[Finding]) -> list[Group]:
             f"a static data-flow path to a {cwe} sink and a dynamic observation of {cwe} on the "
             "same application agree — two independent methods reaching one conclusion"
         ))
+        member_ids = [f.id for f in members][:MAX_GROUP_SIZE]
+        primary_id = _primary(members).id
+        static_ids = {f.id for f in static_members}
+        edges = _bipartite_edges(
+            primary_id, member_ids, static_ids,
+            # The corroboration IS the cross-side (static⟷dynamic) pair — strong, independent, but
+            # not proof of the same sink.
+            cross_rationale=(
+                f"Static and dynamic analysis corroborate the same weakness class ({cwe}) for the "
+                "customer; not proven to be the same sink."
+            ),
+            cross_confidence=CorrelationConfidence.STRONG_EVIDENCE,
+            # Two findings from the SAME analysis type are not independent corroboration.
+            same_rationale=(
+                f"Both findings report {cwe} from the same analysis type; not independent "
+                "corroboration."
+            ),
+            same_confidence=CorrelationConfidence.POTENTIAL,
+        )
         groups.append(Group(
             rule="injection-corroborated",
             kind="corroboration",
@@ -312,14 +400,14 @@ def group_injection_corroborated(findings: list[Finding]) -> list[Group]:
                 f"operation, and a dynamic check independently observed {cwe} behaviour. Neither "
                 "alone proves exploitability; together they are as close as scanning gets."
             ),
-            members=[f.id for f in members][:MAX_GROUP_SIZE],
-            primary=_primary(members).id,
+            members=member_ids,
+            primary=primary_id,
             severity=severity, risk_score=score, rationale=rationale,
             # Static + dynamic agreement on one CWE class is strong, independent evidence, but the
             # rule keys on (customer, CWE) — it does not prove both engines hit the SAME sink — so
             # it is STRONG_EVIDENCE, not CONFIRMED.
             confidence=CorrelationConfidence.STRONG_EVIDENCE,
-            customer_id=customer_id,
+            customer_id=customer_id, edges=edges,
         ))
     return groups
 
@@ -350,6 +438,21 @@ def group_exposed_repository_secret(findings: list[Finding]) -> list[Group]:
             "a repository or dotenv file is readable over HTTP and a credential was found in the "
             "same customer's source — treat the credential as disclosed, not merely committed"
         ))
+        member_ids = [f.id for f in members][:MAX_GROUP_SIZE]
+        primary_id = _primary(members).id
+        exposure_ids = {f.id for f in exposure_members}
+        edges = _bipartite_edges(
+            primary_id, member_ids, exposure_ids,
+            # The cross-side pair (exposure⟷secret) is only POTENTIAL: keyed on the customer, it
+            # does not prove the credential lives inside the exposed repository.
+            cross_rationale=(
+                "A repository or dotenv file is publicly readable and a credential exists in the "
+                "same customer's source; not proven the credential is inside that exposure."
+            ),
+            cross_confidence=CorrelationConfidence.POTENTIAL,
+            same_rationale="Additional exposure or secret for the same customer.",
+            same_confidence=CorrelationConfidence.POTENTIAL,
+        )
         groups.append(Group(
             rule="exposed-repository-secret",
             kind="chain",
@@ -359,13 +462,13 @@ def group_exposed_repository_secret(findings: list[Finding]) -> list[Group]:
                 "found in this customer's source. Removing the file does not help: assume the "
                 "credential has been read and rotate it."
             ),
-            members=[f.id for f in members][:MAX_GROUP_SIZE],
-            primary=_primary(members).id,
+            members=member_ids,
+            primary=primary_id,
             severity=severity, risk_score=score, rationale=rationale,
             # Keyed on the customer only: the exposure and the secret are not proven to be the same
             # repository, so the chain is plausible but unconfirmed — POTENTIAL.
             confidence=CorrelationConfidence.POTENTIAL,
-            customer_id=customer_id,
+            customer_id=customer_id, edges=edges,
         ))
     return groups
 
@@ -408,24 +511,76 @@ def _engine_of(finding: Finding) -> str:
 
 
 def _primary(members: list[Finding]) -> Finding:
-    """The member a reader should look at first: highest risk, then highest severity."""
-    return max(members, key=lambda f: (f.risk_score or 0, _severity(f.severity).rank))
+    """The member a reader should look at first: highest risk, then highest severity.
+
+    The finding-id string is the final tiebreak so the choice is deterministic — two members of
+    equal risk and severity must not depend on input iteration order, or the ordinal (and the edge
+    anchor derived from it) would drift between runs.
+    """
+    return max(members, key=lambda f: (f.risk_score or 0, _severity(f.severity).rank, str(f.id)))
+
+
+def _presentation_order(primary: uuid.UUID, members: list[uuid.UUID]) -> list[uuid.UUID]:
+    """Deterministic order for display: the primary first, then the rest by id string.
+
+    Derived only from identifiers already on the findings — never insertion order or a timestamp —
+    so repeated runs and any input order produce identical ordinals. This is presentation order,
+    not a causal sequence (see the module docstring).
+    """
+    rest = sorted((m for m in members if m != primary), key=str)
+    return [primary, *rest]
+
+
+def _star_edges(primary: uuid.UUID, members: list[uuid.UUID], *, rationale: str,
+                confidence: CorrelationConfidence) -> list[MemberEdge]:
+    """Uniform edges from the primary to every other member — for rules whose evidence is the same
+    for every pair (a duplicate group: the primary shares the identical secret/CVE with each other
+    member, transitively). One edge per non-primary member, so each has a single incoming edge."""
+    return [MemberEdge(primary, m, rationale, confidence) for m in members if m != primary]
+
+
+def _bipartite_edges(primary: uuid.UUID, members: list[uuid.UUID], one_side: set[uuid.UUID], *,
+                     cross_rationale: str, cross_confidence: CorrelationConfidence,
+                     same_rationale: str, same_confidence: CorrelationConfidence
+                     ) -> list[MemberEdge]:
+    """Edges from the primary to every other member, distinguishing the pair the rule actually
+    corroborates (crossing the two sides) from a same-side pair the rule does NOT.
+
+    A corroboration/chain rule proves a relationship BETWEEN two sides (static⟷dynamic,
+    shipped⟷running, exposure⟷secret). Only a cross-side pair carries that evidence; a pair on one
+    side (two static findings, two exposures) does not, so it gets its own weaker rationale and
+    tier. This is what keeps the rule from manufacturing an edge it cannot support."""
+    primary_on_side = primary in one_side
+    edges: list[MemberEdge] = []
+    for m in members:
+        if m == primary:
+            continue
+        crosses = (m in one_side) != primary_on_side
+        if crosses:
+            edges.append(MemberEdge(primary, m, cross_rationale, cross_confidence))
+        else:
+            edges.append(MemberEdge(primary, m, same_rationale, same_confidence))
+    return edges
 
 
 def _duplicate_group(*, rule, title, description, members, customer_id,  # noqa: ANN001
-                     confidence: CorrelationConfidence) -> Group:
+                     confidence: CorrelationConfidence, edge_rationale: str) -> Group:
     primary = _primary(members)
     severity = _severity(primary.severity)
+    member_ids = [f.id for f in members][:MAX_GROUP_SIZE]
+    # A duplicate's evidence is transitive (every member is the same secret/CVE), so every edge from
+    # the primary carries the same rationale and the same tier as the group.
+    edges = _star_edges(primary.id, member_ids, rationale=edge_rationale, confidence=confidence)
     return Group(
         rule=rule, kind="duplicate", title=title, description=description,
-        members=[f.id for f in members][:MAX_GROUP_SIZE], primary=primary.id,
+        members=member_ids, primary=primary.id,
         severity=severity, risk_score=primary.risk_score or 0, confidence=confidence,
         rationale=[
             f"Grouped by rule `{rule}`: {len(members)} findings describe one issue",
             f"Severity {severity.value} taken from the strongest member — grouping does not "
             "escalate a duplicate, it only stops it being counted several times",
         ],
-        customer_id=customer_id,
+        customer_id=customer_id, edges=edges,
     )
 
 
@@ -505,22 +660,42 @@ def _persist(session, tenant: uuid.UUID, group: Group) -> bool:  # noqa: ANN001
         correlation.member_count = len(group.members)
         created = False
 
-    known = {
-        row.finding_id for row in session.execute(
+    existing_members = {
+        row.finding_id: row for row in session.execute(
             select(FindingCorrelationMember).where(
                 FindingCorrelationMember.correlation_id == correlation.id
             )
         ).scalars()
     }
+    # Deterministic presentation ordinal, and the one incoming edge each non-primary member carries.
+    ordinal_of = {finding_id: i for i, finding_id in enumerate(group.ordered)}
+    edge_of = {edge.dest: edge for edge in group.edges}
     for finding_id in group.members:
         role = "primary" if finding_id == group.primary else (
             "duplicate" if group.kind == "duplicate" else "corroborating"
         )
-        if finding_id not in known:
+        ordinal = ordinal_of.get(finding_id, 0)
+        edge = edge_of.get(finding_id)
+        edge_source = edge.source if edge else None
+        edge_rationale = edge.rationale if edge else None
+        edge_confidence = edge.confidence.value if edge else None
+        row = existing_members.get(finding_id)
+        if row is None:
             session.add(FindingCorrelationMember(
                 correlation_id=correlation.id, finding_id=finding_id,
-                tenant_id=tenant, role=role,
+                tenant_id=tenant, role=role, ordinal=ordinal,
+                edge_source_finding_id=edge_source, edge_rationale=edge_rationale,
+                edge_confidence=edge_confidence,
             ))
+        else:
+            # Re-running must UPDATE the existing row, not add a second (composite PK forbids it)
+            # and not leave a pre-slice-2 row without its ordinal/edge — that is how a historical
+            # group gains real, recomputed edge evidence rather than a fabricated migration value.
+            row.role = role
+            row.ordinal = ordinal
+            row.edge_source_finding_id = edge_source
+            row.edge_rationale = edge_rationale
+            row.edge_confidence = edge_confidence
         finding = session.get(Finding, finding_id)
         if finding is not None:
             # Set, never used to hide: the finding stays open and individually inspectable.
