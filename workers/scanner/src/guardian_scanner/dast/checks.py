@@ -443,6 +443,205 @@ def evaluate_session_in_url(url: str) -> Verdict:
     return NO
 
 
+# ── time-based blind SQL injection ────────────────────────────────────────────────────────────────
+# The module's other SQL checks are error- and boolean-based on purpose (no timing). This one is the
+# deliberate, bounded exception the operator asked for: a CAPPED sleep, non-stacked, read-only, and
+# only ever confirmed — never reported on a single slow response, which could be jitter or a load
+# spike. The scanner sends a control (no sleep), a base sleep, and — only if the base actually
+# delayed — a double-sleep confirmation; this evaluator fires only when the induced delay tracks the
+# injected sleep proportionally, which a flaky network cannot fake.
+TIME_BLIND_SECONDS = 5
+
+
+def time_blind_probes(value: str, seconds: int) -> tuple[Probe, ...]:
+    """One base-sleep payload per dialect/context. `pg_sleep` is wrapped in a scalar subquery and
+    `SLEEP` in a boolean context — both non-stacked and read-only (they change nothing; they only
+    make a reachable database pause). The scanner sends the 2x confirmation only after a base
+    probe delays.
+    """
+    v = value or "1"
+    # This SELECT…PG_SLEEP string is an attack payload SENT TO THE TARGET to prove its parameter
+    # reaches SQL — it is never a query Guardian itself executes, so S608 does not apply.
+    pg_sleep = (
+        f"{v}' AND {seconds}=(SELECT {seconds} FROM PG_SLEEP({seconds}))-- -"  # noqa: S608
+    )
+    return (
+        Probe(payload=f"{v}' AND SLEEP({seconds})-- -", label="mysql-single-quote"),
+        Probe(payload=f"{v} AND SLEEP({seconds})", label="mysql-numeric"),
+        Probe(payload=pg_sleep, label="postgres-single-quote"),
+    )
+
+
+def evaluate_time_blind(seconds: int, control_ms: float, base_ms: float,
+                        confirm_ms: float) -> Verdict:
+    """Fire only on a delay that is present, large enough, and *proportional* to the injected sleep.
+
+    * ``control_ms`` — a benign request, to establish the normal latency floor.
+    * ``base_ms`` — a ``SLEEP(seconds)`` payload.
+    * ``confirm_ms`` — a ``SLEEP(2*seconds)`` payload, sent only because the base already delayed.
+
+    The base must clear the control by most of one sleep, and doubling the sleep must roughly double
+    the *induced* delay (delay above control). A constant added latency, a slow endpoint, or random
+    jitter fails the proportionality test — that is what keeps a timing check from crying wolf.
+    """
+    base_target = seconds * 1000.0
+    induced_base = base_ms - control_ms
+    induced_confirm = confirm_ms - control_ms
+    if induced_base < base_target * 0.6:
+        return NO
+    if induced_confirm < base_target * 1.4:
+        return NO
+    # Doubling the sleep must scale the induced delay by at least ~1.6× (rules out fixed latency).
+    if induced_confirm < induced_base * 1.6:
+        return NO
+    return Verdict(
+        True,
+        indicator=(f"a SLEEP({seconds}s) payload delayed the response by "
+                   f"{induced_base / 1000:.1f}s and SLEEP({seconds * 2}s) by "
+                   f"{induced_confirm / 1000:.1f}s — the delay tracks the injected sleep, so the "
+                   "parameter reaches SQL"),
+        excerpt=(f"control {control_ms:.0f}ms / sleep(t) {base_ms:.0f}ms / "
+                 f"sleep(2t) {confirm_ms:.0f}ms"),
+        confidence="high",
+    )
+
+
+# ── exposed sensitive paths ───────────────────────────────────────────────────────────────────────
+# A fixed, tiny list of well-known sensitive paths — NOT a wordlist, NOT brute-forcing. Each fires
+# only on a positive *content* signal, never on a bare 200 (a SPA that answers every path with its
+# index page must not light this up). GET only; reads what the server already serves.
+_EXPOSED_PATHS: tuple[tuple[str, str, re.Pattern[str]], ...] = (
+    (".git/HEAD", "a Git repository (.git/HEAD)", re.compile(r"(?m)^ref:\s+refs/")),
+    (".git/config", "a Git repository (.git/config)",
+     re.compile(r"(?s)\[core\].*repositoryformatversion")),
+    (".env", "a dotenv secrets file (.env)",
+     re.compile(r"(?m)^\s*(?:APP_KEY|APP_SECRET|DB_(?:PASSWORD|HOST|USERNAME)|"
+                r"SECRET_KEY|AWS_(?:SECRET_)?ACCESS_KEY|DATABASE_URL)\s*=")),
+    (".DS_Store", "a macOS .DS_Store directory index", re.compile(r"Bud1")),
+    ("server-status", "the Apache mod_status page (/server-status)",
+     re.compile(r"(?i)Apache Server Status|Server uptime:")),
+    ("backup.sql", "a database backup (backup.sql)",
+     re.compile(r"(?i)(?:CREATE TABLE|INSERT INTO|-- MySQL dump|PostgreSQL database dump)")),
+)
+
+
+def exposed_path_specs() -> tuple[str, ...]:
+    """The paths to probe (relative to the site root), in order."""
+    return tuple(path for path, _label, _sig in _EXPOSED_PATHS)
+
+
+def evaluate_exposed_path(path: str, status: int, body: str) -> Verdict:
+    """Fire only when the path returned 200 AND its body matches that path's content signature."""
+    if status != 200 or not body:
+        return NO
+    for candidate, label, signature in _EXPOSED_PATHS:
+        if candidate != path:
+            continue
+        match = signature.search(body)
+        if match:
+            return Verdict(
+                True,
+                indicator=f"the server returned {label} at /{path}",
+                excerpt=body[max(0, match.start() - 20): match.start() + 120],
+                confidence="high",
+            )
+    return NO
+
+
+# ── GraphQL introspection exposed ─────────────────────────────────────────────────────────────────
+# A read-only introspection query sent over GET (`?query={__schema...}`). If the server answers with
+# the schema, introspection is enabled — an information-disclosure that hands an attacker the full
+# API shape. Nothing is mutated; a server that only accepts POST simply 400s and is not flagged.
+GRAPHQL_ENDPOINTS: tuple[str, ...] = ("graphql", "api/graphql", "v1/graphql", "query")
+GRAPHQL_INTROSPECTION_QUERY = "{__schema{queryType{name}}}"
+
+
+def evaluate_graphql_introspection(status: int, content_type: str, body: str) -> Verdict:
+    """Fire when a JSON response returns the introspection schema (`data.__schema.queryType`)."""
+    if not body:
+        return NO
+    ctype = (content_type or "").lower()
+    if "json" not in ctype and not body.lstrip().startswith("{"):
+        return NO
+    # A real introspection response carries the schema under `data`; an error response does not.
+    if '"__schema"' in body and '"queryType"' in body and '"data"' in body:
+        index = body.find('"__schema"')
+        return Verdict(
+            True,
+            indicator="GraphQL introspection is enabled — the server returned its schema, exposing "
+                      "every type, query and mutation the API defines",
+            excerpt=body[max(0, index - 20): index + 160],
+            confidence="high",
+        )
+    return NO
+
+
+# ── host header injection ─────────────────────────────────────────────────────────────────────────
+# A benign alternate Host header (a reserved `.invalid` name that resolves to nobody). If the app
+# echoes it into a redirect Location or into an absolute link in the body, the Host header is
+# trusted — the seed of password-reset poisoning and web-cache poisoning. No account action is
+# taken; the check is only whether the value comes back.
+HOST_HEADER_MARKER = "guardian-hostcheck.invalid"
+
+
+def evaluate_host_header_injection(status: int, location: str, body: str) -> Verdict:
+    """Fire when the injected Host is reflected into the redirect target or an absolute URL."""
+    marker = HOST_HEADER_MARKER
+    loc = location or ""
+    if marker in loc:
+        return Verdict(
+            True,
+            indicator=f"the Host header was reflected into the redirect target (Location: "
+                      f"{loc[:120]})",
+            excerpt=loc[:200],
+            confidence="high",
+        )
+    # Only an absolute reference to the injected host counts — a bare mention in text does not let
+    # an attacker redirect anyone. Require it inside a URL (scheme-prefixed or protocol-relative).
+    for needle in (f"https://{marker}", f"http://{marker}", f"//{marker}"):
+        if body and needle in body:
+            index = body.find(needle)
+            return Verdict(
+                True,
+                indicator="the Host header was reflected into an absolute URL in the response "
+                          "body, so it controls links the page generates",
+                excerpt=body[max(0, index - 40): index + 80],
+                confidence="medium",
+            )
+    return NO
+
+
+# ── extended banner / version disclosure ──────────────────────────────────────────────────────────
+# NOTE ON security.txt: deliberately NOT implemented here — Guardian already flags a missing
+# RFC 9116 security.txt via the `security-txt-missing` web-checks template. Re-adding it in the DAST
+# engine would double-report. Only the new half of the request — banner/version disclosure beyond
+# the Server header — is implemented below.
+#
+# Version/banner-leaking response headers BEYOND the three the passive posture check already covers
+# (server, x-powered-by, x-aspnet-version). Each present header is a small information leak.
+_EXTENDED_BANNER_HEADERS: tuple[str, ...] = (
+    "x-aspnetmvc-version", "x-generator", "x-drupal-dynamic-cache", "x-runtime", "x-version",
+    "x-backend-server", "x-served-by", "x-application-version", "x-nginx-version", "via",
+)
+
+
+def evaluate_banner_disclosure_extended(headers: dict) -> tuple[Verdict, ...]:
+    """One verdict per extra disclosing header present. Excludes the three the passive check already
+    reports, so there is no double-counting."""
+    lowered = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+    out: list[Verdict] = []
+    for name in _EXTENDED_BANNER_HEADERS:
+        value = lowered.get(name)
+        if value:
+            out.append(Verdict(
+                True,
+                indicator=f"the `{name}` response header discloses software/version information",
+                excerpt=f"{name}: {value}"[:200],
+                confidence="high",
+            ))
+    return tuple(out)
+
+
 # ── the catalogue ─────────────────────────────────────────────────────────────────────────────────
 CHECKS: dict[str, Check] = {
     "xss-reflected": Check(
@@ -590,34 +789,115 @@ CHECKS: dict[str, Check] = {
                     "a Content-Security-Policy that forbids inline script.",
         references={"owasp": "A03:2021", "cwe": "CWE-79"},
     ),
+    "sqli-time-blind": Check(
+        id="sqli-time-blind",
+        title="Blind SQL injection (time-based)",
+        category="injection",
+        cwe="CWE-89",
+        owasp="A03:2021",
+        severity="high",
+        description="A capped, read-only SLEEP payload made the response take proportionally "
+                    "longer than a control request, and doubling the sleep doubled the delay — so "
+                    "the parameter reaches SQL even though the page shows no error or content "
+                    "difference.",
+        remediation="Use parameterized queries. Never concatenate request input into SQL.",
+        references={"owasp": "A03:2021", "cwe": "CWE-89"},
+    ),
+    "exposed-sensitive-path": Check(
+        id="exposed-sensitive-path",
+        title="Exposed sensitive file or path",
+        category="web-misconfig",
+        cwe="CWE-538",
+        owasp="A05:2021",
+        severity="medium",
+        description="A well-known sensitive path (e.g. .git/, .env, .DS_Store, a database backup, "
+                    "or the Apache server-status page) is served to anonymous requests, leaking "
+                    "source, secrets, or internal state.",
+        remediation="Block access to VCS directories, dotfiles, backups and status endpoints at "
+                    "the web server, and never deploy them to the document root.",
+        references={"owasp": "A05:2021", "cwe": "CWE-538"},
+    ),
+    "graphql-introspection": Check(
+        id="graphql-introspection",
+        title="GraphQL introspection enabled",
+        category="web-misconfig",
+        cwe="CWE-200",
+        owasp="A05:2021",
+        severity="medium",
+        description="The GraphQL endpoint answers an introspection query, returning its full "
+                    "schema — every type, query and mutation — which hands an attacker a complete "
+                    "map of the API's attack surface.",
+        remediation="Disable introspection in production, or restrict it to authenticated internal "
+                    "callers.",
+        references={"owasp": "A05:2021", "cwe": "CWE-200"},
+    ),
+    "host-header-injection": Check(
+        id="host-header-injection",
+        title="Host header injection",
+        category="web-misconfig",
+        cwe="CWE-20",
+        owasp="A03:2021",
+        severity="medium",
+        description="The application reflects an attacker-supplied Host header into a redirect or "
+                    "into absolute links it generates, which enables password-reset poisoning and "
+                    "web-cache poisoning.",
+        remediation="Validate the Host header against an allowlist of expected hostnames, and "
+                    "build absolute URLs from a configured canonical host, not the request Host.",
+        references={"owasp": "A03:2021", "cwe": "CWE-20"},
+    ),
+    "banner-disclosure-extended": Check(
+        id="banner-disclosure-extended",
+        title="Version/banner disclosure in response headers",
+        category="web-misconfig",
+        cwe="CWE-200",
+        owasp="A05:2021",
+        severity="low",
+        description="A response header beyond the usual Server banner (e.g. X-Generator, "
+                    "X-Runtime, X-AspNetMvc-Version, Via) discloses the software or version in "
+                    "use, helping an attacker match the target to known vulnerabilities.",
+        remediation="Strip version-identifying response headers at the web server or application "
+                    "framework.",
+        references={"owasp": "A05:2021", "cwe": "CWE-200"},
+    ),
 }
 
 
 __all__ = [
     "CHECKS",
     "CORS_ORIGIN",
+    "GRAPHQL_ENDPOINTS",
+    "GRAPHQL_INTROSPECTION_QUERY",
+    "HOST_HEADER_MARKER",
     "MARKER_STEM",
     "REDIRECT_HOST",
     "SESSION_URL_PARAMS",
+    "TIME_BLIND_SECONDS",
     "Check",
     "Probe",
     "Verdict",
     "command_probes",
+    "evaluate_banner_disclosure_extended",
     "evaluate_command",
     "evaluate_cors",
     "evaluate_csrf",
-    "evaluate_session_in_url",
-    "samesite_protective",
+    "evaluate_exposed_path",
+    "evaluate_graphql_introspection",
+    "evaluate_host_header_injection",
     "evaluate_redirect",
+    "evaluate_session_in_url",
     "evaluate_sql_boolean",
     "evaluate_sql_error",
     "evaluate_ssti",
+    "evaluate_time_blind",
     "evaluate_traversal",
     "evaluate_xss",
+    "exposed_path_specs",
     "redirect_probes",
+    "samesite_protective",
     "sql_boolean_probes",
     "sql_error_probes",
     "ssti_probes",
+    "time_blind_probes",
     "traversal_probes",
     "xss_probes",
 ]

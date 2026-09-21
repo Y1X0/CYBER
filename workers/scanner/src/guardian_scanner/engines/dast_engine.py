@@ -24,6 +24,7 @@ the same to a customer.
 from __future__ import annotations
 
 import socket
+import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from urllib.parse import urlparse
@@ -34,7 +35,11 @@ from guardian_core.evidence import Evidence, EvidenceKind
 from guardian_core.findings import RawFinding
 
 from guardian_scanner import sandbox
-from guardian_scanner.dast.checks import CHECKS, samesite_protective
+from guardian_scanner.dast.checks import (
+    CHECKS,
+    evaluate_banner_disclosure_extended,
+    samesite_protective,
+)
 from guardian_scanner.dast.scanner import ActiveScanner, Issue, Response, ScanResult
 from guardian_scanner.engines.base import EngineHealth, ScanContext
 
@@ -159,6 +164,10 @@ class DastEngine:
                 yield self._f(f"Version/banner disclosure via {hdr}", Severity.LOW, "CWE-200",
                               url, f"{hdr}: {headers[hdr]}")
 
+        # Extended banner disclosure: version-leaking headers BEYOND the three above (batch 1).
+        for verdict in evaluate_banner_disclosure_extended(headers):
+            yield self._passive_check_finding("banner-disclosure-extended", url, verdict)
+
         for cookie in snap.get("cookies", []) or []:
             cname = cookie.get("name", "cookie")
             if not cookie.get("secure"):
@@ -238,6 +247,7 @@ class DastEngine:
 
         def fetch(url: str, headers: dict) -> Response:
             request_headers = {"user-agent": "guardian-dast", **(headers or {})}
+            start = time.perf_counter()
             try:
                 with _pinned_egress(), httpx.Client(
                     follow_redirects=False, timeout=REQUEST_TIMEOUT
@@ -246,11 +256,15 @@ class DastEngine:
             except Exception as exc:  # noqa: BLE001 - reported, never turned into an empty page
                 return Response(status=0, headers={}, body="", url=url,
                                 error=f"{type(exc).__name__}: {exc}")
+            # Wall-clock time for the time-based blind SQLi check. Measured here, around the real
+            # request, so the timing is genuine and the scanner/checks stay transport-agnostic.
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
             return Response(
                 status=response.status_code,
                 headers={k.lower(): v for k, v in response.headers.items()},
                 body=response.text[:MAX_BODY_BYTES],
                 url=str(response.url),
+                elapsed_ms=elapsed_ms,
             )
 
         return fetch
@@ -378,6 +392,27 @@ class DastEngine:
                 kind=EvidenceKind.HTTP_EXCHANGE, summary=url, detail={"finding": detail}
             ).to_dict(),
             references={"owasp": "A05:2021"},
+        )
+
+    def _passive_check_finding(self, check_id: str, url: str, verdict) -> RawFinding:  # noqa: ANN001
+        """Build a passive finding from a catalogue Check plus a verdict, so a passive check carries
+        the same title/severity/CWE/remediation contract as the active ones."""
+        check = CHECKS[check_id]
+        return RawFinding(
+            engine=EngineKey.DAST,
+            title=check.title,
+            category=check.category,
+            description=f"{check.description}\n\n{verdict.indicator}",
+            base_severity=_SEVERITY.get(check.severity, Severity.LOW),
+            confidence=verdict.confidence,
+            cwe_id=check.cwe,
+            owasp_ref=check.owasp,
+            location={"endpoint": url, "rule": check.id},
+            evidence=Evidence(
+                kind=EvidenceKind.HTTP_EXCHANGE, summary=verdict.indicator,
+                detail={"excerpt": verdict.excerpt, "remediation": check.remediation},
+            ).to_dict(),
+            references=check.references,
         )
 
 

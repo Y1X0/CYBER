@@ -10,6 +10,8 @@ The transport is injected, so all of it runs without a socket.
 
 from __future__ import annotations
 
+import re
+
 from guardian_scanner.dast import crawl as cr
 from guardian_scanner.dast.scanner import ActiveScanner, Budget, Response, with_param
 
@@ -374,3 +376,97 @@ def test_no_stored_xss_pass_without_a_form_submission():
                             rate_per_second=0, max_requests=500)
     result = scanner.scan(["https://app.example.com/"], max_pages=20)
     assert not any(i.check_id == "xss-stored" for i in result.issues)
+
+
+# ── BATCH 1: time-based blind SQLi, exposed paths, GraphQL introspection, host-header injection ──────
+def test_time_based_blind_sqli_fires_on_a_proportional_delay():
+    """A fake DB that honours the injected SLEEP: the response time tracks the sleep. The scanner
+    sends control → SLEEP(5) → SLEEP(10) and confirms the delay scales."""
+    def fetch(url: str, headers: dict | None = None) -> Response:
+        parsed = cr.urlparse(url)
+        elapsed = 80.0
+        if parsed.path == "/item":
+            probe = dict(cr.parse_qsl(parsed.query)).get("id", "")
+            m = re.search(r"(?i)sleep\((\d+)\)", probe)
+            if m:
+                elapsed = 80.0 + int(m.group(1)) * 1000.0  # the DB pauses for the injected seconds
+            body = "<html><body>item</body></html>"
+        else:
+            body = '<html><a href="/item?id=1">item</a></html>'
+        return Response(status=200, headers=HTML, body=body, url=url, elapsed_ms=elapsed)
+
+    scanner = ActiveScanner(fetch=fetch, authorized_hosts=HOSTS, rate_per_second=0, max_requests=500)
+    result = scanner.scan(["https://app.example.com/"], max_pages=10)
+    assert any(i.check_id == "sqli-time-blind" for i in result.issues)
+
+
+def test_time_based_blind_sqli_does_not_fire_without_a_delay():
+    """The DB ignores the payload (parameterized): every response is fast, so no timing signal."""
+    def fetch(url: str, headers: dict | None = None) -> Response:
+        parsed = cr.urlparse(url)
+        body = ("<html><body>item</body></html>" if parsed.path == "/item"
+                else '<html><a href="/item?id=1">item</a></html>')
+        return Response(status=200, headers=HTML, body=body, url=url, elapsed_ms=90.0)
+
+    scanner = ActiveScanner(fetch=fetch, authorized_hosts=HOSTS, rate_per_second=0, max_requests=500)
+    result = scanner.scan(["https://app.example.com/"], max_pages=10)
+    assert not any(i.check_id == "sqli-time-blind" for i in result.issues)
+
+
+def test_an_exposed_git_repository_is_detected():
+    pages = {
+        "/": (200, HTML, "<html>home</html>"),
+        "/.git/HEAD": (200, {"content-type": "text/plain"}, "ref: refs/heads/main\n"),
+    }
+    scanner = ActiveScanner(fetch=_site(pages), authorized_hosts=HOSTS, rate_per_second=0,
+                            max_requests=500)
+    result = scanner.scan(["https://app.example.com/"], max_pages=10)
+    hits = [i for i in result.issues if i.check_id == "exposed-sensitive-path"]
+    assert hits and any(".git/HEAD" in i.url for i in hits)
+
+
+def test_a_spa_that_200s_every_path_does_not_trip_exposed_paths():
+    """A single-page app answers every path with its index; a bare 200 without a content signature
+    must not be reported as an exposed .git/.env."""
+    spa = "<!doctype html><html><body>app</body></html>"
+    pages = {p: (200, HTML, spa) for p in ("/", "/.git/HEAD", "/.git/config", "/.env",
+                                           "/.DS_Store", "/server-status", "/backup.sql")}
+    scanner = ActiveScanner(fetch=_site(pages), authorized_hosts=HOSTS, rate_per_second=0,
+                            max_requests=500)
+    result = scanner.scan(["https://app.example.com/"], max_pages=10)
+    assert not any(i.check_id == "exposed-sensitive-path" for i in result.issues)
+
+
+def test_graphql_introspection_enabled_is_detected():
+    schema = '{"data":{"__schema":{"queryType":{"name":"Query"}}}}'
+    pages = {
+        "/": (200, HTML, "<html>home</html>"),
+        "/graphql": (200, {"content-type": "application/json"}, lambda _q, _h: schema),
+    }
+    scanner = ActiveScanner(fetch=_site(pages), authorized_hosts=HOSTS, rate_per_second=0,
+                            max_requests=500)
+    result = scanner.scan(["https://app.example.com/"], max_pages=10)
+    assert any(i.check_id == "graphql-introspection" for i in result.issues)
+
+
+def test_host_header_injection_reflected_into_a_redirect_is_detected():
+    def fetch(url: str, headers: dict | None = None) -> Response:
+        host = (headers or {}).get("host", "")
+        if host:  # the Host header is trusted and echoed into the redirect target
+            return Response(status=302, headers={"location": f"https://{host}/login"},
+                            body="", url=url, elapsed_ms=10.0)
+        return Response(status=200, headers=HTML, body="<html>home</html>", url=url, elapsed_ms=10.0)
+
+    scanner = ActiveScanner(fetch=fetch, authorized_hosts=HOSTS, rate_per_second=0, max_requests=500)
+    result = scanner.scan(["https://app.example.com/"], max_pages=10)
+    assert any(i.check_id == "host-header-injection" for i in result.issues)
+
+
+def test_host_header_injection_does_not_fire_when_the_host_is_not_reflected():
+    def fetch(url: str, headers: dict | None = None) -> Response:
+        # The app ignores the Host header entirely — canonical host is fixed server-side.
+        return Response(status=200, headers=HTML, body="<html>home</html>", url=url, elapsed_ms=10.0)
+
+    scanner = ActiveScanner(fetch=fetch, authorized_hosts=HOSTS, rate_per_second=0, max_requests=500)
+    result = scanner.scan(["https://app.example.com/"], max_pages=10)
+    assert not any(i.check_id == "host-header-injection" for i in result.issues)

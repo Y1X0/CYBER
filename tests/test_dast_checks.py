@@ -292,3 +292,110 @@ def test_every_check_carries_what_a_report_needs():
         assert check.severity in ("critical", "high", "medium", "low", "info")
         assert len(check.description) > 40
         assert len(check.remediation) > 20
+
+
+# ── BATCH 1 ─────────────────────────────────────────────────────────────────────────────────────────
+# Time-based blind SQLi, exposed sensitive paths, GraphQL introspection, host-header injection,
+# extended banner disclosure. Pure evaluators — numeric timings and recorded responses, no network.
+
+# ── time-based blind SQLi ──
+def test_time_blind_fires_on_a_proportional_delay():
+    # control ~100ms; SLEEP(5) ~5.1s; SLEEP(10) ~10.1s — the delay tracks the sleep.
+    v = c.evaluate_time_blind(5, control_ms=100, base_ms=5150, confirm_ms=10150)
+    assert v.fired and v.confidence == "high"
+
+
+def test_time_blind_does_not_fire_without_a_delay():
+    assert c.evaluate_time_blind(5, control_ms=100, base_ms=160, confirm_ms=180).fired is False
+
+
+def test_time_blind_does_not_fire_on_a_delay_that_is_not_proportional():
+    # A fixed added latency (or a one-off spike): the base delayed, but doubling the sleep did NOT
+    # roughly double the induced delay — so it is jitter/latency, not injection.
+    assert c.evaluate_time_blind(5, control_ms=100, base_ms=8000, confirm_ms=9000).fired is False
+
+
+def test_time_blind_does_not_fire_when_the_endpoint_is_just_slow():
+    assert c.evaluate_time_blind(5, control_ms=6000, base_ms=6100, confirm_ms=6200).fired is False
+
+
+def test_time_blind_probes_scale_consistently_when_the_sleep_is_doubled():
+    # The scanner builds the 2x confirmation by regenerating the probes with a doubled sleep, so the
+    # payload stays internally consistent — every occurrence of the sleep scales together.
+    _mysql, _numeric, pg5 = c.time_blind_probes("1", 5)
+    _mysql2, _numeric2, pg10 = c.time_blind_probes("1", 10)
+    assert "SLEEP(5)" in _mysql.payload and "SLEEP(10)" in _mysql2.payload
+    assert "10=(SELECT 10 FROM PG_SLEEP(10))" in pg10.payload
+    assert "5=(SELECT 5 FROM PG_SLEEP(5))" in pg5.payload
+
+
+# ── exposed sensitive paths ──
+def test_exposed_git_head_fires_on_the_content_signature():
+    assert c.evaluate_exposed_path(".git/HEAD", 200, "ref: refs/heads/main\n").fired is True
+
+
+def test_exposed_dotenv_fires_on_env_keys():
+    body = "APP_KEY=base64:abc\nDB_PASSWORD=hunter2\n"
+    assert c.evaluate_exposed_path(".env", 200, body).fired is True
+
+
+def test_exposed_server_status_fires():
+    assert c.evaluate_exposed_path("server-status", 200, "Apache Server Status for host").fired
+
+
+def test_exposed_path_does_not_fire_on_a_200_spa_fallback():
+    # A single-page app answers every path with its index; a bare 200 must not light this up.
+    assert c.evaluate_exposed_path(".git/HEAD", 200, "<!doctype html><html>app</html>").fired is False
+
+
+def test_exposed_path_does_not_fire_on_a_404():
+    assert c.evaluate_exposed_path(".env", 404, "APP_KEY=x").fired is False
+
+
+# ── GraphQL introspection ──
+def test_graphql_introspection_fires_on_a_schema_response():
+    body = '{"data":{"__schema":{"queryType":{"name":"Query"}}}}'
+    assert c.evaluate_graphql_introspection(200, "application/json", body).fired is True
+
+
+def test_graphql_introspection_does_not_fire_when_disabled():
+    body = '{"errors":[{"message":"introspection is disabled"}]}'
+    assert c.evaluate_graphql_introspection(200, "application/json", body).fired is False
+
+
+def test_graphql_introspection_does_not_fire_on_html():
+    body = "<html><body>__schema queryType data</body></html>"
+    assert c.evaluate_graphql_introspection(200, "text/html", body).fired is False
+
+
+# ── host-header injection ──
+def test_host_header_fires_when_reflected_into_the_redirect():
+    v = c.evaluate_host_header_injection(302, f"https://{c.HOST_HEADER_MARKER}/login", "")
+    assert v.fired and v.confidence == "high"
+
+
+def test_host_header_fires_when_reflected_into_an_absolute_link():
+    body = f'<link rel="canonical" href="https://{c.HOST_HEADER_MARKER}/home">'
+    assert c.evaluate_host_header_injection(200, "", body).fired is True
+
+
+def test_host_header_does_not_fire_on_a_bare_mention():
+    # The marker echoed in plain text (not inside a URL) cannot redirect anyone.
+    body = f"Unknown host {c.HOST_HEADER_MARKER} was ignored."
+    assert c.evaluate_host_header_injection(200, "", body).fired is False
+
+
+def test_host_header_does_not_fire_when_absent():
+    assert c.evaluate_host_header_injection(200, "/home", "<html>ok</html>").fired is False
+
+
+# ── extended banner disclosure ──
+def test_extended_banner_reports_each_disclosing_header():
+    verdicts = c.evaluate_banner_disclosure_extended({"X-Runtime": "12ms", "Via": "1.1 varnish"})
+    assert len(verdicts) == 2
+
+
+def test_extended_banner_excludes_the_headers_the_passive_check_already_covers():
+    # server / x-powered-by / x-aspnet-version are reported by the passive posture check, not here.
+    assert c.evaluate_banner_disclosure_extended(
+        {"Server": "nginx", "X-Powered-By": "PHP/8"}) == ()

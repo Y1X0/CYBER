@@ -43,6 +43,10 @@ class Response:
     body: str
     url: str = ""
     error: str = ""
+    # Wall-clock time the request took, in milliseconds. Populated by the transport (the engine's
+    # real fetch measures it; a test fetch sets it), and read only by the time-based blind SQLi
+    # check. 0.0 when the transport does not measure it — that check simply cannot fire without it.
+    elapsed_ms: float = 0.0
 
     @property
     def ok(self) -> bool:
@@ -228,6 +232,10 @@ class ActiveScanner:
         # Passive, request-free: a session identifier sitting in any crawled URL.
         self._check_session_urls()
 
+        # Site-level probes (once per origin): exposed sensitive paths, GraphQL introspection, and
+        # Host-header reflection. All GET, all against the seed's own host.
+        self._check_site_probes(seeds)
+
         seen: set[tuple[str, str]] = set()
         for target in self.result.crawl.targets:
             if target.method != "GET":
@@ -281,6 +289,7 @@ class ActiveScanner:
 
         self._test_xss(target, param)
         self._test_sql(target, param, baseline)
+        self._test_time_blind(target, param, baseline)
         self._test_traversal(target, param)
         self._test_ssti(target, param)
         self._test_command(target, param)
@@ -331,6 +340,35 @@ class ActiveScanner:
         )
         if verdict.fired:
             self._record("sqli-boolean", target, param, true_probe, verdict, true_response.status)
+
+    def _test_time_blind(self, target: Target, param: Param, baseline: Response) -> None:
+        """Time-based blind SQLi. The control is the benign baseline's own latency. A base SLEEP is
+        sent; only if it actually delays (a cheap gate that costs nothing on a non-vulnerable param,
+        because the payload is then just an inert string) is the 2× confirmation sent, and the
+        verdict fires only when the delay tracks the sleep proportionally.
+        """
+        value = param.value or "1"
+        control_ms = baseline.elapsed_ms
+        gate = c.TIME_BLIND_SECONDS * 1000.0 * 0.6
+        base_probes = c.time_blind_probes(value, c.TIME_BLIND_SECONDS)
+        # The confirmation probes are the SAME payloads regenerated with a doubled sleep, so the
+        # 2x payload is always internally consistent (no fragile string surgery).
+        confirm_probes = c.time_blind_probes(value, c.TIME_BLIND_SECONDS * 2)
+        for probe, confirm_probe in zip(base_probes, confirm_probes, strict=True):
+            base = self._request(self._url_for(target, param, probe.payload))
+            if base is None:
+                return
+            if base.elapsed_ms - control_ms < gate:
+                continue  # no delay — not vulnerable on this dialect; never pay for the confirm
+            confirm = self._request(self._url_for(target, param, confirm_probe.payload))
+            if confirm is None:
+                return
+            verdict = c.evaluate_time_blind(
+                c.TIME_BLIND_SECONDS, control_ms, base.elapsed_ms, confirm.elapsed_ms,
+            )
+            if verdict.fired:
+                self._record("sqli-time-blind", target, param, probe, verdict, base.status)
+                return
 
     def _test_traversal(self, target: Target, param: Param) -> None:
         for probe in c.traversal_probes():
@@ -414,6 +452,61 @@ class ActiveScanner:
                 self._record("session-id-in-url", target, Param(name="(url)", where="query"),
                              c.Probe(payload="", label="url"), verdict, 0)
                 return
+
+    def _check_site_probes(self, seeds: list[str]) -> None:
+        """Origin-level GET probes, run once: exposed sensitive paths, GraphQL introspection, and
+        Host-header reflection. Each targets the seed's own host (so it stays in scope) and reports
+        only on a positive signal."""
+        if not seeds:
+            return
+        parsed = urlparse(seeds[0])
+        if not parsed.scheme or not parsed.netloc:
+            return
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+
+        # (3) Exposed sensitive paths — a fixed short list, content-signature gated, no brute force.
+        for path in c.exposed_path_specs():
+            response = self._request(f"{origin}/{path}")
+            if response is None:
+                if self._stopped():
+                    return
+                continue
+            verdict = c.evaluate_exposed_path(path, response.status, response.body)
+            if verdict.fired:
+                self._record("exposed-sensitive-path",
+                             Target(url=f"{origin}/{path}"), Param(name="(path)", where="query"),
+                             c.Probe(payload=path, label="path"), verdict, response.status)
+
+        # (4) GraphQL introspection — a read-only introspection query over GET.
+        for endpoint in c.GRAPHQL_ENDPOINTS:
+            url = f"{origin}/{endpoint}?" + urlencode({"query": c.GRAPHQL_INTROSPECTION_QUERY})
+            response = self._request(url)
+            if response is None:
+                if self._stopped():
+                    return
+                continue
+            verdict = c.evaluate_graphql_introspection(
+                response.status, str(response.headers.get("content-type", "")), response.body,
+            )
+            if verdict.fired:
+                self._record("graphql-introspection",
+                             Target(url=f"{origin}/{endpoint}"),
+                             Param(name="(introspection)", where="query"),
+                             c.Probe(payload=c.GRAPHQL_INTROSPECTION_QUERY, label="introspection"),
+                             verdict, response.status)
+                break  # one endpoint is enough to prove introspection is on
+
+        # (7) Host-header injection — a benign alternate Host, checked for reflection.
+        response = self._request(origin + "/", {"host": c.HOST_HEADER_MARKER})
+        if response is not None:
+            verdict = c.evaluate_host_header_injection(
+                response.status, str(response.headers.get("location", "")), response.body,
+            )
+            if verdict.fired:
+                self._record("host-header-injection",
+                             Target(url=origin + "/"), Param(name="Host", where="header"),
+                             c.Probe(payload=c.HOST_HEADER_MARKER, label="host-header"),
+                             verdict, response.status)
 
     def _check_stored_xss(self) -> None:
         """Persistence: re-fetch each crawled GET page (plain, no payload) and see whether the
