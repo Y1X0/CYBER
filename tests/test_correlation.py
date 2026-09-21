@@ -291,3 +291,110 @@ def test_the_primary_member_is_the_one_worth_reading_first():
                                          group_exposed_repository_secret])
 def test_every_rule_handles_an_empty_input(rule_output):
     assert rule_output([]) == []
+
+
+# ── correlation confidence (WP-E1, slice 1) ─────────────────────────────────────────────────────────
+# Confidence reflects how strongly the RELATIONSHIP is evidenced — NOT the members' own severity or
+# finding-confidence. The FakeFinding here has no `confidence` attribute at all, which is the point:
+# the rules never read it, so correlation confidence cannot be derived from it.
+from guardian_core.enums import CorrelationConfidence  # noqa: E402
+
+
+def _secret_at(engine, path, line, **kwargs):
+    # A secret finding with NO redacted value — identity falls back to position (path:line:rule).
+    return FakeFinding(
+        category="secret",
+        location={"engine": engine, "rule": "aws-key", "path": path, "line": line},
+        evidence={},
+        **kwargs,
+    )
+
+
+def test_same_secret_value_match_is_confirmed():
+    # Same redacted VALUE seen by two engines proves it is the same credential.
+    groups = group_same_secret([
+        _secret("secrets", "AK********EY (len=40)"),
+        _secret("sast", "AK********EY (len=40)"),
+    ])
+    assert len(groups) == 1
+    assert groups[0].confidence is CorrelationConfidence.CONFIRMED
+
+
+def test_same_secret_position_fallback_is_only_strong_evidence():
+    # No value to compare — two engines pointing at the same file:line is strong, not proof.
+    groups = group_same_secret([
+        _secret_at("secrets", "/app/.env", 3),
+        _secret_at("sast", "/app/.env", 3),
+    ])
+    assert len(groups) == 1
+    assert groups[0].confidence is CorrelationConfidence.STRONG_EVIDENCE
+
+
+def test_same_cve_on_asset_is_strong_evidence():
+    groups = group_same_cve_on_asset([
+        FakeFinding(category="vuln-dep", cve_ids=["CVE-2024-1"], location={"engine": "sca"}),
+        FakeFinding(category="vuln-service", cve_ids=["CVE-2024-1"],
+                    location={"engine": "service_cve"}),
+    ])
+    assert len(groups) == 1
+    assert groups[0].confidence is CorrelationConfidence.STRONG_EVIDENCE
+
+
+def test_injection_corroborated_is_strong_evidence_not_confirmed():
+    # Static + dynamic agree on the CWE class for one customer, but not proven the same sink.
+    groups = group_injection_corroborated([
+        FakeFinding(category="injection", cwe_id="CWE-89", location={"engine": "sast"}),
+        FakeFinding(category="injection", cwe_id="CWE-89", location={"engine": "dast"}),
+    ])
+    assert len(groups) == 1
+    assert groups[0].confidence is CorrelationConfidence.STRONG_EVIDENCE
+
+
+def test_shipped_and_running_is_potential_because_it_keys_only_on_customer():
+    # Same CVE shipped and running for one customer does NOT prove the running service IS the
+    # shipped dependency (keyed on customer+CVE, not the same asset) — so it stays POTENTIAL.
+    groups = group_shipped_and_running([
+        FakeFinding(category="vuln-dep", cve_ids=["CVE-2024-9"], location={"engine": "sca"}),
+        FakeFinding(category="vuln-service", cve_ids=["CVE-2024-9"],
+                    location={"engine": "service_cve"}),
+    ])
+    assert len(groups) == 1
+    assert groups[0].kind == "chain"
+    assert groups[0].confidence is CorrelationConfidence.POTENTIAL
+
+
+def test_exposed_repository_secret_is_potential():
+    # Exposure + a secret for one customer does NOT prove the secret is IN the exposed repo.
+    groups = group_exposed_repository_secret([
+        FakeFinding(category="web-misconfig", location={"engine": "web_checks",
+                                                        "rule": "web-check-git-exposed"}),
+        FakeFinding(category="secret", location={"engine": "secrets", "rule": "aws-key"},
+                    evidence={"detail": {"redacted": "AK****"}}),
+    ])
+    assert len(groups) == 1
+    assert groups[0].kind == "chain"
+    assert groups[0].confidence is CorrelationConfidence.POTENTIAL
+
+
+def test_correlation_confidence_does_not_track_member_severity():
+    # Two CRITICAL, high-value members that are only POSITION-matched must stay STRONG_EVIDENCE — the
+    # relationship's evidence is what decides, not how severe the individual findings are.
+    groups = group_same_secret([
+        _secret_at("secrets", "/app/.env", 3, severity="critical", risk_score=99),
+        _secret_at("sast", "/app/.env", 3, severity="critical", risk_score=99),
+    ])
+    assert groups[0].confidence is CorrelationConfidence.STRONG_EVIDENCE
+    # And a value-match with LOW, low-risk members is still CONFIRMED — confidence is about the link.
+    low = group_same_secret([
+        _secret("secrets", "AK****VALUE", severity="low", risk_score=5),
+        _secret("container", "AK****VALUE", severity="low", risk_score=5),
+    ])
+    assert low[0].confidence is CorrelationConfidence.CONFIRMED
+
+
+def test_correlation_confidence_is_deterministic_and_order_independent():
+    a = _secret("secrets", "AK********EY (len=40)")
+    b = _secret("sast", "AK********EY (len=40)")
+    first = group_same_secret([a, b])[0].confidence
+    second = group_same_secret([b, a])[0].confidence
+    assert first is second is CorrelationConfidence.CONFIRMED

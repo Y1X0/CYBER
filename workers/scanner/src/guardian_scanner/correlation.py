@@ -22,6 +22,28 @@ Three kinds of group, because they mean different things and deserve different t
 Every rule is deterministic and every escalation is written into the group's rationale, for the same
 reason the risk engine records its arithmetic: an escalation a customer cannot trace is one they
 learn to ignore.
+
+CONFIDENCE (WP-E1, slice 1). Each group carries a `CorrelationConfidence` describing how strongly
+the *relationship* is evidenced — a separate question from how real or how severe the individual
+findings are. The tier is derived from the kind of evidence the rule actually matched on, and NEVER
+from member count, member severity, or `Finding.confidence`:
+
+    rule                        relationship proven by            tier
+    ─────────────────────────── ───────────────────────────────── ───────────────
+    same-secret (value match)   identical redacted secret value   CONFIRMED
+    same-secret (position only) same path:line, no value          STRONG_EVIDENCE
+    same-cve-on-asset           same CVE id + same asset_id       STRONG_EVIDENCE
+    injection-corroborated      same CWE, static + dynamic, same  STRONG_EVIDENCE
+                                customer (not proven same sink)
+    shipped-and-running         same CVE shipped + running, keyed POTENTIAL — the running service
+                                on customer only (not same asset)  is not proven the shipped one
+    exposed-repository-secret   exposure + a secret, keyed on     POTENTIAL — the secret is not
+                                customer only (not same repo)      proven to live in the exposure
+
+The two "chain" rules are deliberately POTENTIAL, not CONFIRMED: their evidence ties only a weak key
+(the customer), so the chain is plausible but unproven. Forcing them to CONFIRMED would be the
+manufactured-tier failure this model exists to prevent. A future rule must state its own tier from
+its own evidence — nothing inherits a tier from `kind`.
 """
 
 from __future__ import annotations
@@ -32,7 +54,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from guardian_common.logging import get_logger
-from guardian_core.enums import Severity
+from guardian_core.enums import CorrelationConfidence, Severity
 from guardian_db.models import Finding, FindingCorrelation, FindingCorrelationMember
 from guardian_db.session import session_scope
 from sqlalchemy import select
@@ -67,6 +89,9 @@ class Group:
     primary: uuid.UUID
     severity: Severity
     risk_score: int
+    # How strongly the RELATIONSHIP is evidenced (not the members' own severity/confidence). Every
+    # rule sets it explicitly from the evidence it matched on — see the module docstring's table.
+    confidence: CorrelationConfidence
     rationale: list[str] = field(default_factory=list)
     customer_id: uuid.UUID | None = None
 
@@ -88,8 +113,12 @@ def _escalate(severity: Severity, steps: int = 1) -> Severity:
     return _SEVERITY_ORDER[index]
 
 
-def _secret_identity(finding: Finding) -> str | None:
-    """What makes two secret findings the same secret.
+def _secret_identity(finding: Finding) -> tuple[str, str] | None:
+    """What makes two secret findings the same secret, and HOW we know.
+
+    Returns ``(identity, basis)`` where basis is ``"value"`` (the redacted secret value matched — a
+    strong identity) or ``"position"`` (only file:line matched — weaker), or ``None`` when neither
+    is available. The basis drives the group's confidence tier.
 
     The redacted form is used deliberately — it is what the engines persist, and it is stable for
     one credential across the source file, the git history and an image layer. Comparing raw values
@@ -109,7 +138,7 @@ def _secret_identity(finding: Finding) -> str | None:
         for key in ("redacted", "redacted_excerpt", "excerpt", "match"):
             value = source.get(key)
             if isinstance(value, str) and value.strip() and value != "<redacted>":
-                return value.strip()[:120]
+                return value.strip()[:120], "value"
 
     # No redacted value to compare, so fall back to position. Position alone is not identity when
     # the engine told us *which* detector fired: three patterns matching one line of a `.env` are
@@ -122,7 +151,8 @@ def _secret_identity(finding: Finding) -> str | None:
     location = finding.location or {}
     path, line, rule = location.get("path"), location.get("line"), location.get("rule")
     if path and line:
-        return f"{path}:{line}:{rule}" if rule else f"{path}:{line}"
+        identity = f"{path}:{line}:{rule}" if rule else f"{path}:{line}"
+        return identity, "position"
     return None
 
 
@@ -134,20 +164,30 @@ def _cves(finding: Finding) -> set[str]:
 def group_same_secret(findings: list[Finding]) -> list[Group]:
     """One credential reported by several engines."""
     buckets: dict[tuple, list[Finding]] = defaultdict(list)
+    basis_of: dict[tuple, str] = {}
     for finding in findings:
         if finding.category not in {"secret", "insecure-code", "container-misconfig"}:
             continue
         engine = (finding.location or {}).get("engine") or _engine_of(finding)
         if engine not in _SECRET_ENGINES:
             continue
-        identity = _secret_identity(finding)
-        if identity:
-            buckets[(finding.customer_id, identity)].append(finding)
+        result = _secret_identity(finding)
+        if result:
+            identity, basis = result
+            key = (finding.customer_id, identity)
+            buckets[key].append(finding)
+            # A bucket is homogeneous by identity string (value and position live in disjoint string
+            # spaces), so the basis of any member is the basis of the bucket.
+            basis_of.setdefault(key, basis)
 
     groups: list[Group] = []
-    for (customer_id, identity), members in buckets.items():
+    for key, members in buckets.items():
         if len(members) < 2:
             continue
+        customer_id, identity = key
+        # CONFIRMED only when the same redacted VALUE matched; position-only is STRONG_EVIDENCE.
+        confidence = (CorrelationConfidence.CONFIRMED if basis_of[key] == "value"
+                      else CorrelationConfidence.STRONG_EVIDENCE)
         groups.append(_duplicate_group(
             rule="same-secret",
             title="One credential reported by several engines",
@@ -158,6 +198,7 @@ def group_same_secret(findings: list[Finding]) -> list[Group]:
             ),
             members=members,
             customer_id=customer_id,
+            confidence=confidence,
         ))
     return groups
 
@@ -182,6 +223,9 @@ def group_same_cve_on_asset(findings: list[Finding]) -> list[Group]:
             ),
             members=members,
             customer_id=members[0].customer_id,
+            # Same CVE id + same asset is a strong match, but the rule does not prove the two
+            # engines saw the *same component instance*, so it is not CONFIRMED.
+            confidence=CorrelationConfidence.STRONG_EVIDENCE,
         ))
     return groups
 
@@ -226,6 +270,9 @@ def group_shipped_and_running(findings: list[Finding]) -> list[Group]:
             members=[f.id for f in members][:MAX_GROUP_SIZE],
             primary=_primary(members).id,
             severity=severity, risk_score=score, rationale=rationale,
+            # Keyed on (customer, CVE) only: the running service is NOT proven to be the shipped
+            # component, so the chain is plausible but unconfirmed.
+            confidence=CorrelationConfidence.POTENTIAL,
             customer_id=customer_id,
         ))
     return groups
@@ -268,6 +315,10 @@ def group_injection_corroborated(findings: list[Finding]) -> list[Group]:
             members=[f.id for f in members][:MAX_GROUP_SIZE],
             primary=_primary(members).id,
             severity=severity, risk_score=score, rationale=rationale,
+            # Static + dynamic agreement on one CWE class is strong, independent evidence, but the
+            # rule keys on (customer, CWE) — it does not prove both engines hit the SAME sink — so
+            # it is STRONG_EVIDENCE, not CONFIRMED.
+            confidence=CorrelationConfidence.STRONG_EVIDENCE,
             customer_id=customer_id,
         ))
     return groups
@@ -311,6 +362,9 @@ def group_exposed_repository_secret(findings: list[Finding]) -> list[Group]:
             members=[f.id for f in members][:MAX_GROUP_SIZE],
             primary=_primary(members).id,
             severity=severity, risk_score=score, rationale=rationale,
+            # Keyed on the customer only: the exposure and the secret are not proven to be the same
+            # repository, so the chain is plausible but unconfirmed — POTENTIAL.
+            confidence=CorrelationConfidence.POTENTIAL,
             customer_id=customer_id,
         ))
     return groups
@@ -358,13 +412,14 @@ def _primary(members: list[Finding]) -> Finding:
     return max(members, key=lambda f: (f.risk_score or 0, _severity(f.severity).rank))
 
 
-def _duplicate_group(*, rule, title, description, members, customer_id) -> Group:  # noqa: ANN001
+def _duplicate_group(*, rule, title, description, members, customer_id,  # noqa: ANN001
+                     confidence: CorrelationConfidence) -> Group:
     primary = _primary(members)
     severity = _severity(primary.severity)
     return Group(
         rule=rule, kind="duplicate", title=title, description=description,
         members=[f.id for f in members][:MAX_GROUP_SIZE], primary=primary.id,
-        severity=severity, risk_score=primary.risk_score or 0,
+        severity=severity, risk_score=primary.risk_score or 0, confidence=confidence,
         rationale=[
             f"Grouped by rule `{rule}`: {len(members)} findings describe one issue",
             f"Severity {severity.value} taken from the strongest member — grouping does not "
@@ -435,6 +490,7 @@ def _persist(session, tenant: uuid.UUID, group: Group) -> bool:  # noqa: ANN001
             tenant_id=tenant, customer_id=group.customer_id, rule=group.rule,
             fingerprint=fingerprint, title=group.title, description=group.description,
             kind=group.kind, severity=group.severity.value, risk_score=group.risk_score,
+            confidence=group.confidence.value,
             rationale=list(group.rationale), member_count=len(group.members),
         )
         session.add(correlation)
@@ -444,6 +500,7 @@ def _persist(session, tenant: uuid.UUID, group: Group) -> bool:  # noqa: ANN001
         correlation = existing
         correlation.severity = group.severity.value
         correlation.risk_score = group.risk_score
+        correlation.confidence = group.confidence.value
         correlation.rationale = list(group.rationale)
         correlation.member_count = len(group.members)
         created = False

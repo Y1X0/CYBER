@@ -175,6 +175,30 @@ class FindingSource(str, Enum):
     MANUAL = "manual"
 
 
+class CorrelationConfidence(str, Enum):
+    """How strongly the *relationship* between correlated findings is supported by evidence (WP-E1).
+
+    This is deliberately a SEPARATE concept from ``Finding.confidence``, which asks "how sure are we
+    that this one finding is real?". Correlation confidence asks "how sure are we that these findings
+    are meaningfully related?" — two high-confidence findings do not, by themselves, prove a
+    relationship. The tier is derived from the *kind of evidence that established the link*, never
+    from the members' own severity or confidence.
+
+    * ``CONFIRMED`` — the evidence proves the relationship (e.g. two findings carry the *same*
+      redacted secret value, so they are the same credential).
+    * ``STRONG_EVIDENCE`` — multiple independent findings strongly support the relationship, but it
+      is not proven to be the identical instance (e.g. the same CVE on the same asset from two
+      engines, without proof it is the same component; or a static+dynamic agreement on a weakness
+      class without proof of the same sink).
+    * ``POTENTIAL`` — the relationship is plausible but the evidence only ties a weak key (e.g. the
+      same customer), not the specific asset/component/repository, so it needs further validation.
+    """
+
+    CONFIRMED = "confirmed"
+    STRONG_EVIDENCE = "strong_evidence"
+    POTENTIAL = "potential"
+
+
 class StaffRole(str, Enum):
     """Internal staff roles within a tenant."""
 

@@ -179,6 +179,45 @@ def test_a_chain_escalates_and_says_why():
     assert any("Escalated to critical" in line for line in chain.rationale)
 
 
+def test_confidence_is_persisted_from_the_relationship_evidence():
+    """The relationship-confidence tier survives the round-trip, and it is the tier the rule's
+    evidence supports — not one inflated by severity or member count."""
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx = _tenant()
+    # Two engines carrying the SAME redacted value → the relationship is proven → confirmed.
+    _finding(ctx, engine="secrets", redacted="AK********EY")
+    _finding(ctx, engine="sast", category="insecure-code", redacted="AK********EY")
+    # A public-repo exposure plus a secret keyed only on the customer → a plausible but unproven
+    # chain → potential, even though its members are high severity.
+    _finding(ctx, engine="web_checks", category="misconfig", severity="medium", risk=50,
+             rule="web-check-git-config-exposure")
+
+    correlate_tenant(str(ctx["tenant"]))
+    by_kind = {g.kind: g for g in _correlations(ctx["tenant"])}
+
+    assert by_kind["duplicate"].confidence == "confirmed"
+    assert by_kind["chain"].confidence == "potential"
+
+
+def test_confidence_defaults_to_potential_for_pre_slice1_rows():
+    """A row inserted without a confidence (as historical rows were) reads back as the safe tier,
+    never silently upgraded — the server default carries it."""
+    from guardian_db.models import FindingCorrelation
+    from guardian_db.session import session_scope
+
+    ctx = _tenant()
+    with session_scope() as db:
+        row = FindingCorrelation(
+            tenant_id=ctx["tenant"], customer_id=ctx["customer"], rule="same-secret",
+            fingerprint=uuid.uuid4().hex[:32], title="legacy", description="",
+            kind="duplicate", severity="high", risk_score=70, rationale=[], member_count=2,
+        )
+        db.add(row)
+        db.flush()
+        assert row.confidence == "potential"
+
+
 def test_one_tenants_findings_never_join_anothers_group():
     from guardian_scanner.correlation import correlate_tenant
 

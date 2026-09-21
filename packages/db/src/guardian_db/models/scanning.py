@@ -202,6 +202,12 @@ class FindingCorrelation(Base, TimestampMixin):
     # duplicate | corroboration | chain
     kind: Mapped[str] = mapped_column(String(20), default="duplicate", nullable=False,
                                       server_default="duplicate")
+    # How strongly the RELATIONSHIP is evidenced (WP-E1 slice 1): confirmed | strong_evidence |
+    # potential. Separate from the members' own severity/confidence; derived from the evidence the
+    # rule matched on. Existing rows predate the model, so they default to the safest tier
+    # (potential) — a historical relationship is never silently upgraded to confirmed.
+    confidence: Mapped[str] = mapped_column(String(20), default="potential", nullable=False,
+                                            server_default="potential")
     severity: Mapped[str] = mapped_column(String(10), nullable=False)
     risk_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False,
                                             server_default="0")
