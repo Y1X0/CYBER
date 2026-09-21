@@ -16,8 +16,11 @@ Nullable with no default and no backfill: it is NULL for non-secret findings, fo
 identity never confers CONFIRMED — legacy findings fall back to the conservative value/position
 basis (STRONG_EVIDENCE at most). Nothing historical is upgraded.
 
-Revision ID: 0029_finding_secret_correlation_id
+Revision ID: 0029_secret_correlation_id
 Revises: 0028_correlation_ordered_edges
+
+(The revision id is kept at/under Alembic's ``alembic_version.version_num`` limit of 32 characters;
+the original 34-character id broke ``alembic upgrade head`` at the version stamp.)
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from alembic import op
 
 from guardian_db.migration_utils import add_column_if_absent, table_exists
 
-revision = "0029_finding_secret_correlation_id"
+revision = "0029_secret_correlation_id"
 down_revision = "0028_correlation_ordered_edges"
 branch_labels = None
 depends_on = None
