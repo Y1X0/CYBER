@@ -92,6 +92,46 @@ def _members(correlation_id):
         ).all()
 
 
+def _set_status(finding_id, status):
+    from guardian_db.models import Finding
+    from guardian_db.session import session_scope
+
+    with session_scope() as db:
+        db.get(Finding, finding_id).status = status
+
+
+def _corr_id_of(finding_id):
+    from guardian_db.models import Finding
+    from guardian_db.session import session_scope
+
+    with session_scope() as db:
+        return db.get(Finding, finding_id).correlation_id
+
+
+def _second_customer(ctx):
+    """A second customer (with its own asset/scan/run) in the SAME tenant, for isolation tests."""
+    from guardian_db.models import Asset, Customer, Scan, ScanEngineRun
+    from guardian_db.session import session_scope
+
+    with session_scope() as db:
+        customer = Customer(tenant_id=ctx["tenant"], name="C2", criticality="high")
+        db.add(customer)
+        db.flush()
+        asset = Asset(tenant_id=ctx["tenant"], customer_id=customer.id, name="app2", kind="repo",
+                      identifier=f"https://example.invalid/{uuid.uuid4().hex[:8]}.git", config={})
+        db.add(asset)
+        db.flush()
+        scan = Scan(tenant_id=ctx["tenant"], customer_id=customer.id, asset_id=asset.id,
+                    trigger="manual", status="completed", requested_engines=["secrets"], stats={})
+        db.add(scan)
+        db.flush()
+        run = ScanEngineRun(scan_id=scan.id, engine="secrets", status="completed")
+        db.add(run)
+        db.flush()
+        return {"tenant": ctx["tenant"], "customer": customer.id, "asset": asset.id,
+                "scan": scan.id, "run": run.id}
+
+
 # ── persistence ───────────────────────────────────────────────────────────────────────────────────
 def test_a_group_is_persisted_with_its_members_and_rationale():
     from guardian_scanner.correlation import correlate_tenant
@@ -325,3 +365,189 @@ def test_correlation_tables_enforce_row_level_security(table):
         ).scalars().all()
     assert enabled is True
     assert "tenant_isolation" in policies
+
+
+# ── stale-lifecycle reconciliation (WP-E1 fix) ──────────────────────────────────────────────────────
+# correlate_tenant() represents CURRENT live state. A re-run after membership changes must not leave
+# stale groups, stale member rows, or stale Finding.correlation_id pointers behind.
+def _same_secret_pair(ctx, ident="hmac-shared"):
+    a = _finding(ctx, engine="secrets", secret_correlation_id=ident)
+    b = _finding(ctx, engine="sast", category="insecure-code", secret_correlation_id=ident)
+    return a, b
+
+
+def test_lifecycle_membership_shrinks_dissolves_the_stale_group():  # Test A
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx = _tenant()
+    a, b = _same_secret_pair(ctx)
+    correlate_tenant(str(ctx["tenant"]))
+    assert len(_correlations(ctx["tenant"])) == 1          # a confirmed same-secret group
+
+    _set_status(b, "resolved")
+    correlate_tenant(str(ctx["tenant"]))
+
+    # Only one eligible member remains → no group is valid → the stale group is gone.
+    assert _correlations(ctx["tenant"]) == []
+    # The resolved finding is no longer carried as a member anywhere, and neither finding points at
+    # a dissolved group.
+    assert _corr_id_of(a) is None
+    assert _corr_id_of(b) is None
+
+
+def test_lifecycle_finding_leaving_eligible_status_clears_its_pointer():  # Test B
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx = _tenant()
+    a, b = _same_secret_pair(ctx)
+    correlate_tenant(str(ctx["tenant"]))
+    assert _corr_id_of(a) is not None
+
+    _set_status(a, "false_positive")
+    correlate_tenant(str(ctx["tenant"]))
+    assert _corr_id_of(a) is None
+
+
+def test_lifecycle_rule_stops_matching_deletes_group_and_members():  # Test C
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx = _tenant()
+    a, b = _same_secret_pair(ctx)
+    correlate_tenant(str(ctx["tenant"]))
+    group_id = _correlations(ctx["tenant"])[0].id
+    assert len(_members(group_id)) == 2
+
+    # The rule no longer matches: resolve both members.
+    _set_status(a, "resolved")
+    _set_status(b, "resolved")
+    correlate_tenant(str(ctx["tenant"]))
+
+    assert _correlations(ctx["tenant"]) == []              # group deleted
+    assert _members(group_id) == []                        # member rows cascade-deleted
+    assert _corr_id_of(a) is None and _corr_id_of(b) is None
+
+
+def test_lifecycle_replacement_fingerprint_leaves_only_the_current_group():  # Test D
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx = _tenant()
+    a, b = _same_secret_pair(ctx)
+    correlate_tenant(str(ctx["tenant"]))
+    old_id = _correlations(ctx["tenant"])[0].id
+
+    # A third member with the same identity changes the member set → a new fingerprint/group.
+    c = _finding(ctx, engine="container", category="container-misconfig",
+                 secret_correlation_id="hmac-shared")
+    correlate_tenant(str(ctx["tenant"]))
+
+    groups = _correlations(ctx["tenant"])
+    assert len(groups) == 1                                # exactly the current group
+    new_id = groups[0].id
+    assert new_id != old_id
+    assert _members(old_id) == []                          # old group + members gone
+    assert {_corr_id_of(a), _corr_id_of(b), _corr_id_of(c)} == {new_id}
+
+
+def test_lifecycle_pointer_invariant_holds_after_reconciliation():  # Test F
+    from guardian_db.models import Finding
+    from guardian_db.session import session_scope
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx = _tenant()
+    # One surviving group ("keep") and one that will dissolve ("drop").
+    k1, k2 = _same_secret_pair(ctx, ident="keep")
+    x, y = _same_secret_pair(ctx, ident="drop")
+    correlate_tenant(str(ctx["tenant"]))
+    _set_status(y, "resolved")
+    correlate_tenant(str(ctx["tenant"]))
+
+    # After reconciliation only the surviving group remains, and every in-scope pointer references
+    # it — no finding is left pointing at the dissolved group.
+    groups = _correlations(ctx["tenant"])
+    assert len(groups) == 1
+    keep_id = groups[0].id
+    with session_scope() as db:
+        findings = db.query(Finding).filter(Finding.tenant_id == ctx["tenant"]).all()
+        for f in findings:
+            if f.correlation_id is not None:
+                assert f.correlation_id == keep_id
+    assert _corr_id_of(k1) == keep_id and _corr_id_of(k2) == keep_id
+    assert _corr_id_of(x) is None and _corr_id_of(y) is None
+
+
+def test_lifecycle_customer_scoped_run_never_touches_another_customer():  # Test G
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx_a = _tenant()
+    ctx_b = _second_customer(ctx_a)                        # same tenant, different customer
+    a1, a2 = _same_secret_pair(ctx_a, ident="cust-a")
+    b1, b2 = _same_secret_pair(ctx_b, ident="cust-b")
+    correlate_tenant(str(ctx_a["tenant"]))                 # whole tenant → both groups exist
+    assert len(_correlations(ctx_a["tenant"])) == 2
+
+    b_group_before = next(g.id for g in _correlations(ctx_a["tenant"])
+                          if g.customer_id == ctx_b["customer"])
+
+    # Dissolve customer A's group and reconcile ONLY customer A.
+    _set_status(a2, "resolved")
+    correlate_tenant(str(ctx_a["tenant"]), str(ctx_a["customer"]))
+
+    groups = _correlations(ctx_a["tenant"])
+    # Customer B's group and pointers are untouched by a customer-A-scoped reconciliation.
+    assert [g.id for g in groups] == [b_group_before]
+    assert _corr_id_of(b1) == b_group_before and _corr_id_of(b2) == b_group_before
+    # Customer A's group is gone.
+    assert _corr_id_of(a1) is None
+
+
+def test_lifecycle_reconciliation_is_tenant_scoped():  # Test H
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx_a = _tenant()
+    ctx_b = _tenant()                                      # a different tenant
+    _same_secret_pair(ctx_a, ident="a")
+    b1, b2 = _same_secret_pair(ctx_b, ident="b")
+    correlate_tenant(str(ctx_a["tenant"]))
+    correlate_tenant(str(ctx_b["tenant"]))
+    b_group = _correlations(ctx_b["tenant"])[0].id
+
+    # Reconciling tenant A must not delete tenant B's group (whose id is not in A's current set).
+    correlate_tenant(str(ctx_a["tenant"]))
+    assert [g.id for g in _correlations(ctx_b["tenant"])] == [b_group]
+    assert _corr_id_of(b1) == b_group and _corr_id_of(b2) == b_group
+
+
+def test_lifecycle_idempotent_run_does_not_churn_the_group():  # Test I
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx = _tenant()
+    _same_secret_pair(ctx)
+    correlate_tenant(str(ctx["tenant"]))
+    groups1 = _correlations(ctx["tenant"])
+    assert len(groups1) == 1
+    id1, fp1 = groups1[0].id, groups1[0].fingerprint
+    members1 = {m.finding_id for m in _members(id1)}
+
+    correlate_tenant(str(ctx["tenant"]))
+    groups2 = _correlations(ctx["tenant"])
+    assert len(groups2) == 1
+    assert groups2[0].id == id1                            # same row (not delete+recreate)
+    assert groups2[0].fingerprint == fp1
+    assert {m.finding_id for m in _members(id1)} == members1
+
+
+def test_lifecycle_empty_result_clears_everything_in_scope():  # Test J
+    from guardian_scanner.correlation import correlate_tenant
+
+    ctx = _tenant()
+    a, b = _same_secret_pair(ctx)
+    correlate_tenant(str(ctx["tenant"]))
+    group_id = _correlations(ctx["tenant"])[0].id
+
+    _set_status(a, "resolved")
+    _set_status(b, "resolved")
+    correlate_tenant(str(ctx["tenant"]))
+
+    assert _correlations(ctx["tenant"]) == []              # all in-scope groups gone
+    assert _members(group_id) == []                        # no member rows remain
+    assert _corr_id_of(a) is None and _corr_id_of(b) is None

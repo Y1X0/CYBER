@@ -75,7 +75,7 @@ from guardian_common.logging import get_logger
 from guardian_core.enums import CorrelationConfidence, Severity
 from guardian_db.models import Finding, FindingCorrelation, FindingCorrelationMember
 from guardian_db.session import session_scope
-from sqlalchemy import select
+from sqlalchemy import delete, select, true, update
 
 from guardian_scanner.celery_app import celery_app
 
@@ -622,29 +622,76 @@ def correlate(findings: list[Finding]) -> list[Group]:
 def correlate_tenant(tenant_id: str, customer_id: str | None = None) -> dict:
     """Correlate a tenant's open findings and persist the groups."""
     tenant = uuid.UUID(tenant_id)
-    stats = {"findings": 0, "groups": 0, "created": 0, "updated": 0, "members": 0}
+    customer = uuid.UUID(customer_id) if customer_id else None
+    stats = {"findings": 0, "groups": 0, "created": 0, "updated": 0, "members": 0,
+             "pointers_cleared": 0, "groups_removed": 0}
 
     with session_scope() as session:
         query = select(Finding).where(
             Finding.tenant_id == tenant,
             Finding.status.in_(["open", "triaged", "confirmed"]),
         ).limit(MAX_FINDINGS)
-        if customer_id:
-            query = query.where(Finding.customer_id == uuid.UUID(customer_id))
+        if customer:
+            query = query.where(Finding.customer_id == customer)
         findings = list(session.execute(query).scalars())
         stats["findings"] = len(findings)
 
+        current_ids: set[uuid.UUID] = set()
         for group in correlate(findings):
             stats["groups"] += 1
-            created = _persist(session, tenant, group)
+            created, correlation_id = _persist(session, tenant, group)
+            current_ids.add(correlation_id)
             stats["created" if created else "updated"] += 1
             stats["members"] += len(group.members)
+
+        # E1 is live derived state: drop everything the current run did not produce for this exact
+        # scope, in the same transaction, so stale groups/members/pointers never accumulate.
+        cleared, removed = _reconcile(session, tenant, customer, current_ids)
+        stats["pointers_cleared"] = cleared
+        stats["groups_removed"] = removed
 
     log.info("correlation_complete", tenant=tenant_id, **stats)
     return stats
 
 
-def _persist(session, tenant: uuid.UUID, group: Group) -> bool:  # noqa: ANN001
+def _reconcile(session, tenant: uuid.UUID, customer_id: uuid.UUID | None,  # noqa: ANN001
+               current_ids: set[uuid.UUID]) -> tuple[int, int]:
+    """Delete correlation state the current run did not produce, scoped exactly to what it computed.
+
+    E1 groups are current/live derived state, not history, so after the complete current result for
+    the scope has been persisted, any `FindingCorrelation` this run did not (re)produce is stale and
+    is removed — with its member rows (cascade) and any `Finding.correlation_id` still pointing at
+    it. Runs in the SAME transaction as the upserts.
+
+    Scope is exactly the computed scope — the whole tenant, or one customer when `customer_id` is
+    given — enforced with explicit tenant/customer predicates. The worker session is privileged and
+    bypasses RLS, so these predicates (not RLS) are what stop a customer-scoped run from touching
+    another customer's groups. Pointers are nulled BEFORE the groups are deleted, because
+    `findings.correlation_id` has a RESTRICT foreign key.
+    """
+    finding_scope = [Finding.tenant_id == tenant]
+    group_scope = [FindingCorrelation.tenant_id == tenant]
+    if customer_id is not None:
+        finding_scope.append(Finding.customer_id == customer_id)
+        group_scope.append(FindingCorrelation.customer_id == customer_id)
+
+    ids = list(current_ids)
+    stale_pointer = Finding.correlation_id.isnot(None)
+    stale_group = true()
+    if ids:
+        stale_pointer = stale_pointer & Finding.correlation_id.notin_(ids)
+        stale_group = FindingCorrelation.id.notin_(ids)
+
+    cleared = session.execute(
+        update(Finding).where(*finding_scope, stale_pointer).values(correlation_id=None)
+    ).rowcount
+    removed = session.execute(
+        delete(FindingCorrelation).where(*group_scope, stale_group)
+    ).rowcount
+    return cleared or 0, removed or 0
+
+
+def _persist(session, tenant: uuid.UUID, group: Group) -> tuple[bool, uuid.UUID]:  # noqa: ANN001
     fingerprint = group.fingerprint()
     existing = session.execute(
         select(FindingCorrelation).where(
@@ -713,4 +760,4 @@ def _persist(session, tenant: uuid.UUID, group: Group) -> bool:  # noqa: ANN001
         if finding is not None:
             # Set, never used to hide: the finding stays open and individually inspectable.
             finding.correlation_id = correlation.id
-    return created
+    return created, correlation.id
