@@ -30,7 +30,10 @@ from member count, member severity, or `Finding.confidence`:
 
     rule                        relationship proven by            tier
     ─────────────────────────── ───────────────────────────────── ───────────────
-    same-secret (value match)   identical redacted secret value   CONFIRMED
+    same-secret (keyed identity) same keyed secret identity (HMAC CONFIRMED
+                                of the raw secret) — same credential
+    same-secret (redaction only) same LOSSY display redaction —    STRONG_EVIDENCE (a redaction
+                                legacy/gitleaks, no keyed identity  can collide across secrets)
     same-secret (position only) same path:line, no value          STRONG_EVIDENCE
     same-cve-on-asset           same CVE id + same asset_id       STRONG_EVIDENCE
     injection-corroborated      same CWE, static + dynamic, same  STRONG_EVIDENCE
@@ -156,24 +159,31 @@ def _escalate(severity: Severity, steps: int = 1) -> Severity:
     return _SEVERITY_ORDER[index]
 
 
-def _secret_identity(finding: Finding) -> tuple[str, str] | None:
-    """What makes two secret findings the same secret, and HOW we know.
+def _secret_identity(finding: Finding) -> tuple[str, str, str] | None:
+    """What makes two secret findings the same secret, HOW we know, and a human-safe label.
 
-    Returns ``(identity, basis)`` where basis is ``"value"`` (the redacted secret value matched — a
-    strong identity) or ``"position"`` (only file:line matched — weaker), or ``None`` when neither
-    is available. The basis drives the group's confidence tier.
+    Returns ``(bucket_key, basis, display)`` where basis is, strongest first:
 
-    The redacted form is used deliberately — it is what the engines persist, and it is stable for
-    one credential across the source file, the git history and an image layer. Comparing raw values
-    would mean storing them, which is the thing every secrets engine here is careful not to do.
+    * ``"identity"`` — the keyed, one-way secret-correlation identity matched. This is derived from
+      the RAW secret at detection time (``Finding.secret_correlation_id``), so a match means the
+      same credential — the basis that earns CONFIRMED.
+    * ``"value"`` — only the lossy display *redaction* matched. A redaction is lossy on purpose (two
+      different secrets of equal length ≤ 8, or sharing first-two/last-two/length, redact to one
+      string), so this is STRONG_EVIDENCE at most, never CONFIRMED. It covers findings created
+      before the identity existed, and gitleaks findings pre-redacted so no raw value is available.
+    * ``"position"`` — only file:line matched (no value at all). STRONG_EVIDENCE.
 
-    This looked only under `evidence["detail"]`, and the secrets engine writes the redacted value at
-    `evidence["match"]` — top level. So the redacted branch never fired on a real finding and every
-    identity fell through to `path:line`, which made the rule wrong in *both* directions: three
-    different credentials on one line of a `.env` were declared one credential, while the same
-    credential found by two engines in two places was never grouped at all. Both are visible only
-    once correlation actually runs, which it did not until the readiness audit.
+    ``None`` when nothing is available. ``bucket_key`` is namespaced by basis so the three bases can
+    never share a bucket. ``display`` is a human-safe snippet for the description — the redacted
+    value for the value basis, and empty for the others (the keyed identity is internal and must
+    never appear in customer-visible text).
     """
+    identity = getattr(finding, "secret_correlation_id", None)
+    if isinstance(identity, str) and identity:
+        # Proven same credential (up to HMAC collision). The identity itself never leaves this
+        # function's bucket key — it is not put into any human-readable field.
+        return f"identity:{identity}", "identity", ""
+
     evidence = finding.evidence if isinstance(finding.evidence, dict) else {}
     detail = evidence.get("detail")
     sources = [evidence, detail if isinstance(detail, dict) else {}]
@@ -181,21 +191,16 @@ def _secret_identity(finding: Finding) -> tuple[str, str] | None:
         for key in ("redacted", "redacted_excerpt", "excerpt", "match"):
             value = source.get(key)
             if isinstance(value, str) and value.strip() and value != "<redacted>":
-                return value.strip()[:120], "value"
+                snippet = value.strip()[:120]
+                return f"value:{snippet}", "value", snippet
 
-    # No redacted value to compare, so fall back to position. Position alone is not identity when
-    # the engine told us *which* detector fired: three patterns matching one line of a `.env` are
-    # three credentials, and merging them announces "one credential in three places". So the rule
-    # name discriminates when it is present.
-    #
-    # When it is absent the fallback stays position-only, deliberately: that is the case of two
-    # different engines pointing at the same line with no detail to compare, which is the one this
-    # fallback was written for.
+    # No value at all, so fall back to position. The rule name discriminates when present, so three
+    # patterns matching one line of a `.env` stay three credentials rather than being merged.
     location = finding.location or {}
     path, line, rule = location.get("path"), location.get("line"), location.get("rule")
     if path and line:
-        identity = f"{path}:{line}:{rule}" if rule else f"{path}:{line}"
-        return identity, "position"
+        pos = f"{path}:{line}:{rule}" if rule else f"{path}:{line}"
+        return f"position:{pos}", "position", ""
     return None
 
 
@@ -208,6 +213,7 @@ def group_same_secret(findings: list[Finding]) -> list[Group]:
     """One credential reported by several engines."""
     buckets: dict[tuple, list[Finding]] = defaultdict(list)
     basis_of: dict[tuple, str] = {}
+    display_of: dict[tuple, str] = {}
     for finding in findings:
         if finding.category not in {"secret", "insecure-code", "container-misconfig"}:
             continue
@@ -216,33 +222,40 @@ def group_same_secret(findings: list[Finding]) -> list[Group]:
             continue
         result = _secret_identity(finding)
         if result:
-            identity, basis = result
-            key = (finding.customer_id, identity)
+            bucket_key, basis, display = result
+            key = (finding.customer_id, bucket_key)
             buckets[key].append(finding)
-            # A bucket is homogeneous by identity string (value and position live in disjoint string
-            # spaces), so the basis of any member is the basis of the bucket.
+            # A bucket is homogeneous by basis (each basis namespaces its key), so any member's
+            # basis is the bucket's basis.
             basis_of.setdefault(key, basis)
+            display_of.setdefault(key, display)
 
     groups: list[Group] = []
     for key, members in buckets.items():
         if len(members) < 2:
             continue
-        customer_id, identity = key
-        # CONFIRMED only when the same redacted VALUE matched; position-only is STRONG_EVIDENCE.
-        value_matched = basis_of[key] == "value"
-        confidence = (CorrelationConfidence.CONFIRMED if value_matched
+        customer_id, _bucket_key = key
+        # CONFIRMED requires the keyed identity — proof it is the same credential. The lossy display
+        # redaction (value) and position are STRONG_EVIDENCE at most: a redaction can collide across
+        # two different secrets, so it must never earn CONFIRMED.
+        basis = basis_of[key]
+        confidence = (CorrelationConfidence.CONFIRMED if basis == "identity"
                       else CorrelationConfidence.STRONG_EVIDENCE)
-        edge_rationale = (
-            "Both findings reference the same redacted secret value."
-            if value_matched else
-            "Both findings reference the same file location (path:line); no value was available "
-            "to compare."
-        )
+        edge_rationale = {
+            "identity": "Both findings resolve to the same keyed secret identity — the same "
+                        "credential.",
+            "value": "Both findings share the same redacted secret representation; a redaction is "
+                     "lossy, so this is not proof they are the same credential.",
+            "position": "Both findings reference the same file location (path:line); no value was "
+                        "available to compare.",
+        }[basis]
+        # Only the redacted value is human-safe to show; the keyed identity is internal.
+        detail = f" ({display_of[key][:40]})" if display_of[key] else ""
         groups.append(_duplicate_group(
             rule="same-secret",
             title="One credential reported by several engines",
             description=(
-                f"{len(members)} findings describe the same credential ({identity[:40]}). "
+                f"{len(members)} findings describe the same credential{detail}. "
                 "Rotating it once resolves all of them; the individual findings are kept so each "
                 "engine's evidence remains checkable."
             ),

@@ -76,7 +76,8 @@ def _tenant(*, engine="secrets"):
 
 def _finding(ctx, *, severity="high", risk=70, title="Hardcoded credential", status="open",
              evidence=None, customer=None, cve=None, kev=False, maturity=None, category="secret",
-             correlation_id=None, verified=None, description="", location=None):
+             correlation_id=None, verified=None, description="", location=None,
+             secret_correlation_id=None):
     from guardian_db.models import Finding
     from guardian_db.session import session_scope
 
@@ -90,6 +91,7 @@ def _finding(ctx, *, severity="high", risk=70, title="Hardcoded credential", sta
             verification_verdict=verified,
             location=location or {"path": "app/config.py", "line": 12},
             evidence=evidence or {"detail": {"excerpt": "redacted"}},
+            secret_correlation_id=secret_correlation_id,
         )
         db.add(finding)
         db.flush()
@@ -321,16 +323,19 @@ def test_the_dossier_exposes_confidence_ordinal_and_edge_evidence():
 
     ctx = _tenant()
     first = _finding(ctx, evidence={"detail": {"redacted": "AK********EY"}},
-                     location={"engine": "secrets", "path": "app/config.py"})
+                     location={"engine": "secrets", "path": "app/config.py"},
+                     secret_correlation_id="hmac-shared")
     second = _finding(ctx, category="insecure-code",
                       evidence={"detail": {"redacted": "AK********EY"}},
-                      location={"engine": "sast", "path": "app/config.py"})
+                      location={"engine": "sast", "path": "app/config.py"},
+                      secret_correlation_id="hmac-shared")
     correlate_tenant(str(ctx["tenant"]))
 
     client, hdr = _client(ctx)
-    corr = client.get(f"/api/v1/findings/{first}", headers=hdr).json()["correlation"]
+    body = client.get(f"/api/v1/findings/{first}", headers=hdr).json()
+    corr = body["correlation"]
 
-    assert corr["confidence"] == "confirmed"            # value match → confirmed (Slice 1)
+    assert corr["confidence"] == "confirmed"            # keyed identity match → confirmed
     members = corr["members"]
     assert len(members) == 2
     assert [m["ordinal"] for m in members] == [0, 1]    # ordered, distinct, starting at 0
@@ -346,9 +351,16 @@ def test_the_dossier_exposes_confidence_ordinal_and_edge_evidence():
     assert len(edged) == 1
     edge = edged[0]
     assert edge["edge_confidence"] == "confirmed"
-    assert "same redacted secret value" in edge["edge_rationale"].lower()
+    assert "same keyed secret identity" in edge["edge_rationale"].lower()
     assert edge["edge_source_finding_id"] == primary["finding_id"]
     assert any(m["is_self"] and m["finding_id"] == str(first) for m in members)
+
+    # TEST D: the keyed identity must NEVER be exposed through the API — not in the correlation, not
+    # in the finding's evidence, not anywhere in the dossier body.
+    assert "hmac-shared" not in client.get(
+        f"/api/v1/findings/{first}", headers=hdr).text
+    assert "secret_correlation_id" not in str(body)
+    assert "secret_id_hmac" not in str(body)
 
 
 def test_correlation_confidence_is_not_derived_from_severity_or_finding_confidence():

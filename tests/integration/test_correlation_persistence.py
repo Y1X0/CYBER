@@ -53,7 +53,7 @@ def _tenant():
 
 
 def _finding(ctx, *, engine="secrets", redacted="AK********EY", severity="high", risk=70,
-             category="secret", rule="aws-key"):
+             category="secret", rule="aws-key", secret_correlation_id=None):
     from guardian_db.models import Finding
     from guardian_db.session import session_scope
 
@@ -65,6 +65,7 @@ def _finding(ctx, *, engine="secrets", redacted="AK********EY", severity="high",
             description="", category=category, severity=severity, risk_score=risk,
             status="open", location={"engine": engine, "rule": rule},
             evidence={"detail": {"redacted": redacted}},
+            secret_correlation_id=secret_correlation_id,
         )
         db.add(finding)
         db.flush()
@@ -185,9 +186,10 @@ def test_confidence_is_persisted_from_the_relationship_evidence():
     from guardian_scanner.correlation import correlate_tenant
 
     ctx = _tenant()
-    # Two engines carrying the SAME redacted value → the relationship is proven → confirmed.
-    _finding(ctx, engine="secrets", redacted="AK********EY")
-    _finding(ctx, engine="sast", category="insecure-code", redacted="AK********EY")
+    # Two engines carrying the SAME keyed secret identity → the relationship is proven → confirmed.
+    _finding(ctx, engine="secrets", redacted="AK********EY", secret_correlation_id="hmac-shared")
+    _finding(ctx, engine="sast", category="insecure-code", redacted="AK********EY",
+             secret_correlation_id="hmac-shared")
     # A public-repo exposure plus a secret keyed only on the customer → a plausible but unproven
     # chain → potential, even though its members are high severity.
     _finding(ctx, engine="web_checks", category="misconfig", severity="medium", risk=50,
@@ -225,8 +227,9 @@ def test_member_ordinal_and_edge_evidence_persist_and_reload():
     from guardian_scanner.correlation import correlate_tenant
 
     ctx = _tenant()
-    _finding(ctx, engine="secrets", redacted="AK**EY")
-    _finding(ctx, engine="sast", category="insecure-code", redacted="AK**EY")
+    _finding(ctx, engine="secrets", redacted="AK**EY", secret_correlation_id="hmac-1")
+    _finding(ctx, engine="sast", category="insecure-code", redacted="AK**EY",
+             secret_correlation_id="hmac-1")
     correlate_tenant(str(ctx["tenant"]))
 
     group = _correlations(ctx["tenant"])[0]
@@ -243,8 +246,8 @@ def test_member_ordinal_and_edge_evidence_persist_and_reload():
     assert len(edged) == 1                              # star of one edge for a 2-member group
     edge = edged[0]
     assert edge.ordinal == 1
-    assert edge.edge_confidence == "confirmed"
-    assert "same redacted secret value" in edge.edge_rationale.lower()
+    assert edge.edge_confidence == "confirmed"          # keyed identity match → confirmed
+    assert "same keyed secret identity" in edge.edge_rationale.lower()
     assert edge.edge_source_finding_id == primary.finding_id
 
 

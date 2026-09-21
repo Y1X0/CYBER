@@ -40,6 +40,15 @@ def to_finding(
             business_impact=business_impact,
         )
     )
+    # The keyed secret-correlation identity travels inside `evidence` (so it rides the existing
+    # sealing/transport without a schema change), but it must NOT be persisted in `evidence`, which
+    # is serialized to customers. Relocate it into its own column and strip it from the stored
+    # evidence, so no customer-facing serializer ever sees it (WP-E1 same-secret fix).
+    evidence = dict(raw.evidence or {})
+    secret_correlation_id = evidence.pop("secret_id_hmac", None)
+    if not isinstance(secret_correlation_id, str) or not secret_correlation_id:
+        secret_correlation_id = None
+
     return Finding(
         tenant_id=tenant_id,
         customer_id=customer_id,
@@ -68,7 +77,8 @@ def to_finding(
         # tool-confirmed result (doc 07 §6).
         source=source,
         location=raw.location,
-        evidence=raw.evidence,
+        evidence=evidence,
+        secret_correlation_id=secret_correlation_id,
         references=raw.references,
     )
 
@@ -79,7 +89,7 @@ def to_finding(
 _OBSERVED_FIELDS = (
     "title", "description", "category", "cwe_id", "owasp_ref", "cve_ids", "cvss_base",
     "epss_score", "kev", "exploit_maturity", "ransomware", "severity", "risk_score",
-    "risk_rationale", "confidence", "location", "evidence", "references",
+    "risk_rationale", "confidence", "location", "evidence", "secret_correlation_id", "references",
 )
 
 

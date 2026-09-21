@@ -138,6 +138,13 @@ class Finding(Base, TimestampMixin):
 
     location: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
     evidence: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    # Keyed, one-way identity of a detected secret, used ONLY by the same-secret correlation rule to
+    # decide "same credential" instead of the lossy display redaction (WP-E1 fix). Deliberately its
+    # own column, NOT part of `evidence`: `evidence` is serialized to customers through several
+    # paths, and this value — though non-reversible and keyed — is internal and must never be
+    # returned. NULL for non-secret findings, for gitleaks findings (whose value is pre-redacted,
+    # so no raw exists), and for findings created before this column. NULL never confers CONFIRMED.
+    secret_correlation_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     remediation: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     ai_explanation: Mapped[str | None] = mapped_column(Text, nullable=True)
     references: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)

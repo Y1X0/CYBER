@@ -54,3 +54,55 @@ def test_fingerprint_is_stable():
     a = _run(SAMPLE)[0].fingerprint()
     b = _run(SAMPLE)[0].fingerprint()
     assert a == b and len(a) == 32
+
+
+# ── keyed secret-correlation identity (WP-E1 same-secret fix) ────────────────────────────────────────
+# The engine derives a keyed, one-way identity from the RAW secret so correlation can decide "same
+# credential" without the lossy display redaction. The raw is never persisted; the identity rides in
+# evidence["secret_id_hmac"] until normalize relocates it into a dedicated column.
+from types import SimpleNamespace  # noqa: E402
+
+import guardian_scanner.engines.secrets_engine as _se  # noqa: E402
+
+
+def _with_key(monkeypatch, key="unit-broker-seal-key"):
+    monkeypatch.setattr(_se, "get_settings", lambda: SimpleNamespace(broker_seal_key=key))
+
+
+def test_engine_derives_a_keyed_identity_and_never_leaks_the_raw(monkeypatch):
+    _with_key(monkeypatch)
+    findings = _run('aws_access_key_id = "AKIAIOSFODNN7EXAMPLE"')
+    assert findings
+    f = findings[0]
+    ident = f.evidence.get("secret_id_hmac")
+    assert isinstance(ident, str) and len(ident) == 64
+    assert "AKIAIOSFODNN7EXAMPLE" not in ident              # not the raw secret
+    assert "*" in f.evidence.get("match", "")               # redaction still shown
+
+
+def test_two_different_secrets_get_different_identities(monkeypatch):
+    _with_key(monkeypatch)
+    findings = _run(
+        'a = "AKIAIOSFODNN7EXAMPLE"\nb = "ghp_16CharsAtLeastxxxxxxxxxxxxxxxxxxxxxxxx"')
+    ids = [f.evidence["secret_id_hmac"] for f in findings if f.evidence.get("secret_id_hmac")]
+    assert len(ids) >= 2
+    assert len(set(ids)) == len(ids)                        # distinct secrets -> distinct identities
+
+
+def test_no_broker_seal_key_means_no_identity(monkeypatch):
+    # Conservative: with no key, no weakly-keyed identity is emitted — correlation falls back to the
+    # value/position basis (STRONG_EVIDENCE at most), never CONFIRMED.
+    _with_key(monkeypatch, key="")
+    findings = _run('api_key = "AKIAIOSFODNN7EXAMPLE"')
+    assert findings
+    assert all("secret_id_hmac" not in f.evidence for f in findings)
+
+
+def test_gitleaks_findings_carry_no_keyed_identity():
+    # gitleaks masks the value in its OWN output (--redact), so no raw exists to key — the identity
+    # is absent and correlation stays conservative for those findings.
+    engine = SecretsEngine()
+    item = {"RuleID": "aws-access-token", "File": "app.py", "StartLine": 3, "Secret": "REDACTED"}
+    finding = engine._gitleaks_finding(item)
+    assert finding is not None
+    assert "secret_id_hmac" not in finding.evidence

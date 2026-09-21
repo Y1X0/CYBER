@@ -26,9 +26,11 @@ import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 
+from guardian_common.config import get_settings
 from guardian_common.logging import get_logger
 from guardian_core.enums import EngineKey, Severity
 from guardian_core.findings import RawFinding
+from guardian_core.secret_identity import secret_correlation_identity
 
 from guardian_scanner.engines.base import EngineHealth, ScanContext
 
@@ -383,6 +385,15 @@ class SecretsEngine:
     def _make_finding(
         self, name: str, sev: Severity, path: str, lineno: int, raw: str, confidence: str
     ) -> RawFinding:
+        # The redaction is what a human sees; the keyed identity is what correlation uses to decide
+        # "same credential". They are deliberately separate — the redaction is lossy on purpose, so
+        # it must never be the identity. `secret_id_hmac` is derived from the RAW value here (the
+        # one place it exists), never persisted raw, and relocated out of `evidence` into a
+        # dedicated, non-serialized column at normalize time so it never reaches a customer reply.
+        evidence: dict = {"match": _redact(raw)}
+        identity = secret_correlation_identity(raw, key=get_settings().broker_seal_key)
+        if identity:
+            evidence["secret_id_hmac"] = identity
         return RawFinding(
             engine=EngineKey.SECRETS,
             title=f"Hardcoded secret: {name}",
@@ -396,7 +407,7 @@ class SecretsEngine:
             cwe_id="CWE-798",
             owasp_ref="A07:2021",
             location={"path": path, "line": lineno, "rule": name},
-            evidence={"match": _redact(raw)},
+            evidence=evidence,
             references={
                 "cwe": "https://cwe.mitre.org/data/definitions/798.html",
                 "owasp": "https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/",

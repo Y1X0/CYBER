@@ -36,7 +36,7 @@ class FakeFinding:
 
     def __init__(self, *, category="secret", severity="high", risk_score=70, cwe_id=None,
                  cve_ids=None, location=None, evidence=None, customer_id=CUSTOMER,
-                 asset_id=ASSET):
+                 asset_id=ASSET, secret_correlation_id=None):
         self.id = uuid.uuid4()
         self.category = category
         self.severity = severity
@@ -47,6 +47,9 @@ class FakeFinding:
         self.evidence = evidence or {}
         self.customer_id = customer_id
         self.asset_id = asset_id
+        # The keyed secret-correlation identity the engine derives from the raw value (WP-E1 fix).
+        # None models a legacy/gitleaks finding that only has the lossy redaction.
+        self.secret_correlation_id = secret_correlation_id
 
 
 def _secret(engine, redacted, **kwargs):
@@ -56,6 +59,11 @@ def _secret(engine, redacted, **kwargs):
         evidence={"detail": {"redacted": redacted}},
         **kwargs,
     )
+
+
+def _secret_id(engine, identity, redacted="AK********EY (len=40)", **kwargs):
+    """A secret finding carrying the keyed correlation identity (as a real detection would)."""
+    return _secret(engine, redacted, secret_correlation_id=identity, **kwargs)
 
 
 # ── one credential, several engines ───────────────────────────────────────────────────────────────
@@ -310,14 +318,25 @@ def _secret_at(engine, path, line, **kwargs):
     )
 
 
-def test_same_secret_value_match_is_confirmed():
-    # Same redacted VALUE seen by two engines proves it is the same credential.
+def test_same_secret_keyed_identity_is_confirmed():
+    # The keyed identity is derived from the RAW secret, so a match proves the same credential.
+    groups = group_same_secret([
+        _secret_id("secrets", "id-aws-key-1"),
+        _secret_id("sast", "id-aws-key-1"),
+    ])
+    assert len(groups) == 1
+    assert groups[0].confidence is CorrelationConfidence.CONFIRMED
+
+
+def test_same_secret_redaction_only_is_strong_evidence_not_confirmed():
+    # No keyed identity — only the lossy redaction matched. A redaction can collide across two
+    # different secrets, so this must be STRONG_EVIDENCE, never CONFIRMED.
     groups = group_same_secret([
         _secret("secrets", "AK********EY (len=40)"),
         _secret("sast", "AK********EY (len=40)"),
     ])
     assert len(groups) == 1
-    assert groups[0].confidence is CorrelationConfidence.CONFIRMED
+    assert groups[0].confidence is CorrelationConfidence.STRONG_EVIDENCE
 
 
 def test_same_secret_position_fallback_is_only_strong_evidence():
@@ -384,17 +403,18 @@ def test_correlation_confidence_does_not_track_member_severity():
         _secret_at("sast", "/app/.env", 3, severity="critical", risk_score=99),
     ])
     assert groups[0].confidence is CorrelationConfidence.STRONG_EVIDENCE
-    # And a value-match with LOW, low-risk members is still CONFIRMED — confidence is about the link.
+    # And a keyed-identity match with LOW, low-risk members is still CONFIRMED — confidence is about
+    # the link, not the members' severity.
     low = group_same_secret([
-        _secret("secrets", "AK****VALUE", severity="low", risk_score=5),
-        _secret("container", "AK****VALUE", severity="low", risk_score=5),
+        _secret_id("secrets", "id-low", severity="low", risk_score=5),
+        _secret_id("container", "id-low", severity="low", risk_score=5),
     ])
     assert low[0].confidence is CorrelationConfidence.CONFIRMED
 
 
 def test_correlation_confidence_is_deterministic_and_order_independent():
-    a = _secret("secrets", "AK********EY (len=40)")
-    b = _secret("sast", "AK********EY (len=40)")
+    a = _secret_id("secrets", "id-x")
+    b = _secret_id("sast", "id-x")
     first = group_same_secret([a, b])[0].confidence
     second = group_same_secret([b, a])[0].confidence
     assert first is second is CorrelationConfidence.CONFIRMED
@@ -444,13 +464,21 @@ def test_ordinal_is_presentation_only_not_a_causal_sequence():
 
 
 # Edge evidence, per rule ----------------------------------------------------------------------------
-def test_same_secret_value_edge_is_confirmed_and_names_the_value_match():
-    g = group_same_secret([_secret("secrets", "AK**EY"), _secret("sast", "AK**EY")])[0]
+def test_same_secret_identity_edge_is_confirmed():
+    g = group_same_secret([_secret_id("secrets", "id-1"), _secret_id("sast", "id-1")])[0]
     edge = _edge_to(g, _others(g)[0])
     assert edge is not None
     assert edge.source == g.primary
     assert edge.confidence is CorrelationConfidence.CONFIRMED
-    assert "same redacted secret value" in edge.rationale.lower()
+    assert "same keyed secret identity" in edge.rationale.lower()
+
+
+def test_same_secret_redaction_edge_is_strong_evidence_not_confirmed():
+    g = group_same_secret([_secret("secrets", "AK**EY"), _secret("sast", "AK**EY")])[0]
+    edge = _edge_to(g, _others(g)[0])
+    assert edge is not None
+    assert edge.confidence is CorrelationConfidence.STRONG_EVIDENCE
+    assert "redacted" in edge.rationale.lower() and "not proof" in edge.rationale.lower()
 
 
 def test_same_secret_position_edge_is_strong_evidence():
@@ -528,8 +556,8 @@ def test_edge_confidence_ignores_member_severity_and_risk():
 
 
 def test_edge_confidence_ignores_member_count():
-    g = group_same_secret([_secret("secrets", "V"), _secret("sast", "V"),
-                           _secret("container", "V"), _secret("iac", "V")])[0]
+    g = group_same_secret([_secret_id("secrets", "idV"), _secret_id("sast", "idV"),
+                           _secret_id("container", "idV"), _secret_id("iac", "idV")])[0]
     assert len(g.edges) == 3  # star: one edge from the primary to every other member
     assert all(e.confidence is CorrelationConfidence.CONFIRMED for e in g.edges)
 
@@ -553,3 +581,67 @@ def test_edges_are_stable_across_repeated_runs():
         return sorted((str(e.source), str(e.dest), e.rationale, e.confidence.value)
                       for e in g.edges)
     assert signature(first) == signature(second)
+
+
+# ── same-secret redaction-collision regression (WP-E1 fix) ──────────────────────────────────────────
+# The bug: the same-secret rule used the LOSSY display redaction as the secret identity, so two
+# different secrets whose redactions collide were grouped and marked CONFIRMED. The fix keys the
+# identity on the raw secret (Finding.secret_correlation_id). These prove the collision no longer
+# produces a false relationship, that a true match still confirms, and that legacy findings are not
+# upgraded.
+
+def test_short_secret_redaction_collision_does_not_confirm():
+    # abc123 and xyz789 both redact to the same all-asterisk string (len <= 8) but are different
+    # secrets → different keyed identities → no same-secret group at all (certainly not CONFIRMED).
+    groups = group_same_secret([
+        _secret("secrets", "******", secret_correlation_id="hmac-abc123"),
+        _secret("sast", "******", secret_correlation_id="hmac-xyz789"),
+    ])
+    assert groups == []
+
+
+def test_long_secret_redaction_collision_does_not_confirm():
+    # Same first-two/last-two/length redaction, different secrets → different identities → not grouped.
+    groups = group_same_secret([
+        _secret("secrets", "AB********YZ (len=20)", secret_correlation_id="hmac-1"),
+        _secret("sast", "AB********YZ (len=20)", secret_correlation_id="hmac-2"),
+    ])
+    assert groups == []
+
+
+def test_true_equality_confirms_via_keyed_identity():
+    groups = group_same_secret([
+        _secret_id("secrets", "hmac-same", redacted="ab****yz"),
+        _secret_id("sast", "hmac-same", redacted="ab****yz"),
+    ])
+    assert len(groups) == 1
+    assert groups[0].rule == "same-secret"
+    assert groups[0].confidence is CorrelationConfidence.CONFIRMED
+
+
+def test_legacy_redaction_only_is_strong_evidence_never_confirmed():
+    # A pre-fix finding carries only the lossy redaction, no keyed identity. Two of them may still
+    # group (same redaction), but the tier must be conservative — STRONG_EVIDENCE, not CONFIRMED.
+    groups = group_same_secret([_secret("secrets", "AK**EY"), _secret("container", "AK**EY")])
+    assert len(groups) == 1
+    assert groups[0].confidence is CorrelationConfidence.STRONG_EVIDENCE
+
+
+def test_legacy_redaction_and_new_identity_do_not_cross_confirm():
+    # A finding that has the keyed identity and one that has only the redaction live in different
+    # bases, so they never share a bucket — no cross-basis CONFIRMED.
+    groups = group_same_secret([
+        _secret_id("secrets", "hmac-1", redacted="AK**EY"),
+        _secret("sast", "AK**EY"),
+    ])
+    assert groups == []
+
+
+def test_keyed_identity_never_crosses_customers():
+    # The same keyed identity for two different customers must NOT correlate — tenant/customer
+    # isolation is unchanged; the identity is only ever compared within one customer's bucket.
+    groups = group_same_secret([
+        _secret_id("secrets", "hmac-shared"),
+        _secret_id("sast", "hmac-shared", customer_id=OTHER_CUSTOMER),
+    ])
+    assert groups == []
