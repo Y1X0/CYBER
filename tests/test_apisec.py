@@ -240,3 +240,109 @@ def test_a_null_sensitive_field_is_not_reported():
 
 def test_a_non_json_response_is_not_scanned_for_fields():
     assert checks.evaluate_exposure("<html><body>password</body></html>").fired is False
+
+
+# ── CORS misconfiguration ─────────────────────────────────────────────────────────────────────────
+_PROBE = checks.CORS_PROBE_ORIGIN
+
+
+def test_reflected_origin_with_credentials_is_high():
+    v = checks.evaluate_cors({"access-control-allow-origin": _PROBE,
+                              "access-control-allow-credentials": "true"})
+    assert v.fired is True
+    assert v.severity == "high"
+    assert v.evidence["reflection_confirmed"] is True
+
+
+def test_wildcard_with_credentials_is_high():
+    v = checks.evaluate_cors({"access-control-allow-origin": "*",
+                              "access-control-allow-credentials": "true"})
+    assert v.fired is True
+    assert v.severity == "high"
+
+
+def test_reflected_origin_without_credentials_is_medium():
+    v = checks.evaluate_cors({"access-control-allow-origin": _PROBE})
+    assert v.fired is True
+    assert v.severity == "medium"
+
+
+def test_plain_wildcard_without_credentials_does_not_fire():
+    """A public `*` with no credentials is usually intended — reporting it is noise, not a finding."""
+    v = checks.evaluate_cors({"access-control-allow-origin": "*"})
+    assert v.fired is False
+
+
+def test_a_restricted_allowlist_that_does_not_echo_the_probe_does_not_fire():
+    """The server reflected *its own* trusted origin, not our arbitrary probe — correct behaviour."""
+    v = checks.evaluate_cors({"access-control-allow-origin": "https://app.example.com",
+                              "access-control-allow-credentials": "true"})
+    assert v.fired is False
+
+
+def test_a_null_origin_is_medium():
+    v = checks.evaluate_cors({"access-control-allow-origin": "null"})
+    assert v.fired is True
+    assert v.severity == "medium"
+
+
+def test_no_cors_header_is_not_a_finding():
+    assert checks.evaluate_cors({"content-type": "application/json"}).fired is False
+
+
+def test_cors_is_deterministic():
+    headers = {"access-control-allow-origin": _PROBE, "access-control-allow-credentials": "true"}
+    assert checks.evaluate_cors(headers) == checks.evaluate_cors(dict(headers))
+
+
+# ── response transport / header hygiene ─────────────────────────────────────────────────────────────
+_PRIVATE_BODY = '{"id": 7, "email": "a@b.c", "balance": 1200}'
+
+
+def _rules(verdicts):
+    return [(v.evidence or {}).get("rule") for v in verdicts]
+
+
+def test_missing_hsts_on_https_fires():
+    verdicts = checks.evaluate_response_hygiene({}, is_https=True, body="{}")
+    assert "hsts" in _rules(verdicts)
+
+
+def test_hsts_present_clears_and_http_is_not_flagged():
+    with_hsts = checks.evaluate_response_hygiene(
+        {"strict-transport-security": "max-age=63072000"}, is_https=True, body="{}")
+    assert "hsts" not in _rules(with_hsts)
+    over_http = checks.evaluate_response_hygiene({}, is_https=False, body="{}")
+    assert "hsts" not in _rules(over_http)
+
+
+def test_cacheable_private_response_fires():
+    verdicts = checks.evaluate_response_hygiene({}, is_https=True, body=_PRIVATE_BODY)
+    assert "cache" in _rules(verdicts)
+
+
+def test_no_store_clears_the_cache_finding():
+    verdicts = checks.evaluate_response_hygiene(
+        {"cache-control": "no-store, private"}, is_https=True, body=_PRIVATE_BODY)
+    assert "cache" not in _rules(verdicts)
+
+
+def test_a_response_without_private_fields_is_not_flagged_for_caching():
+    verdicts = checks.evaluate_response_hygiene(
+        {}, is_https=True, body='{"status": "ok", "count": 3}')
+    assert "cache" not in _rules(verdicts)
+
+
+def test_missing_content_type_options_fires_and_nosniff_clears():
+    missing = checks.evaluate_response_hygiene({}, is_https=True, body="{}")
+    assert "content-type-options" in _rules(missing)
+    present = checks.evaluate_response_hygiene(
+        {"x-content-type-options": "nosniff"}, is_https=True, body="{}")
+    assert "content-type-options" not in _rules(present)
+
+
+def test_hygiene_is_deterministic_and_ordered():
+    headers, body = {}, _PRIVATE_BODY
+    first = checks.evaluate_response_hygiene(headers, is_https=True, body=body)
+    second = checks.evaluate_response_hygiene(dict(headers), is_https=True, body=body)
+    assert _rules(first) == _rules(second) == ["hsts", "cache", "content-type-options"]

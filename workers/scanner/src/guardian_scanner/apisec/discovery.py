@@ -29,6 +29,7 @@ from guardian_core.enums import EngineKey, Severity
 from guardian_core.evidence import Evidence, EvidenceKind
 from guardian_core.findings import RawFinding
 
+from guardian_scanner.apisec import checks
 from guardian_scanner.apisec.spec import Spec, build_url
 
 # Curated, safe wordlist. Each is (path, kind, severity-if-reachable). No parameters, no bodies,
@@ -105,6 +106,7 @@ def probe_surface(
     out: list[RawFinding] = []
     out.extend(_undocumented(base_url, spec, fetch, budget))
     out.extend(_unenforced_auth(base_url, spec, fetch, budget))
+    out.extend(_cors_and_hygiene(base_url, spec, fetch, budget))
     return out
 
 
@@ -173,6 +175,103 @@ def _unenforced_auth(base_url: str, spec: Spec, fetch, budget: _Budget) -> list[
                 "enforced. Apply the authentication middleware to this route and verify from an "
                 "unauthenticated client.", status))
     return out
+
+
+# CORS + response-hygiene findings, by the tier/rule the pure checks assign. Each row is
+# (title, severity, cwe, owasp, rule-id) — the severity is fixed per row, and CORS grades into two.
+_CORS_META: dict[str, tuple[str, Severity, str, str, str]] = {
+    "high": ("CORS policy exposes credentialed responses cross-origin", Severity.HIGH,
+             "CWE-942", "API8:2023", "api-cors-credentialed"),
+    "medium": ("CORS policy allows arbitrary cross-origin reads", Severity.MEDIUM,
+               "CWE-942", "API8:2023", "api-cors-open"),
+}
+_HYGIENE_META: dict[str, tuple[str, Severity, str, str, str]] = {
+    "hsts": ("API response omits HSTS over HTTPS", Severity.MEDIUM, "CWE-319",
+             "API8:2023", "api-missing-hsts"),
+    "cache": ("Private API response is cacheable (no Cache-Control: no-store)", Severity.MEDIUM,
+              "CWE-525", "API8:2023", "api-cache-sensitive"),
+    "content-type-options": ("API response permits MIME sniffing (no X-Content-Type-Options)",
+                             Severity.LOW, "CWE-693", "API8:2023",
+                             "api-missing-content-type-options"),
+}
+# Response hygiene is a property of the running service, not of one route; HSTS and the
+# sniffing header are reported once per scan (the sensitive-cache gap is data-specific, but
+# reported once as well to stay quiet). CORS is graded per endpoint — a policy can be route-specific
+# and every credentialed hit is dangerous on its own.
+_MAX_CORS_PROBES = 25
+
+
+def _cors_and_hygiene(base_url: str, spec: Spec, fetch, budget: _Budget) -> list[RawFinding]:  # noqa: ANN001
+    """One benign `Origin` request per reachable GET endpoint, then passive header hygiene over that
+    same already-fetched response. No credentials, GET only, one request per endpoint, budgeted.
+
+    Scoped to the API's own spec endpoints (not the base host): the web-checks engine already grades
+    CORS on a web asset's base origin, and there is no standalone header-hygiene check there to
+    duplicate. This adds the API-response context the audit flagged as missing.
+    """
+    out: list[RawFinding] = []
+    seen_urls: set[str] = set()
+    hygiene_reported: set[str] = set()
+    probed = 0
+    for op in spec.operations:
+        if op.method != "get":
+            continue
+        if probed >= _MAX_CORS_PROBES:
+            break
+        values = {p.name: p.example for p in op.parameters if p.where == "path" and p.example}
+        url = build_url(base_url, op, values)
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        if not budget.spend():
+            break
+        probed += 1
+        # A single benign request: the only header is a throwaway Origin, never a credential.
+        resp = fetch(url, {"origin": checks.CORS_PROBE_ORIGIN})
+        status = int(getattr(resp, "status", 0) or 0)
+        if getattr(resp, "error", None) or not (200 <= status < 300):
+            continue  # header hygiene is about real API responses, not 404s or refusals
+        headers = getattr(resp, "headers", {}) or {}
+        body = str(getattr(resp, "body", "") or "")
+
+        cors = checks.evaluate_cors(headers)
+        if cors.fired:
+            title, sev, cwe, owasp, rule = _CORS_META[cors.severity or "medium"]
+            out.append(_hygiene_f(f"{title}: {op.label}", sev, cwe, owasp, op.label, rule,
+                                  cors.indicator, status, cors.confidence, cors.evidence or {}))
+
+        is_https = url.lower().startswith("https://")
+        for v in checks.evaluate_response_hygiene(headers, is_https=is_https, body=body):
+            rule_key = (v.evidence or {}).get("rule", "")
+            if rule_key in hygiene_reported:
+                continue  # a service-wide property — report the first endpoint that shows it
+            hygiene_reported.add(rule_key)
+            title, sev, cwe, owasp, rule = _HYGIENE_META[rule_key]
+            out.append(_hygiene_f(f"{title}: {op.label}", sev, cwe, owasp, op.label, rule,
+                                  v.indicator, status, v.confidence, v.evidence or {}))
+    return out
+
+
+def _hygiene_f(title: str, severity: Severity, cwe: str, owasp: str, loc: str, rule: str,
+               indicator: str, status: int, confidence: str, evidence: dict) -> RawFinding:
+    return RawFinding(
+        engine=EngineKey.API,
+        title=title[:300],
+        category="api-misconfig",
+        description=indicator,
+        base_severity=severity,
+        confidence=confidence or "medium",
+        cwe_id=cwe,
+        owasp_ref=owasp,
+        location={"endpoint": loc, "rule": rule, "status": status},
+        evidence=Evidence(
+            kind=EvidenceKind.HTTP_EXCHANGE,
+            summary=f"{loc} → HTTP {status}",
+            # Header names, the graded tier, and status — never a response body or a real origin.
+            detail={"status": status, "rule": rule, **{k: v for k, v in evidence.items()}},
+        ).to_dict(),
+        references={"owasp_api": "https://owasp.org/API-Security/"},
+    )
 
 
 def _f(title: str, severity: Severity, cwe: str, owasp: str, loc: str, detail: str,

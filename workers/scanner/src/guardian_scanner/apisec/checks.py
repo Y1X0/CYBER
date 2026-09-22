@@ -42,9 +42,23 @@ class Verdict:
     indicator: str = ""
     confidence: str = "medium"
     evidence: dict | None = None
+    # Some checks (CORS, response hygiene) grade the *same* signal into different severities; the
+    # authorization checks leave this empty and the engine's fixed per-rule severity stands.
+    severity: str = ""
 
 
 NO = Verdict(False)
+
+# Field names that make a response one you never want written to a shared or browser cache — secrets
+# and the personal data caching rules (CWE-525) are actually about. Matched on the name only; the
+# value is never read, exactly as with `_SENSITIVE_FIELDS`.
+_PRIVATE_FIELDS = re.compile(
+    r"(?i)^(?:password|passwd|pwd|password_hash|hashed_password|secret|api_key|apikey|access_token|"
+    r"refresh_token|id_token|session_token|session|jwt|private_key|ssn|social_security|tax_id|"
+    r"national_id|passport|credit_card|card_number|cvv|iban|bank_account|routing_number|"
+    r"date_of_birth|dob|email|phone|phone_number|address|street|first_name|last_name|full_name|"
+    r"given_name|family_name)$"
+)
 
 
 def _digest(body: str) -> str:
@@ -214,11 +228,150 @@ def evaluate_exposure(body: str) -> Verdict:
     )
 
 
+# ── CORS misconfiguration ───────────────────────────────────────────────────────────────────────
+# A benign origin no server has any reason to trust. `.invalid` is reserved (RFC 2606) and can never
+# resolve, so an endpoint that echoes it back in Access-Control-Allow-Origin has *reflected* an
+# arbitrary origin — the confirmation. A bare `*` is never treated as reflection.
+CORS_PROBE_ORIGIN = "https://guardian-apisec-cors-probe.invalid"
+
+
+def evaluate_cors(headers: dict, probe_origin: str = CORS_PROBE_ORIGIN) -> Verdict:
+    """CORS on an API response, graded by what is actually exploitable.
+
+    The response was produced by a request carrying `Origin: probe_origin`, an origin the server has
+    no reason to allow. Only the credentialed combinations are HIGH — they let any website read this
+    endpoint's authenticated responses in a victim's session. A plain wildcard with no credentials
+    is intentional often enough that it is not reported here at all: reporting it is how a CORS
+    check becomes noise on every public endpoint.
+    """
+    lowered = {str(k).lower(): str(v).strip() for k, v in (headers or {}).items()}
+    if "access-control-allow-origin" not in lowered:
+        return NO
+    acao = lowered["access-control-allow-origin"]
+    credentials = lowered.get("access-control-allow-credentials", "").lower() == "true"
+    reflected = acao.rstrip("/") == probe_origin.rstrip("/")
+
+    if reflected and credentials:
+        return Verdict(
+            True,
+            "the endpoint reflected an arbitrary attacker Origin and allowed credentials — any "
+            "site can read this endpoint's authenticated responses in a victim's session",
+            "high",
+            {"allow_origin": "reflected-probe-origin", "allow_credentials": True,
+             "reflection_confirmed": True},
+            severity="high",
+        )
+    if acao == "*" and credentials:
+        return Verdict(
+            True,
+            "`Access-Control-Allow-Origin: *` is served with `Access-Control-Allow-Credentials: "
+            "true` — invalid per the CORS spec, but stacks that honour it expose authenticated "
+            "responses to every origin",
+            "medium",
+            {"allow_origin": "*", "allow_credentials": True},
+            severity="high",
+        )
+    if reflected:
+        return Verdict(
+            True,
+            "the endpoint reflected an arbitrary attacker Origin (credentials were not allowed) — "
+            "its responses are readable cross-origin by any site",
+            "medium",
+            {"allow_origin": "reflected-probe-origin", "allow_credentials": False,
+             "reflection_confirmed": True},
+            severity="medium",
+        )
+    if acao.lower() == "null":
+        return Verdict(
+            True,
+            "the endpoint returned `Access-Control-Allow-Origin: null`, which any sandboxed, "
+            "null-origin document — a `data:` URI or a sandboxed iframe — can satisfy",
+            "medium",
+            {"allow_origin": "null", "allow_credentials": credentials},
+            severity="medium",
+        )
+    # A plain wildcard with no credentials, or an ACAO that did not echo our probe origin (a real
+    # allowlist), is not reported: the first is usually intended, the second is correct behaviour.
+    return NO
+
+
+# ── response transport / header hygiene ───────────────────────────────────────────────────────────
+def _carries_private_data(body: str) -> bool:
+    """Whether the response body contains a field whose *name* marks it as private (CWE-525)."""
+    try:
+        parsed = json.loads(body or "")
+    except ValueError:
+        return False
+
+    def walk(node, depth: int = 0) -> bool:  # noqa: ANN001
+        if depth > 8:
+            return False
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if _PRIVATE_FIELDS.match(str(key)) and value not in (None, "", [], {}):
+                    return True
+                if walk(value, depth + 1):
+                    return True
+        elif isinstance(node, list):
+            for item in node[:50]:
+                if walk(item, depth + 1):
+                    return True
+        return False
+
+    return walk(parsed)
+
+
+def evaluate_response_hygiene(headers: dict, *, is_https: bool, body: str) -> list[Verdict]:
+    """Passive transport/response hygiene over a response that was *already fetched*.
+
+    Makes no request of its own — every input here comes from a response the caller already has.
+    Each check is deliberately low-FP:
+
+      * missing HSTS on an HTTPS response (a browser may be downgraded to HTTP) — MEDIUM;
+      * a response carrying recognizable private fields that is cacheable, i.e. has no
+        `Cache-Control: no-store` (private data may land in shared/browser caches) — MEDIUM;
+      * a missing `X-Content-Type-Options: nosniff` (the browser may MIME-sniff the body) — LOW.
+
+    Returns one Verdict per gap; the `evidence["rule"]` names which. Order is fixed for determinism.
+    """
+    lowered = {str(k).lower(): str(v).strip() for k, v in (headers or {}).items()}
+    out: list[Verdict] = []
+
+    if is_https and "strict-transport-security" not in lowered:
+        out.append(Verdict(
+            True,
+            "the HTTPS response sets no `Strict-Transport-Security` header, so a browser is not "
+            "told to refuse a later plaintext request to this API",
+            "high", {"rule": "hsts"}, severity="medium"))
+
+    if substantive(body) and _carries_private_data(body):
+        cache = lowered.get("cache-control", "").lower()
+        if "no-store" not in cache:
+            out.append(Verdict(
+                True,
+                "the response returns private fields without `Cache-Control: no-store`, so that "
+                "data may be written to shared proxy or browser caches",
+                "high",
+                {"rule": "cache", "cache_control": cache or "(absent)"}, severity="medium"))
+
+    if lowered.get("x-content-type-options", "").lower() != "nosniff":
+        out.append(Verdict(
+            True,
+            "the response sets no `X-Content-Type-Options: nosniff`, letting a browser MIME-sniff "
+            "the body away from its declared content type",
+            "high", {"rule": "content-type-options"}, severity="low"))
+
+    return out
+
+
 __all__ = [
+    "CORS_PROBE_ORIGIN",
     "Verdict",
     "evaluate_bfla",
     "evaluate_bola",
+    "evaluate_cors",
     "evaluate_exposure",
+    "evaluate_response_hygiene",
     "evaluate_unauthenticated",
     "looks_like_denial",
     "substantive",

@@ -55,15 +55,29 @@ Reusable: **yes** — add as `web_checks` templates or dast-engine checks. **Rec
 
 ## PRODUCT AREA 2 — API Scanner — **FULLY IMPLEMENTED**
 
-**Existing implementation.** `engines/api_engine.py` + `apisec/{spec,checks,scanner}.py`. Grep
-confirms: OpenAPI/Swagger import + schema handling (`spec.py`), BOLA (object-level authz), BFLA
+**Existing implementation.** `engines/api_engine.py` + `apisec/{spec,checks,scanner,discovery}.py`.
+Grep confirms: OpenAPI/Swagger import + schema handling (`spec.py`), BOLA (object-level authz), BFLA
 (function-level authz), excessive-data-exposure, HTTP method review, rate-limit indicators, security
-schemes. Findings flow through the canonical pipeline; active probing is authorization-gated and
-rate-limited.
+schemes, shadow-endpoint + unenforced-auth surface probing (`discovery.py`), and **CORS
+misconfiguration + response transport/header hygiene** (`discovery.py`, see
+`docs/API_CORS_HEADERS.md`). Findings flow through the canonical pipeline; active probing is
+authorization-gated and rate-limited.
 
 **What is missing.** Marginal: JWT `alg`/config deep-analysis and mass-assignment indicators may be
 partial. Reusable: **yes**. **Recommended change:** add checks inside `apisec/checks.py` only if a
 concrete gap is confirmed; otherwise leave intact.
+
+**CORS + header hygiene (added).** For each reachable GET spec endpoint the engine sends one benign
+request carrying a throwaway `Origin` (never a credential) and grades the reflected
+`Access-Control-Allow-Origin`/`-Allow-Credentials`: a reflected arbitrary origin **or** `*` combined
+with credentials is HIGH (credentialed cross-origin read); a reflected origin or `null` without
+credentials is MEDIUM; a plain `*` with no credentials is **not** reported (usually intended).
+Reflection is proven by echoing the probe origin, never inferred from a wildcard. Passively over that
+same already-fetched response it also flags missing HSTS on HTTPS (MEDIUM), a private response with
+no `Cache-Control: no-store` (MEDIUM), and a missing `X-Content-Type-Options: nosniff` (LOW). This is
+scoped to **API spec endpoints**, distinct from Product Area 1's web-checks, which grade CORS/headers
+on a web asset's base origin; there is no double-reporting because the two run on different asset
+kinds.
 
 **Verdict: FULLY IMPLEMENTED.** Do not rebuild.
 
