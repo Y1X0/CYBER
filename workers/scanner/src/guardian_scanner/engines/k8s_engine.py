@@ -28,7 +28,7 @@ from guardian_core.findings import RawFinding
 
 from guardian_scanner.engines.base import EngineHealth, ScanContext
 from guardian_scanner.k8s.model import Document, LoadResult, load
-from guardian_scanner.k8s.rules import Issue, analyse
+from guardian_scanner.k8s.rules import Issue, analyse, namespace_issues
 
 log = get_logger("guardian.k8s")
 
@@ -86,6 +86,11 @@ class K8sEngine:
         for document in documents:
             for issue in analyse(document):
                 yield self._finding(document, issue)
+
+        # Cross-resource pass: a question no single manifest answers (a namespace's pods being
+        # governed by no NetworkPolicy) is decided over the whole document set at once.
+        for representative, issue in namespace_issues(documents):
+            yield self._finding(representative, issue)
 
         if errors or truncated:
             yield self._coverage_finding(documents, errors, templated, truncated, files_read)

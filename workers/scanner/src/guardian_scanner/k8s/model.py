@@ -157,6 +157,30 @@ def pod_spec(body: dict) -> dict | None:
     return None
 
 
+def pod_metadata(body: dict) -> dict:
+    """The pod template's metadata (labels + annotations) for any workload, or a Pod's own.
+
+    Legacy seccomp/AppArmor profiles live in annotations on this metadata, and NetworkPolicy
+    coverage is decided by the labels here — both sit on the *template*, not the workload's own
+    metadata, so a rule that read `body["metadata"]` for a Deployment would look in the wrong place.
+    """
+    if body.get("kind") == "Pod":
+        meta = body.get("metadata")
+        return meta if isinstance(meta, dict) else {}
+    spec = body.get("spec")
+    if not isinstance(spec, dict):
+        return {}
+    template = spec.get("template")
+    if template is None:
+        job_template = spec.get("jobTemplate")
+        if isinstance(job_template, dict):
+            template = (job_template.get("spec") or {}).get("template")
+    if isinstance(template, dict):
+        meta = template.get("metadata")
+        return meta if isinstance(meta, dict) else {}
+    return {}
+
+
 def containers(pod: dict) -> list[tuple[str, dict]]:
     """(section, container) for every container in the pod.
 
@@ -183,8 +207,9 @@ def effective_security(pod: dict, container: dict) -> dict:
     container_level = container.get("securityContext") or {}
     merged = {**(pod_level if isinstance(pod_level, dict) else {}),
               **(container_level if isinstance(container_level, dict) else {})}
-    # `capabilities` and `seccompProfile` are container-scoped only — a pod-level value never
-    # supplies them — so they must not be inherited from the merge above.
+    # `capabilities` is container-scoped only — a pod-level value never supplies it — so it must not
+    # be inherited from the merge above. (`seccompProfile` and `appArmorProfile` DO cascade from the
+    # pod to a container that does not override them, so the plain merge is correct for those.)
     if isinstance(container_level, dict):
         for key in ("capabilities",):
             if key in container_level:
@@ -204,5 +229,6 @@ __all__ = [
     "effective_security",
     "is_template",
     "load",
+    "pod_metadata",
     "pod_spec",
 ]

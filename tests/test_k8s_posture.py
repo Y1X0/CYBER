@@ -25,7 +25,7 @@ from guardian_scanner.k8s.model import (
     load,
     pod_spec,
 )
-from guardian_scanner.k8s.rules import analyse
+from guardian_scanner.k8s.rules import analyse, namespace_issues
 
 
 def _docs(text: str, path: str = "manifest.yaml"):
@@ -164,6 +164,7 @@ spec:
   securityContext:
     runAsNonRoot: true
     runAsUser: 1000
+    seccompProfile: {type: RuntimeDefault}
   containers:
     - name: app
       image: nginx@sha256:abc123
@@ -272,7 +273,14 @@ def test_dangerous_capabilities_are_graded():
 def test_an_unpinned_image_is_reported_and_a_digest_is_not():
     assert "mutable-image" in _rules(SAFE_POD.replace("nginx@sha256:abc123", "nginx:latest"))
     assert "mutable-image" in _rules(SAFE_POD.replace("nginx@sha256:abc123", "nginx"))
+    # A specific version tag is still not a digest — the registry can repoint it — so it is flagged.
+    assert "mutable-image" in _rules(SAFE_POD.replace("nginx@sha256:abc123", "nginx:1.25.3"))
+    assert "mutable-image" in _rules(
+        SAFE_POD.replace("nginx@sha256:abc123", "registry.io:5000/team/app:2.1"))
+    # A digest — with or without a tag alongside it — is pinned and is not reported.
     assert "mutable-image" not in _rules(SAFE_POD)
+    assert "mutable-image" not in _rules(
+        SAFE_POD.replace("nginx@sha256:abc123", "nginx:1.25@sha256:abc123"))
 
 
 def test_a_host_port_is_reported():
@@ -287,6 +295,148 @@ def test_a_host_port_is_reported():
 def test_the_service_account_token_mount_is_reported_when_not_disabled():
     assert "token-automount" in _rules(SAFE_POD.replace(
         "automountServiceAccountToken: false", "automountServiceAccountToken: true"))
+
+
+# ── PSS-restricted hardening (seccomp / AppArmor / drop ALL) ─────────────────────────────────────
+_NO_SECCOMP = SAFE_POD.replace("    seccompProfile: {type: RuntimeDefault}\n", "")
+
+
+def test_seccomp_missing_is_reported():
+    """PSS-restricted requires an explicit RuntimeDefault/Localhost seccomp profile; SAFE_POD sets
+    one at the pod level and is clean, and removing it is a finding."""
+    assert "seccomp-profile" not in _rules(SAFE_POD)
+    assert "seccomp-profile" in _rules(_NO_SECCOMP)
+
+
+def test_seccomp_explicit_unconfined_is_reported():
+    text = SAFE_POD.replace("seccompProfile: {type: RuntimeDefault}",
+                            "seccompProfile: {type: Unconfined}")
+    assert "seccomp-profile" in _rules(text)
+
+
+def test_the_legacy_seccomp_annotation_satisfies_the_rule():
+    """A pre-1.27 manifest set the profile via a pod annotation; honour it rather than false-flag."""
+    text = """
+apiVersion: v1
+kind: Pod
+metadata:
+  name: legacy
+  annotations: {seccomp.security.alpha.kubernetes.io/pod: runtime/default}
+spec:
+  containers:
+    - name: app
+      image: nginx@sha256:abc
+      securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true,
+                        runAsNonRoot: true, capabilities: {drop: [ALL]}}
+      resources: {limits: {cpu: "1", memory: 64Mi}}
+"""
+    assert "seccomp-profile" not in _rules(text)
+
+
+def test_apparmor_unconfined_field_and_annotation_are_reported_but_absence_is_not():
+    # Absence of AppArmor is the default and is NOT flagged (PSS-baseline only forbids unconfined).
+    assert "apparmor-unconfined" not in _rules(SAFE_POD)
+    field = SAFE_POD.replace(
+        "        capabilities: {drop: [ALL]}",
+        "        capabilities: {drop: [ALL]}\n        appArmorProfile: {type: Unconfined}")
+    assert "apparmor-unconfined" in _rules(field)
+    annotated = SAFE_POD.replace(
+        "metadata: {name: hardened}",
+        "metadata:\n  name: hardened\n  annotations:\n"
+        "    container.apparmor.security.beta.kubernetes.io/app: unconfined")
+    assert "apparmor-unconfined" in _rules(annotated)
+
+
+def test_capabilities_not_dropping_all_is_reported():
+    assert "capabilities-drop-all" not in _rules(SAFE_POD)          # drop: [ALL] present
+    no_drop = SAFE_POD.replace("capabilities: {drop: [ALL]}",
+                               "capabilities: {add: [NET_BIND_SERVICE]}")
+    assert "capabilities-drop-all" in _rules(no_drop)
+    no_caps = SAFE_POD.replace("\n        capabilities: {drop: [ALL]}", "")
+    assert "capabilities-drop-all" in _rules(no_caps)
+
+
+def test_a_privileged_container_is_not_also_told_to_drop_capabilities():
+    """Privileged is already a critical finding; piling drop-ALL on top is noise."""
+    text = SAFE_POD.replace("        allowPrivilegeEscalation: false",
+                            "        privileged: true\n        allowPrivilegeEscalation: false")
+    fired = _rules(text)
+    assert "privileged" in fired
+    assert "capabilities-drop-all" not in fired
+
+
+# ── cross-resource: namespaces without a NetworkPolicy ──────────────────────────────────────────
+def _namespace_rules(text: str) -> set[str]:
+    documents = load("manifests.yaml", text).documents
+    return {issue.rule for _doc, issue in namespace_issues(documents)}
+
+
+_NS_WORKLOAD = """
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: api, namespace: prod}
+spec:
+  template:
+    metadata: {labels: {app: api}}
+    spec:
+      containers: [{name: app, image: nginx@sha256:abc}]
+"""
+
+
+def test_a_namespace_with_a_workload_and_no_policy_is_flagged():
+    fired = [(d, i) for d, i in namespace_issues(load("m.yaml", _NS_WORKLOAD).documents)]
+    assert fired and fired[0][1].rule == "netpol-missing"
+    assert "prod" in fired[0][1].title and fired[0][1].subject == "prod"
+
+
+def test_a_default_deny_policy_covers_the_namespace():
+    text = _NS_WORKLOAD + """
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: prod}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+"""
+    assert _namespace_rules(text) == set()
+
+
+def test_a_matchlabels_policy_that_selects_the_workload_covers_it():
+    text = _NS_WORKLOAD + """
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: api-policy, namespace: prod}
+spec:
+  podSelector: {matchLabels: {app: api}}
+  policyTypes: [Ingress]
+"""
+    assert _namespace_rules(text) == set()
+
+
+def test_a_policy_that_selects_other_pods_leaves_the_workload_uncovered():
+    text = _NS_WORKLOAD + """
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: other, namespace: prod}
+spec:
+  podSelector: {matchLabels: {app: worker}}
+  policyTypes: [Ingress]
+"""
+    assert "netpol-missing" in _namespace_rules(text)
+
+
+def test_a_namespace_with_only_policies_and_no_workloads_is_not_flagged():
+    """This is the infra/k8s shape — NetworkPolicy objects, no workloads — and it must stay quiet."""
+    text = """
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: default-deny, namespace: guardian}
+spec: {podSelector: {}, policyTypes: [Ingress, Egress]}
+"""
+    assert _namespace_rules(text) == set()
 
 
 # ── RBAC ──────────────────────────────────────────────────────────────────────────────────────────

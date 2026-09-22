@@ -30,6 +30,7 @@ from guardian_scanner.k8s.model import (
     Document,
     containers,
     effective_security,
+    pod_metadata,
     pod_spec,
 )
 
@@ -37,6 +38,14 @@ DANGEROUS_CAPABILITIES = frozenset({
     "ALL", "SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE", "SYS_MODULE", "SYS_BOOT", "SYS_RAWIO",
     "DAC_READ_SEARCH", "DAC_OVERRIDE", "BPF", "PERFMON", "NET_RAW",
 })
+
+# A seccomp profile that actually confines the container (PSS-restricted requires one of these).
+_SECCOMP_CONFINED = frozenset({"RuntimeDefault", "Localhost"})
+# The deprecated pod annotation (removed in 1.27, still seen in older manifests) that set it.
+_SECCOMP_ANNOTATION = "seccomp.security.alpha.kubernetes.io/pod"
+_SECCOMP_ANNOTATION_OK = ("runtime/default", "docker/default")
+# The legacy per-container AppArmor annotation prefix (pre-1.30; the 1.30+ form is a field).
+_APPARMOR_ANNOTATION_PREFIX = "container.apparmor.security.beta.kubernetes.io/"
 
 # Verbs and resources that amount to control of the cluster.
 _WRITE_VERBS = frozenset({"create", "update", "patch", "delete", "deletecollection", "*"})
@@ -143,8 +152,9 @@ def workload_issues(doc: Document) -> Iterator[Issue]:
             evidence={"path": host_path},
         )
 
+    annotations = pod_metadata(doc.body).get("annotations") or {}
     for section, container in containers(pod):
-        yield from _container_issues(doc, pod, section, container)
+        yield from _container_issues(doc, pod, section, container, annotations)
 
 
 def _is_sensitive_host_path(host_path: str) -> bool:
@@ -173,7 +183,8 @@ def _mounts_token(pod: dict) -> bool:
     return pod.get("automountServiceAccountToken") is not False
 
 
-def _container_issues(doc: Document, pod: dict, section: str, container: dict) -> Iterator[Issue]:
+def _container_issues(doc: Document, pod: dict, section: str, container: dict,
+                      annotations: dict) -> Iterator[Issue]:
     name = container.get("name", "container")
     where = f"{section}:{name}"
     security = effective_security(pod, container)
@@ -228,6 +239,67 @@ def _container_issues(doc: Document, pod: dict, section: str, container: dict) -
             evidence={"capabilities": sorted(dangerous)},
         )
 
+    # PSS-restricted requires an explicit seccomp profile (RuntimeDefault or Localhost). Absence is
+    # a finding under restricted: the container runs unconfined unless the runtime defaults it. A
+    # templated value (`seccompProfile: {{ ... }}`) is not a fact, so it yields nothing.
+    seccomp = security.get("seccompProfile")
+    if not (isinstance(seccomp, str) and PLACEHOLDER in seccomp):
+        seccomp_type = seccomp.get("type") if isinstance(seccomp, dict) else None
+        legacy = str(annotations.get(_SECCOMP_ANNOTATION, "")).strip().lower()
+        legacy_ok = legacy in _SECCOMP_ANNOTATION_OK or legacy.startswith("localhost/")
+        if seccomp_type not in _SECCOMP_CONFINED and not legacy_ok:
+            explicit = seccomp_type == "Unconfined"
+            yield Issue(
+                "seccomp-profile", f"No seccomp confinement: {name}", "medium", "CWE-693",
+                "CIS 5.7.2 / PSS-restricted (Seccomp)",
+                ("The container sets seccompProfile.type: Unconfined, turning off syscall "
+                 "filtering."
+                 if explicit else
+                 "No seccompProfile is set, so the container is not confined to a syscall "
+                 "allow-list unless the runtime happens to default it. PSS-restricted requires one "
+                 "explicitly.")
+                + " Seccomp is the cheapest reduction of a container's kernel attack surface.",
+                "Set securityContext.seccompProfile.type: RuntimeDefault (on the pod to cover "
+                "every container, or on this container).",
+                subject=where,
+            )
+
+    # AppArmor: PSS *baseline* forbids overriding the profile to `unconfined`; it does not require
+    # AppArmor be set. So flag only an explicit unconfined (the 1.30+ field or the legacy per-
+    # container annotation) — flagging mere absence would fire on almost every pod and be wrong.
+    apparmor = security.get("appArmorProfile")
+    field_unconfined = isinstance(apparmor, dict) and apparmor.get("type") == "Unconfined"
+    ann_unconfined = str(annotations.get(_APPARMOR_ANNOTATION_PREFIX + str(name), "")
+                         ).strip().lower() == "unconfined"
+    if field_unconfined or ann_unconfined:
+        yield Issue(
+            "apparmor-unconfined", f"AppArmor set to unconfined: {name}", "medium", "CWE-693",
+            "NSA-CISA hardening / PSS-baseline (AppArmor)",
+            "The container overrides AppArmor to `unconfined`, removing the mandatory-access "
+            "-control profile that constrains what the process can touch on the node. This is the "
+            "one AppArmor setting PSS-baseline disallows.",
+            "Remove the unconfined override so the default (or a specific) AppArmor profile "
+            "applies.",
+            subject=where,
+        )
+
+    # PSS-restricted requires every container to drop ALL capabilities and add back only what it
+    # needs. A privileged container already has a stronger (critical) finding, so don't pile on.
+    if security.get("privileged") is not True:
+        dropped = {str(cap).upper() for cap in
+                   ((security.get("capabilities") or {}).get("drop") or [])}
+        if "ALL" not in dropped:
+            yield Issue(
+                "capabilities-drop-all", f"Capabilities are not fully dropped: {name}", "medium",
+                "CWE-250", "CIS 5.2.8 / PSS-restricted (Capabilities)",
+                "The container does not drop ALL capabilities, so it keeps the runtime's default "
+                "capability set (CHOWN, SETUID, NET_BIND_SERVICE, …) — more kernel privilege than "
+                "a typical workload uses, and more for an attacker to build on.",
+                "Set securityContext.capabilities.drop: [\"ALL\"] and add back only those needed.",
+                subject=where,
+                evidence={"dropped": sorted(dropped)},
+            )
+
     if security.get("readOnlyRootFilesystem") is not True:
         yield Issue(
             "writable-root", f"Root filesystem is writable: {name}", "low", "CWE-732",
@@ -251,17 +323,22 @@ def _container_issues(doc: Document, pod: dict, section: str, container: dict) -
             )
 
     image = str(container.get("image") or "")
-    if image and PLACEHOLDER not in image:
+    if image and PLACEHOLDER not in image and "@sha256:" not in image:
         tag = image.rsplit("/", 1)[-1]
-        if "@sha256:" not in image and (":" not in tag or tag.endswith(":latest")):
-            yield Issue(
-                "mutable-image", f"Image is not pinned: {name}", "low", "CWE-494", "CIS 5.5.1",
-                f"`{image}` resolves to whatever the registry serves at pull time, so what is "
-                "running cannot be determined from the manifest and a rebuild silently changes it.",
-                "Pin the image by digest (image@sha256:…).",
-                subject=where,
-                evidence={"image": image},
-            )
+        floating = ":" not in tag or tag.endswith(":latest")
+        yield Issue(
+            "mutable-image", f"Image is not pinned to a digest: {name}", "low", "CWE-494",
+            "CIS 5.5.1",
+            f"`{image}` is not pinned by digest, so what actually runs is decided at pull time. "
+            + ("With no tag or `:latest`, it resolves to whatever the registry serves right now."
+               if floating else
+               "Even a version tag is mutable — the registry can be made to serve different bytes "
+               "for the same tag — so the manifest does not determine what runs.")
+            + " Supply-chain integrity (PSS/NSA) wants the exact image fixed.",
+            "Pin the image by digest (image@sha256:…); keep the human-readable tag alongside it.",
+            subject=where,
+            evidence={"image": image, "floating": floating},
+        )
 
     if not (container.get("resources") or {}).get("limits"):
         yield Issue(
@@ -518,11 +595,76 @@ def analyse(doc: Document) -> list[Issue]:
     return issues
 
 
+# ── cross-resource: namespaces with no NetworkPolicy (the engine's first aggregate pass) ──────────
+def _policy_selects(labels: dict, spec: dict) -> bool:
+    """Whether a NetworkPolicy's podSelector selects a workload with these template labels.
+
+    An empty (or absent) podSelector selects every pod in the namespace. `matchLabels` selects when
+    the pod carries every one of them. `matchExpressions` is not fully evaluated — treated as a
+    match so the rule never *invents* a coverage gap it cannot prove (fail-safe toward silence).
+    """
+    selector = spec.get("podSelector", {})
+    if selector in (None, {}):
+        return True
+    if not isinstance(selector, dict):
+        return True
+    if selector.get("matchExpressions"):
+        return True
+    match = selector.get("matchLabels") or {}
+    if not match:
+        return True
+    return all(str(labels.get(k)) == str(v) for k, v in match.items())
+
+
+def namespace_issues(documents: list[Document]) -> Iterator[tuple[Document, Issue]]:
+    """A namespace that runs workloads but whose pods are selected by no NetworkPolicy.
+
+    Kubernetes networking is default-allow: with no policy selecting a pod, anything in the cluster
+    may open connections to it and it may reach anything. Zero-trust baselines (NSA-CISA, CIS 5.3.2)
+    want each such namespace to start from a default-deny policy. This is a whole-document-set
+    question — no single manifest carries the answer — so it runs once over everything, not per
+    object. Each finding is anchored to a representative uncovered workload so it has a real file.
+    """
+    workloads: dict[str, list[Document]] = {}
+    policies: dict[str, list[dict]] = {}
+    for doc in documents:
+        namespace = doc.namespace or "default"
+        if doc.kind in WORKLOAD_KINDS and pod_spec(doc.body):
+            workloads.setdefault(namespace, []).append(doc)
+        elif doc.kind == "NetworkPolicy":
+            spec = doc.body.get("spec")
+            policies.setdefault(namespace, []).append(spec if isinstance(spec, dict) else {})
+
+    for namespace, docs in sorted(workloads.items()):
+        specs = policies.get(namespace, [])
+        uncovered = [d for d in docs
+                     if not any(_policy_selects(pod_metadata(d.body).get("labels") or {}, s)
+                                for s in specs)]
+        if not uncovered:
+            continue
+        yield uncovered[0], Issue(
+            "netpol-missing",
+            f"Namespace `{namespace}` has workloads with no NetworkPolicy",
+            "medium", "CWE-668", "CIS 5.3.2 / NSA-CISA network hardening",
+            f"{len(uncovered)} workload(s) in namespace `{namespace}` are selected by no "
+            "NetworkPolicy, so Kubernetes falls back to default-allow: any pod in the cluster can "
+            "reach them and they can reach anything, east-west, with nothing in between. A "
+            "namespace that runs workloads should start from a default-deny policy and open only "
+            "the flows it needs.",
+            "Add a default-deny NetworkPolicy (podSelector: {}, policyTypes: [Ingress, Egress]) to "
+            f"namespace `{namespace}`, then allow required traffic explicitly.",
+            subject=namespace,
+            evidence={"namespace": namespace, "uncovered": [d.label for d in uncovered][:20],
+                      "count": len(uncovered)},
+        )
+
+
 __all__ = [
     "ALL_RULES",
     "DANGEROUS_CAPABILITIES",
     "Issue",
     "analyse",
+    "namespace_issues",
     "network_issues",
     "rbac_issues",
     "secret_issues",

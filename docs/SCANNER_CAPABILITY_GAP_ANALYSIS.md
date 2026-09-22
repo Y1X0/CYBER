@@ -161,9 +161,11 @@ Dockerfile hygiene) + `engines/k8s_engine.py` (manifest review: privileged, host
 capabilities, securityContext, RBAC wildcard/cluster-admin, host mounts, service exposure) +
 `engines/iac_engine.py` (with checkov). The compliance module credits these controls.
 
-**What is missing.** Marginal per-check breadth (e.g., exposed Docker socket as an explicit finding,
-network policies presence). Reusable: **yes**. **Recommended change:** add specific k8s/container
-rules only where a concrete gap is confirmed.
+**What is missing.** Marginal per-check breadth. The PSS-restricted / zero-trust batch has since
+landed (seccomp, AppArmor-unconfined, capabilities `drop: ["ALL"]`, digest-pinning, and the first
+cross-resource rule — `netpol-missing`, a namespace whose workloads are selected by no
+NetworkPolicy); see [docs/K8S_SCANNER.md](K8S_SCANNER.md). Still open: RBAC binding→role reach
+(bindings graded in isolation, not by the verbs the referenced role grants). Reusable: **yes**.
 
 **Verdict: FULLY IMPLEMENTED.** Do not rebuild.
 
