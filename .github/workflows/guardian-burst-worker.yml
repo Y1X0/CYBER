@@ -97,7 +97,7 @@ jobs:
       - name: Pull the verified scanner image
         id: image
         run: |
-          IMAGE="ghcr.io/y1x0/cyber-scanner@sha256:90c4d6768d371ef1c5108df62b0cf9e7c1485266e9f9cccd0e80ee98d8ce9ece"
+          IMAGE="ghcr.io/y1x0/cyber-scanner@sha256:2d871dccf0974c8b8bac76091cedc05217143422d1b3ed55b01c5aa8e7877f6e"
           echo "ref=$IMAGE" >> "$GITHUB_OUTPUT"
           docker pull "$IMAGE"
 
