@@ -25,11 +25,12 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 
 from guardian_common.logging import get_logger
-from guardian_core.enums import EngineKey, Severity
+from guardian_core.enums import CorrelationConfidence, EngineKey, Severity
 from guardian_core.evidence import dependency_evidence
 from guardian_core.findings import RawFinding
 
 from guardian_scanner.engines.base import ScanContext, VulnMatch
+from guardian_scanner.typosquat import nearest_popular
 
 log = get_logger("guardian.engine.sca")
 
@@ -83,7 +84,15 @@ class ScaEngine:
         if ctx.vuln_matcher is not None:
             for name, version, ecosystem, source in self._collect_dependencies(ctx):
                 for vm in ctx.vuln_matcher.match(name=name, version=version, ecosystem=ecosystem):
-                    yield self._finding(name, version, ecosystem, source, vm)
+                    # A MAL- advisory means the package itself is malicious, not merely vulnerable —
+                    # a distinct, CONFIRMED finding. Everything else is the existing vuln-dep path.
+                    if vm.malicious:
+                        yield self._malicious_finding(name, version, ecosystem, source, vm)
+                    else:
+                        yield self._finding(name, version, ecosystem, source, vm)
+        # Typosquat indicators over DIRECT dependencies — orthogonal to vuln matching, needs no
+        # matcher and no network (bundled popular list), and is deterministic.
+        yield from self._typosquat_findings(ctx)
         # osv-scanner needs files on disk; it augments a workspace scan, not an inline one, and it
         # runs regardless of whether a matcher is wired — it carries its own data source.
         if ctx.inline_content is None and ctx.workspace_path:
@@ -159,6 +168,13 @@ class ScaEngine:
         sev = _OSV_SEVERITY.get(str(db.get("severity") or "").upper(), Severity.MEDIUM)
         summary = str(vuln.get("summary")
                       or f"{name}@{version} is affected by {vid}.").strip()[:400]
+        if vid.upper().startswith("MAL-"):
+            # osv-scanner also surfaces malicious-package advisories; route them to the same
+            # CONFIRMED malicious-dependency finding as the KB matcher path.
+            vm = VulnMatch(external_id=vid, summary=summary, malicious=True,
+                           references=[str(r.get("url")) for r in (vuln.get("references") or [])
+                                       if isinstance(r, dict) and r.get("url")])
+            return self._malicious_finding(name, version, ecosystem, source, vm)
         return RawFinding(
             engine=EngineKey.SCA,
             title=f"Vulnerable dependency: {name}@{version} ({vid})"[:300],
@@ -237,6 +253,115 @@ class ScaEngine:
                 package=name, version=version, ecosystem=ecosystem, advisory=vm.external_id
             ),
             references={"refs": vm.references, "advisory": vm.external_id},
+        )
+
+    def _malicious_finding(
+        self, name: str, version: str, ecosystem: str, source: str, vm: VulnMatch
+    ) -> RawFinding:
+        """A dependency whose exact name+version matches an OSV malicious-package (MAL-) advisory.
+
+        This is a lookup, not a heuristic: CONFIRMED. Severity comes from the advisory but is
+        floored at HIGH — a confirmed backdoored dependency is never a low-severity event, and MAL-
+        records rarely carry a CVSS to raise it on their own.
+        """
+        severity = vm.severity if vm.severity.rank >= Severity.HIGH.rank else Severity.HIGH
+        evidence = dependency_evidence(
+            package=name, version=version, ecosystem=ecosystem, advisory=vm.external_id)
+        evidence["detail"].update({
+            "source": "osv-malicious-packages",
+            "confidence_tier": CorrelationConfidence.CONFIRMED.value,
+            "malicious": True,
+        })
+        return RawFinding(
+            engine=EngineKey.SCA,
+            title=f"Malicious dependency: {name}@{version} ({vm.external_id})"[:300],
+            category="malicious-dep",
+            description=(
+                (vm.summary or f"{name}@{version} is listed as a malicious package.")
+                + "\n\nThis exact package/version matches an OSV malicious-package advisory "
+                "(MAL-): the package is backdoored or compromised, not merely vulnerable "
+                "(CONFIRMED). Remove it now, rotate any secret it could have read at install or "
+                "run time, and audit every system where it was installed."
+            ),
+            base_severity=severity,
+            confidence="high",
+            kev=vm.kev,
+            location={"path": source, "package": name, "version": version, "ecosystem": ecosystem,
+                      "rule": "malicious-package"},
+            evidence=evidence,
+            references={"advisory": vm.external_id, "refs": vm.references,
+                        "detector": "osv-malicious-packages"},
+        )
+
+    # ── typosquat indicators (direct dependencies only) ───────────────────────────────────────────
+    def _typosquat_findings(self, ctx: ScanContext) -> Iterator[RawFinding]:
+        """Flag direct dependencies resembling a popular package (POTENTIAL, deterministic).
+
+        Only DIRECT dependencies are checked — a typosquat is something a developer typed, and
+        checking the hundreds of transitive names a real package pulled in would be noise. Emitted
+        in a stable (name, ecosystem) order so the same manifest yields the same findings.
+        """
+        seen: dict[tuple[str, str], tuple[str, str, str, str]] = {}
+        for name, version, ecosystem, source in self._direct_dependencies(ctx):
+            if name:
+                seen.setdefault((name, ecosystem), (name, version, ecosystem, source))
+        for _key, (name, version, ecosystem, source) in sorted(seen.items()):
+            match = nearest_popular(name, ecosystem)
+            if match is not None:
+                yield self._typosquat_finding(name, version, ecosystem, source, match)
+
+    def _direct_dependencies(self, ctx: ScanContext) -> Iterator[tuple[str, str, str, str]]:
+        """Direct (manifest-declared) dependencies only: requirements*.txt and package.json.
+
+        Deliberately not lockfiles — those carry transitive names nobody typed, where a typosquat
+        check would mostly false-positive.
+        """
+        if ctx.inline_content is not None:
+            yield from self._parse_requirements(ctx.inline_content, "<inline>")
+            return
+        if not ctx.workspace_path:
+            return
+        root = Path(ctx.workspace_path)
+        for path in root.rglob("*"):
+            if not path.is_file() or any(p in _SKIP_DIRS for p in path.parts):
+                continue
+            rel = str(path.relative_to(root))
+            try:
+                if path.name == "package.json":
+                    yield from self._parse_package_json(path.read_text("utf-8", "ignore"), rel)
+                elif path.name == "requirements.txt" or path.name.startswith("requirements"):
+                    yield from self._parse_requirements(path.read_text("utf-8", "ignore"), rel)
+            except OSError:
+                continue
+
+    def _typosquat_finding(self, name: str, version: str, ecosystem: str, source: str,
+                           match) -> RawFinding:  # noqa: ANN001 - TyposquatMatch, avoids import cycle risk
+        evidence = dependency_evidence(
+            package=name, version=version, ecosystem=ecosystem, advisory="typosquat-indicator")
+        evidence["detail"].update({
+            "resembles": match.popular,
+            "edit_distance": match.distance,
+            "popular_list_version": match.list_version,
+            "confidence_tier": CorrelationConfidence.POTENTIAL.value,
+        })
+        return RawFinding(
+            engine=EngineKey.SCA,
+            title=f"Possible typosquat: {name} resembles {match.popular} ({ecosystem})"[:300],
+            category="typosquat-dep",
+            description=(
+                f"The direct dependency `{name}` is within edit distance {match.distance} of the "
+                f"popular {ecosystem} package `{match.popular}`. This is a POTENTIAL indicator, "
+                "NOT a confirmed malicious package: a name resembling a popular one is how "
+                f"typosquat attacks are delivered. Verify intent — if `{match.popular}` was meant, "
+                f"the name is wrong; if `{name}` is a package you chose deliberately, dismiss this."
+            ),
+            base_severity=Severity.MEDIUM,
+            confidence="low",
+            location={"path": source, "package": name, "version": version, "ecosystem": ecosystem,
+                      "rule": "typosquat"},
+            evidence=evidence,
+            references={"resembles": match.popular, "detector": "typosquat",
+                        "popular_list_version": match.list_version},
         )
 
 

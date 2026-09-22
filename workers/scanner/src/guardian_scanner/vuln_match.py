@@ -32,6 +32,18 @@ def _severity_from_cvss(cvss: float | None) -> Severity:
     return Severity.LOW
 
 
+def _is_malicious(external_id: str | None) -> bool:
+    """An OSV malicious-package advisory is published under a ``MAL-`` id.
+
+    That is the deterministic, source-defined signal that a package is backdoored/compromised rather
+    than merely carrying a vulnerability — it is not a heuristic. The advisories arrive through the
+    same OSV feed as every other record (``sync_osv`` pulls each ecosystem's whole corpus and
+    ``parse_osv_record`` keeps the ``MAL-`` id when there is no CVE alias), so nothing new is
+    ingested; this only labels the match.
+    """
+    return bool(external_id) and external_id.upper().startswith("MAL-")
+
+
 def _version_affected(entry: dict, version: str) -> bool:
     """Delegate to the ecosystem-aware evaluator.
 
@@ -80,6 +92,7 @@ class KbVulnMatcher:
                     ransomware=bool(vuln.ransomware),
                     cwe_ids=list(vuln.cwe_ids or []),
                     references=list(vuln.references or []),
+                    malicious=_is_malicious(vuln.external_id),
                 )
             )
         return out
@@ -131,6 +144,7 @@ class OsvVulnMatcher:
                     kev=nv.kev,
                     cwe_ids=list(nv.cwe_ids or []),
                     references=list(nv.references or []),
+                    malicious=_is_malicious(nv.external_id),
                 )
             )
         return out
@@ -186,4 +200,5 @@ def _merge(a: VulnMatch, b: VulnMatch) -> VulnMatch:
         ransomware=a.ransomware or b.ransomware,
         cwe_ids=sorted(set(a.cwe_ids) | set(b.cwe_ids)),
         references=list(dict.fromkeys([*a.references, *b.references])),
+        malicious=a.malicious or b.malicious,
     )

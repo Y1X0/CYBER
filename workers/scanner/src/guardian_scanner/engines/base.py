@@ -18,12 +18,16 @@ from guardian_core.findings import RawFinding
 class VulnMatch:
     """A KB/feed vulnerability matched to a dependency (consumed by the SCA engine)."""
 
-    external_id: str  # CVE / GHSA id
+    external_id: str  # CVE / GHSA / OSV id (a MAL- id when the advisory is a malicious-package one)
     summary: str = ""
     severity: Severity = Severity.MEDIUM
     cvss_base: float | None = None
     epss_score: float | None = None
     kev: bool = False
+    # True when the advisory is an OSV malicious-package advisory (a MAL- id): the package itself is
+    # backdoored/compromised, not merely vulnerable. Carried so the SCA engine can report it as a
+    # distinct, CONFIRMED malicious-dependency finding rather than an ordinary vulnerable one.
+    malicious: bool = False
     # Exploit intelligence (WP-C4): how available working exploit code is, and whether ransomware
     # campaigns use it. Carried on the match so a finding is scored with what was known at the time.
     exploit_maturity: str | None = None

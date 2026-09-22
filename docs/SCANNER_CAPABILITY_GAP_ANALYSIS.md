@@ -179,8 +179,12 @@ NetworkPolicy); see [docs/K8S_SCANNER.md](K8S_SCANNER.md). Still open: RBAC bind
 `ai_discovery` (LLM-found leads, verified + labelled ai_assisted) and `cicd`/`iac`/`ml_model`.
 
 **What is missing.** First-class **SBOM generation** as an output is thin (syft is fetched but not a
-product feature); code-to-dependency correlation could be richer. Reusable: **yes**. **Recommended
-change:** optional SBOM output later; not required for scanner-portfolio completeness.
+product feature); code-to-dependency correlation could be richer. **Supply-chain signals beyond
+known-CVE have since landed**: malicious-package (`MAL-`) findings routed through the existing OSV
+feed seam as CONFIRMED, and typosquat indicators over direct dependencies as POTENTIAL (bundled,
+versioned popular lists; no registry calls at scan time) — see
+[docs/SCA_SUPPLY_CHAIN.md](SCA_SUPPLY_CHAIN.md). Still open: reachability, and more ecosystems for the
+typosquat list. Reusable: **yes**.
 
 **Verdict: FULLY IMPLEMENTED.** Do not rebuild.
 
