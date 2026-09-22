@@ -41,6 +41,9 @@ _SECRET_ENV = re.compile(r"(?i)\b(ENV|ARG)\s+\w*(password|secret|token|api[_-]?k
 _CURL_PIPE = re.compile(r"(?i)(curl|wget)\s+[^\n|]*\|\s*(sh|bash)")
 _IMAGE_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".oci")
 _MAX_PACKAGE_FILES = 5_000
+# Reading executables to look for Go build info is bounded independently: most executables are not
+# Go binaries, and probing an unbounded number of them would read the whole image into memory.
+_MAX_BINARY_PROBES = 512
 
 
 class ContainerEngine:
@@ -138,6 +141,7 @@ class ContainerEngine:
         inventory: list[tuple[str, str, str, str]] = []
         paths: list[str] = []
         read = 0
+        probes = 0
         for entry, reader in archive.walk():
             if entry.whiteout_of or not entry.is_file:
                 continue
@@ -159,6 +163,32 @@ class ContainerEngine:
                 data = reader()
                 parsed = (pkg.parse_node_package_json(data.decode("utf-8", "replace"), entry.path)
                           if data else None)
+            elif pkg.is_npm_lockfile(entry.path):
+                data = reader()
+                if data:
+                    text = data.decode("utf-8", "replace")
+                    parsed = (pkg.parse_yarn_lock(text, entry.path)
+                              if entry.path.endswith("yarn.lock")
+                              else pkg.parse_package_lock(text, entry.path))
+            elif pkg.is_gemfile_lock(entry.path):
+                data = reader()
+                parsed = (pkg.parse_gemfile_lock(data.decode("utf-8", "replace"), entry.path)
+                          if data else None)
+            elif pkg.is_gemspec(entry.path):
+                data = reader()
+                parsed = (pkg.parse_gemspec(data.decode("utf-8", "replace"), entry.path)
+                          if data else None)
+            elif pkg.is_jar(entry.path):
+                data = reader()
+                parsed = pkg.parse_jar(data, entry.path) if data else None
+            elif (entry.mode & 0o111) and probes < _MAX_BINARY_PROBES:
+                # A candidate executable: read it and look for embedded Go module info. This is the
+                # only path that reads a file we cannot identify by name, so it is probe-capped.
+                data = reader()
+                if data and pkg.looks_like_binary(data):
+                    probes += 1
+                    go = list(pkg.parse_go_buildinfo(data, entry.path))
+                    parsed = iter(go) if go else None
             if parsed is not None:
                 read += 1
                 inventory.extend(parsed)

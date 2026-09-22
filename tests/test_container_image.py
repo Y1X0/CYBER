@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 import json
 import tarfile
+import zipfile
 
 import pytest
 from guardian_core.enums import Severity
@@ -27,8 +28,14 @@ from guardian_scanner.images.oci import ImageConfig
 from guardian_scanner.images.packages import (
     parse_apk_installed,
     parse_dpkg_status,
+    parse_gemfile_lock,
+    parse_gemspec,
+    parse_go_buildinfo,
+    parse_jar,
     parse_node_package_json,
+    parse_package_lock,
     parse_python_metadata,
+    parse_yarn_lock,
 )
 
 PRIVATE_KEY = (
@@ -403,3 +410,157 @@ def test_a_well_built_image_produces_nothing(tmp_path):
         repo_tags=("registry.example.com/app:1.4.2",),
     )
     assert _findings(image) == []
+
+
+# ── language-ecosystem package parsers (Go / Java / Ruby / npm) ───────────────────────────────────
+# The Go linker frames the `go version -m` module block between these two 16-byte sentinels.
+_GO_START = bytes.fromhex("3077af0c9274080241e1c107e6d618e6")
+_GO_END = bytes.fromhex("f932433186182072008242104116d8f2")
+
+
+def _go_binary(modinfo: str) -> bytes:
+    """A minimal fixture that looks like an ELF and carries a Go module-info block."""
+    return b"\x7fELF" + b"\x00" * 24 + _GO_START + modinfo.encode() + _GO_END + b"\x00" * 8
+
+
+def _jar_bytes(entries: dict[str, str | bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        for name, content in entries.items():
+            zf.writestr(name, content)
+    return buffer.getvalue()
+
+
+def _exec_layer(files: dict[str, str | bytes], exec_paths: set[str]) -> bytes:
+    """A layer where the named paths carry the executable bit (needed for the Go-binary probe)."""
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        for name, content in files.items():
+            payload = content.encode() if isinstance(content, str) else content
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            info.mode = 0o755 if name in exec_paths else 0o644
+            tar.addfile(info, io.BytesIO(payload))
+    return buffer.getvalue()
+
+
+# ── parser unit tests (real sample files) ─────────────────────────────────────────────────────────
+def test_go_buildinfo_parser_extracts_modules_and_resolves_replace():
+    modinfo = ("path\texample.com/app\n"
+               "mod\texample.com/app\t(devel)\t\n"
+               "dep\tgithub.com/gin-gonic/gin\tv1.6.0\th1:a\n"
+               "dep\tgolang.org/x/text\tv0.3.7\th1:b\n"
+               "=>\tgolang.org/x/text\tv0.3.8\th1:c\n")
+    out = list(parse_go_buildinfo(_go_binary(modinfo), "usr/bin/app"))
+    assert out == [
+        ("github.com/gin-gonic/gin", "v1.6.0", "Go", "usr/bin/app"),
+        ("golang.org/x/text", "v0.3.8", "Go", "usr/bin/app"),   # the replacement, not v0.3.7
+    ]
+
+
+def test_jar_parser_reads_pom_properties_and_manifest_fallback():
+    pom = _jar_bytes({"META-INF/maven/org.apache.commons/commons-lang3/pom.properties":
+                      "groupId=org.apache.commons\nartifactId=commons-lang3\nversion=3.12.0\n"})
+    assert list(parse_jar(pom, "lib.jar")) == [
+        ("org.apache.commons:commons-lang3", "3.12.0", "Maven", "lib.jar")]
+    manifest = _jar_bytes({"META-INF/MANIFEST.MF":
+                           "Implementation-Title: myapp\nImplementation-Version: 2.1\n"})
+    assert list(parse_jar(manifest, "app.jar")) == [("myapp", "2.1", "Maven", "app.jar")]
+
+
+def test_nested_jar_depth_is_bounded():
+    """A jar inside a jar inside a jar: the innermost coordinate must NOT be reached (depth cap 2)."""
+    lvl3 = _jar_bytes({"META-INF/maven/g/deep/pom.properties":
+                       "groupId=g\nartifactId=deep\nversion=9.9\n"})
+    lvl2 = _jar_bytes({"META-INF/maven/g/mid/pom.properties":
+                       "groupId=g\nartifactId=mid\nversion=2.0\n", "inner/lvl3.jar": lvl3})
+    lvl1 = _jar_bytes({"META-INF/maven/g/top/pom.properties":
+                       "groupId=g\nartifactId=top\nversion=1.0\n", "lib/lvl2.jar": lvl2})
+    names = {n for (n, _v, _e, _s) in parse_jar(lvl1, "app.war")}
+    assert "g:top" in names and "g:mid" in names   # depth 0 and 1
+    assert "g:deep" not in names                    # depth 2 is not descended into
+
+
+def test_ruby_and_npm_lockfile_parsers():
+    gemlock = "GEM\n  specs:\n    rails (7.0.4)\n    rack (2.2.3)\n\nPLATFORMS\n  ruby\n"
+    assert set(parse_gemfile_lock(gemlock, "Gemfile.lock")) == {
+        ("rails", "7.0.4", "RubyGems", "Gemfile.lock"),
+        ("rack", "2.2.3", "RubyGems", "Gemfile.lock")}
+    gemspec = 'Gem::Specification.new do |s|\n  s.name = "mygem"\n  s.version = "1.4.2"\nend\n'
+    assert list(parse_gemspec(gemspec, "mygem.gemspec")) == [
+        ("mygem", "1.4.2", "RubyGems", "mygem.gemspec")]
+    plock = ('{"lockfileVersion":3,"packages":{"":{"name":"root"},'
+             '"node_modules/lodash":{"name":"lodash","version":"4.17.19"}}}')
+    assert list(parse_package_lock(plock, "package-lock.json")) == [
+        ("lodash", "4.17.19", "npm", "package-lock.json")]
+    yarn = '"lodash@^4.0.0":\n  version "4.17.21"\n'
+    assert list(parse_yarn_lock(yarn, "yarn.lock")) == [("lodash", "4.17.21", "npm", "yarn.lock")]
+
+
+def test_malformed_language_files_are_skipped_without_crashing():
+    assert list(parse_jar(b"PK\x03\x04 truncated not a real zip", "bad.jar")) == []
+    assert list(parse_package_lock("{ not json", "package-lock.json")) == []
+    assert list(parse_go_buildinfo(b"\x7fELF" + b"\x00" * 64, "b")) == []   # no sentinel
+    assert list(parse_gemspec("puts 'no name here'", "x.gemspec")) == []
+
+
+# ── end-to-end: through the shared matcher, over a real image ─────────────────────────────────────
+def test_go_java_ruby_npm_reach_the_shared_matcher(tmp_path):
+    modinfo = "dep\tgithub.com/dgrijalva/jwt-go\tv3.2.0+incompatible\th1:x\n"
+    jar = _jar_bytes({"META-INF/maven/com.fasterxml.jackson.core/jackson-databind/pom.properties":
+                      "groupId=com.fasterxml.jackson.core\nartifactId=jackson-databind\n"
+                      "version=2.9.8\n"})
+    layer = _exec_layer(
+        {
+            "usr/bin/server": _go_binary(modinfo),
+            "opt/app/lib/jackson-databind.jar": jar,
+            "app/Gemfile.lock": "GEM\n  specs:\n    nokogiri (1.10.4)\n",
+            "app/package-lock.json": ('{"lockfileVersion":3,"packages":'
+                                      '{"node_modules/minimist":{"name":"minimist","version":"1.2.0"}}}'),
+        },
+        exec_paths={"usr/bin/server"},
+    )
+    image = build_image(tmp_path, [layer])
+    matcher = _Matcher({
+        ("github.com/dgrijalva/jwt-go", "v3.2.0+incompatible"): [
+            VulnMatch(external_id="CVE-2020-26160", severity=Severity.HIGH, cvss_base=7.7)],
+        ("com.fasterxml.jackson.core:jackson-databind", "2.9.8"): [
+            VulnMatch(external_id="CVE-2019-12384", severity=Severity.HIGH)],
+        ("nokogiri", "1.10.4"): [VulnMatch(external_id="CVE-2019-5477", severity=Severity.CRITICAL)],
+        ("minimist", "1.2.0"): [VulnMatch(external_id="CVE-2020-7598", severity=Severity.MEDIUM)],
+    })
+    findings = _findings(image, matcher)
+
+    seen = set(matcher.seen)
+    assert ("github.com/dgrijalva/jwt-go", "v3.2.0+incompatible", "Go") in seen
+    assert ("com.fasterxml.jackson.core:jackson-databind", "2.9.8", "Maven") in seen
+    assert ("nokogiri", "1.10.4", "RubyGems") in seen
+    assert ("minimist", "1.2.0", "npm") in seen
+    cves = {f.cve_ids[0] for f in findings if f.location.get("rule") == "image-vulnerable-package"}
+    assert cves == {"CVE-2020-26160", "CVE-2019-12384", "CVE-2019-5477", "CVE-2020-7598"}
+
+
+def test_the_language_inventory_is_deterministic(tmp_path):
+    jar = _jar_bytes({"META-INF/maven/g/a/pom.properties": "groupId=g\nartifactId=a\nversion=1.0\n"})
+    image = build_image(tmp_path, [_exec_layer(
+        {"opt/a.jar": jar, "app/package-lock.json":
+         '{"packages":{"node_modules/x":{"name":"x","version":"1.0.0"}}}'},
+        exec_paths=set())])
+    first = ContainerEngine().collect_inventory(
+        ScanContext(scan_id="t", asset_kind="container_image", asset_identifier="f",
+                    workspace_path=image))
+    second = ContainerEngine().collect_inventory(
+        ScanContext(scan_id="t", asset_kind="container_image", asset_identifier="f",
+                    workspace_path=image))
+    assert first == second
+    assert ("g:a", "1.0", "Maven", "opt/a.jar") in first
+
+
+def test_a_non_go_executable_does_not_produce_go_packages(tmp_path):
+    """An executable that is not a Go module binary must contribute nothing (no false inventory)."""
+    image = build_image(tmp_path, [_exec_layer(
+        {"usr/bin/busybox": b"\x7fELF" + b"\x00" * 200}, exec_paths={"usr/bin/busybox"})])
+    inv = ContainerEngine().collect_inventory(
+        ScanContext(scan_id="t", asset_kind="container_image", asset_identifier="f",
+                    workspace_path=image))
+    assert [c for c in inv if c[2] == "Go"] == []

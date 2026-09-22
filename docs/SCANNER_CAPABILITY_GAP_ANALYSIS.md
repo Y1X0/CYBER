@@ -156,7 +156,10 @@ specific rules only when a concrete high-value check is confirmed missing.
 
 ## PRODUCT AREA 7 — Docker / Kubernetes / Container — **FULLY IMPLEMENTED**
 
-**Existing implementation.** `engines/container_engine.py` (image layers, dpkg/apk package CVEs,
+**Existing implementation.** `engines/container_engine.py` (image layers, dpkg/apk **plus
+language-package** CVEs — Python, npm incl. lockfiles, Java JAR/WAR via pom.properties/MANIFEST.MF,
+Ruby Gemfile.lock/gemspec, and Go modules from compiled binaries, all through the shared
+`VulnMatcher`; RPM stays a stated gap, not parsed — see [docs/CONTAINER_PACKAGES.md](CONTAINER_PACKAGES.md);
 Dockerfile hygiene) + `engines/k8s_engine.py` (manifest review: privileged, hostNetwork/PID/IPC,
 capabilities, securityContext, RBAC wildcard/cluster-admin, host mounts, service exposure) +
 `engines/iac_engine.py` (with checkov). The compliance module credits these controls.
