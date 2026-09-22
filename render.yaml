@@ -40,7 +40,7 @@ services:
     region: frankfurt
     # Pilot deploys from this feature branch. Cutover to `main` after the branch is merged — see
     # docs/deployment/11-branch-cutover.md (set this to `main` and repoint the image pipeline).
-    branch: claude/security-guardian-architecture-p1315d
+    branch: main
     buildCommand: bash infra/render/build.sh
     startCommand: bash infra/render/start.sh
     healthCheckPath: /health
@@ -182,7 +182,7 @@ services:
     name: guardian-console
     runtime: static
     plan: free
-    branch: claude/security-guardian-architecture-p1315d  # cutover to main — docs/deployment/11-branch-cutover.md
+    branch: main  # deploys from main after cutover — docs/deployment/11-branch-cutover.md
     buildCommand: cd apps/web && npm ci && npm run build
     staticPublishPath: apps/web/dist
     pullRequestPreviewsEnabled: false
