@@ -34,12 +34,12 @@ jobs:
 
       - name: Pull the verified scanner image (pinned by digest)
         env:
-          IMAGE: ghcr.io/y1x0/cyber-scanner@sha256:909ed5de3d9034e128fd714753b5a3ceba4d582f91dd4b02524e09b4b0ffaa47
+          IMAGE: ghcr.io/y1x0/cyber-scanner@sha256:f3e4f617d18e6d5b8da3a757a3368beb6bc6c6a480a59d99e694cd426cbacd86
         run: docker pull "$IMAGE"
 
       - name: Run the DAST engine directly and print findings
         env:
-          IMAGE: ghcr.io/y1x0/cyber-scanner@sha256:909ed5de3d9034e128fd714753b5a3ceba4d582f91dd4b02524e09b4b0ffaa47
+          IMAGE: ghcr.io/y1x0/cyber-scanner@sha256:f3e4f617d18e6d5b8da3a757a3368beb6bc6c6a480a59d99e694cd426cbacd86
           TARGET: ${{ inputs.target }}
         run: |
           set -euo pipefail
