@@ -21,6 +21,7 @@ _RES_STRING_POOL = 0x0001
 _RES_XML_TYPE = 0x0003
 _XML_START_ELEMENT = 0x0102
 _XML_END_ELEMENT = 0x0103
+_XML_CDATA = 0x0104
 _UTF8_FLAG = 1 << 8
 
 # Attribute typed-value data types (subset we care about).
@@ -43,6 +44,9 @@ class Element:
     tag: str
     attrs: dict[str, object] = field(default_factory=dict)
     children: list[Element] = field(default_factory=list)
+    # Concatenated CDATA/text of the element. Empty for most manifest nodes; populated for leaves
+    # like a network-security-config `<domain>` whose hostname is text, not an attribute.
+    text: str = ""
 
 
 def _u16(b: bytes, o: int) -> int:
@@ -150,6 +154,10 @@ def parse_axml(data: bytes) -> Element:
         elif ctype == _XML_END_ELEMENT:
             if len(stack) > 1:
                 stack.pop()
+        elif ctype == _XML_CDATA and len(stack) > 1 and off + 20 <= total:
+            # CDATA node: after the 8-byte header come lineNumber(u32) + comment(u32), then the
+            # text's string-pool index (u32). Attach it to the currently open element.
+            stack[-1].text += _s(pool, _u32(data, off + 16))
         off += csize
     return root
 

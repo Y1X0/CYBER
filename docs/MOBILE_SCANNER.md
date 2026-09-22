@@ -15,17 +15,28 @@ engine → evidence → AI analyst → report → audit). No new finding model, 
 |---|---|---|
 | Build config | debuggable release (CWE-489), backup allowed (CWE-530) | `AndroidManifest.xml` |
 | Network | `usesCleartextTraffic`, default cleartext on low targetSdk, cleartext HTTP URLs in code/resources (CWE-319) | manifest + string scan |
+| **Network security config** | the referenced `res/xml` NSC is **parsed**: base-config or per-domain `cleartextTrafficPermitted="true"` (CWE-319), user-installed CA trust anchors base/per-domain (CWE-295), `debug-overrides` trust anchors (CWE-295) | manifest ref → NSC XML |
 | Exposure | exported activities/services/receivers without a permission guard; exported content providers (CWE-926); implicit export via intent-filter | manifest |
-| Permissions | high-risk (SYSTEM_ALERT_WINDOW, REQUEST_INSTALL_PACKAGES, accessibility, …) and dangerous permission inventory (CWE-250) | manifest |
+| **Deep links** | exported BROWSABLE http/https deep link without `android:autoVerify` — hijackable App Link (CWE-926); custom-scheme or host-less (scheme-only) deep link any app can claim (CWE-939) | manifest intent-filters |
+| Permissions | **each individually-significant permission is graded on its own** — e.g. accessibility service (HIGH, CWE-250), `REQUEST_INSTALL_PACKAGES` / `MANAGE_EXTERNAL_STORAGE` / `WRITE_SETTINGS` (CWE-250), `SYSTEM_ALERT_WINDOW` overlay (CWE-1021), `READ_SMS`/`RECEIVE_SMS` OTP capture and `ACCESS_BACKGROUND_LOCATION` (CWE-359), `QUERY_ALL_PACKAGES` (CWE-200); remaining dangerous permissions stay a LOW inventory | manifest |
 | Secrets | hardcoded AWS/GCP/GitHub/Slack/Stripe keys, private keys, JWTs, generic secrets — **reuses the platform's existing secret patterns and redaction**, never a second secrets engine (CWE-798) | DEX/resource string scan |
 | WebView | JS bridge (`addJavascriptInterface`), file-URL access, contents debugging (CWE-749/200/489) | DEX string indicators |
 | TLS trust | all-hostname-verifier / trust-all X509TrustManager (CWE-295) | DEX string indicators |
 | Crypto | AES/ECB, DES/3DES (CWE-327) | DEX string indicators |
 
 The **AXML decoder** (`guardian_scanner/mobile/axml.py`) is a dependency-free reader for Android's
-binary XML manifest — required because a real APK never ships a text manifest. A plaintext manifest
-(used by some tooling and by tests) is also accepted. Code-level items are labelled **indicators**:
-the symbol is present in the package; a reviewer confirms the call site.
+binary XML manifest and `res/xml` resources (e.g. the network-security-config) — required because a
+real APK never ships text XML; it also captures element text so NSC `<domain>` hostnames can be
+named. A plaintext XML file (used by some tooling and by tests) is also accepted. Code-level items
+are labelled **indicators**: the symbol is present in the package; a reviewer confirms the call site.
+
+> **NSC parsing closes a false-negative.** The `networkSecurityConfig` attribute used to be read only
+> as a boolean that *suppressed* the default-cleartext finding — so an NSC that re-enables cleartext
+> or trusts user CAs made the engine report clean. The config is now parsed and those settings are
+> flagged. Because the manifest points at the file by a `resources.arsc` id (not resolved here), the
+> engine locates the NSC by structure — a `res/xml*/*.xml` whose root is `<network-security-config>`
+> — and analyses it only when the manifest actually declares one, so an unreferenced file is never
+> flagged. A regression test (`test_nsc_false_negative_is_now_caught_regression`) pins this.
 
 ## iOS `.ipa` (the `ios` engine)
 
@@ -97,4 +108,6 @@ finding rather than falsely reporting "no secrets".
   code-level items are high-signal *string indicators*, deliberately labelled as such rather than
   presented as confirmed call-site findings.
 - `resources.arsc` reference resolution is not performed; a `@ref` attribute is detected as present
-  (enough for "a network security config is declared") but not resolved to its value.
+  but its id is not resolved to a value. The one exception handled structurally is the
+  **network-security-config**: rather than resolve the id, the engine finds the `res/xml` file whose
+  root is `<network-security-config>` and parses it (see the NSC note above).

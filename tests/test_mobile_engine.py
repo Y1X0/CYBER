@@ -165,10 +165,24 @@ def test_exported_activity_without_permission_is_flagged(tmp_path):
     assert f.base_severity == Severity.MEDIUM
 
 
-def test_high_risk_and_dangerous_permissions_are_reported(tmp_path):
+def test_sensitive_permissions_are_graded_individually(tmp_path):
+    # _BAD_MANIFEST requests SYSTEM_ALERT_WINDOW (overlay) and READ_SMS (OTP capture): both are now
+    # graded as their own findings instead of lumped, with specific severity + CWE.
     findings = _run(tmp_path, _BAD_MANIFEST)
-    assert any("High-risk permissions" in f.title for f in findings)
-    assert any("Dangerous permissions" in f.title for f in findings)
+    overlay = next(f for f in findings if f.title == "Sensitive permission: SYSTEM_ALERT_WINDOW")
+    assert overlay.base_severity == Severity.MEDIUM and overlay.cwe_id == "CWE-1021"
+    sms = next(f for f in findings if f.title == "Sensitive permission: READ_SMS")
+    assert sms.base_severity == Severity.MEDIUM and sms.cwe_id == "CWE-359"
+    # Graded permissions are no longer double-reported in the lumps.
+    assert not any("High-risk permissions" in f.title for f in findings)
+
+
+def test_ungraded_dangerous_permission_stays_a_low_inventory(tmp_path):
+    manifest = f"""<manifest {_NS} package="com.p">
+      <uses-permission android:name="android.permission.CAMERA"/>
+      <application android:name=".A" android:allowBackup="false"/></manifest>"""
+    f = next(x for x in _run(tmp_path, manifest) if "Dangerous permissions" in x.title)
+    assert f.base_severity == Severity.LOW and "CAMERA" in str(f.evidence)
 
 
 def test_default_cleartext_on_low_target_sdk(tmp_path):
@@ -244,3 +258,173 @@ def test_collect_inventory_is_empty_without_an_apk(tmp_path):
     ctx = ScanContext(scan_id="t", asset_kind="mobile_app", asset_identifier="x",
                       workspace_path=str(tmp_path))
     assert MobileEngine().collect_inventory(ctx) == []
+
+
+# ── AXML text capture (needed to name NSC <domain> hosts) ───────────────────────────────────────
+
+def _encode_axml_text(tag: str, text: str) -> bytes:
+    """Minimal AXML encoder for one element carrying CDATA text (exercises the real CDATA path)."""
+    pool_strings = [tag, text]
+    idx = {s: i for i, s in enumerate(pool_strings)}
+    data = b""
+    offsets = []
+    for s in pool_strings:
+        offsets.append(len(data))
+        b = s.encode("utf-8")
+        data += bytes([len(s) & 0x7F, len(b) & 0x7F]) + b + b"\x00"
+    while len(data) % 4:
+        data += b"\x00"
+    strings_start = 28 + 4 * len(pool_strings)
+    pool_size = strings_start + len(data)
+    pool = struct.pack("<HHIIIIII", 0x0001, 28, pool_size, len(pool_strings), 0, 0x100,
+                       strings_start, 0)
+    pool += b"".join(struct.pack("<I", o) for o in offsets) + data
+    start = struct.pack("<HHIIIIIHHHHHH", 0x0102, 16, 36, 1, 0xFFFFFFFF, 0xFFFFFFFF, idx[tag],
+                        20, 20, 0, 0, 0, 0)
+    cdata = struct.pack("<HHIIIIHBBI", 0x0104, 16, 28, 1, 0xFFFFFFFF, idx[text], 8, 0, 0x03,
+                        idx[text])
+    end = struct.pack("<HHIIIII", 0x0103, 16, 24, 1, 0xFFFFFFFF, 0xFFFFFFFF, idx[tag])
+    body = pool + start + cdata + end
+    return struct.pack("<HHI", 0x0003, 8, 8 + len(body)) + body
+
+
+def test_axml_decoder_captures_element_text():
+    root = parse_axml(_encode_axml_text("domain", "evil.example"))
+    assert root.children[0].tag == "domain"
+    assert root.children[0].text == "evil.example"
+
+
+# ── network-security-config parsing (Batch #1) ──────────────────────────────────────────────────
+
+# Declares an NSC AND targets SDK < 28: under the OLD code has_nsc suppressed the default-cleartext
+# finding, so a permissive NSC left the app reported clean on network posture.
+_NSC_MANIFEST = f"""<manifest {_NS} package="com.nsc.app">
+  <uses-sdk android:targetSdkVersion="22"/>
+  <application android:allowBackup="false"
+               android:networkSecurityConfig="@xml/network_security_config"/>
+</manifest>"""
+
+_NSC_BASE_CLEARTEXT = b"""<network-security-config>
+  <base-config cleartextTrafficPermitted="true"/>
+</network-security-config>"""
+
+_NSC_USER_CA = b"""<network-security-config>
+  <base-config cleartextTrafficPermitted="false">
+    <trust-anchors><certificates src="system"/><certificates src="user"/></trust-anchors>
+  </base-config>
+</network-security-config>"""
+
+_NSC_DOMAIN_CLEARTEXT = b"""<network-security-config>
+  <base-config cleartextTrafficPermitted="false"/>
+  <domain-config cleartextTrafficPermitted="true">
+    <domain includeSubdomains="true">insecure.example</domain>
+  </domain-config>
+</network-security-config>"""
+
+_NSC_DEBUG = b"""<network-security-config>
+  <base-config cleartextTrafficPermitted="false"/>
+  <debug-overrides><trust-anchors><certificates src="user"/></trust-anchors></debug-overrides>
+</network-security-config>"""
+
+_NSC_RESTRICTIVE = b"""<network-security-config>
+  <base-config cleartextTrafficPermitted="false">
+    <trust-anchors><certificates src="system"/></trust-anchors>
+  </base-config>
+</network-security-config>"""
+
+_NSC_PATH = "res/xml/network_security_config.xml"
+
+
+def test_nsc_false_negative_is_now_caught_regression(tmp_path):
+    """REGRESSION: an NSC that re-enables cleartext used to leave the engine reporting clean.
+
+    The manifest declares a networkSecurityConfig and targets SDK 22, so the default-cleartext
+    heuristic is (correctly) suppressed — under the old code that meant NO network finding at all.
+    Now the NSC itself is parsed and the base-config cleartext is caught as HIGH.
+    """
+    findings = _run(tmp_path, _NSC_MANIFEST, {_NSC_PATH: _NSC_BASE_CLEARTEXT})
+    net = [f for f in findings if f.category == "mobile-network"]
+    # The false-clean is closed: a real HIGH cleartext finding now exists...
+    hit = next(f for f in net if "cleartext traffic for all domains" in f.title)
+    assert hit.base_severity == Severity.HIGH and hit.cwe_id == "CWE-319"
+    # ...and it comes from parsing the NSC, not the old default-cleartext heuristic (still suppressed
+    # because an NSC is declared), proving the fix is the NSC parse.
+    assert not any("default" in f.title.lower() for f in net)
+
+
+def test_nsc_trusts_user_ca_is_flagged_high(tmp_path):
+    findings = _run(tmp_path, _NSC_MANIFEST, {_NSC_PATH: _NSC_USER_CA})
+    f = next(x for x in findings if "trusts user-installed CAs" in x.title)
+    assert f.base_severity == Severity.HIGH and f.cwe_id == "CWE-295"
+
+
+def test_nsc_per_domain_cleartext_names_the_domain(tmp_path):
+    findings = _run(tmp_path, _NSC_MANIFEST, {_NSC_PATH: _NSC_DOMAIN_CLEARTEXT})
+    f = next(x for x in findings if "cleartext traffic for specific domains" in x.title)
+    assert f.base_severity == Severity.MEDIUM and f.cwe_id == "CWE-319"
+    assert "insecure.example" in str(f.evidence)   # element-text capture surfaces the host
+
+
+def test_nsc_debug_overrides_is_flagged_low(tmp_path):
+    findings = _run(tmp_path, _NSC_MANIFEST, {_NSC_PATH: _NSC_DEBUG})
+    f = next(x for x in findings if "debug-overrides" in x.title)
+    assert f.base_severity == Severity.LOW and f.cwe_id == "CWE-295"
+
+
+def test_restrictive_nsc_produces_no_network_finding(tmp_path):
+    findings = _run(tmp_path, _NSC_MANIFEST, {_NSC_PATH: _NSC_RESTRICTIVE})
+    assert [f for f in findings if f.category == "mobile-network"] == []
+
+
+def test_nsc_not_parsed_when_manifest_does_not_declare_it(tmp_path):
+    # A permissive NSC file is shipped, but the manifest references no NSC, so it is not applied and
+    # must not be flagged (avoids reporting a dead/unreferenced resource).
+    manifest = f"""<manifest {_NS} package="com.x">
+      <uses-sdk android:targetSdkVersion="28"/>
+      <application android:allowBackup="false" android:usesCleartextTraffic="false"/></manifest>"""
+    findings = _run(tmp_path, manifest, {_NSC_PATH: _NSC_BASE_CLEARTEXT})
+    assert [f for f in findings if f.category == "mobile-network"] == []
+
+
+# ── deep-link / intent-filter analysis (Batch #2) ───────────────────────────────────────────────
+
+def _deeplink_manifest(intent_filter: str) -> str:
+    return f"""<manifest {_NS} package="com.dl.app">
+  <application android:allowBackup="false">
+    <activity android:name=".Deep" android:exported="true">
+      <intent-filter{intent_filter}>
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.BROWSABLE"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        {{data}}
+      </intent-filter>
+    </activity>
+  </application>
+</manifest>"""
+
+
+def test_web_deep_link_without_autoverify_is_flagged(tmp_path):
+    manifest = _deeplink_manifest("").format(
+        data='<data android:scheme="https" android:host="app.example.com"/>')
+    f = next(x for x in _run(tmp_path, manifest) if x.category == "mobile-deeplink")
+    assert "web deep link" in f.title and f.base_severity == Severity.MEDIUM
+    assert f.cwe_id == "CWE-926" and "app.example.com" in str(f.evidence)
+
+
+def test_web_deep_link_with_autoverify_is_clean(tmp_path):
+    manifest = _deeplink_manifest(' android:autoVerify="true"').format(
+        data='<data android:scheme="https" android:host="app.example.com"/>')
+    assert [f for f in _run(tmp_path, manifest) if f.category == "mobile-deeplink"] == []
+
+
+def test_custom_scheme_deep_link_is_flagged(tmp_path):
+    manifest = _deeplink_manifest("").format(
+        data='<data android:scheme="myapp" android:host="callback"/>')
+    f = next(x for x in _run(tmp_path, manifest) if x.category == "mobile-deeplink")
+    assert "custom-scheme" in f.title and f.cwe_id == "CWE-939"
+
+
+def test_scheme_only_filter_is_flagged(tmp_path):
+    manifest = _deeplink_manifest("").format(data='<data android:scheme="myapp"/>')
+    f = next(x for x in _run(tmp_path, manifest) if x.category == "mobile-deeplink")
+    assert f.cwe_id == "CWE-939"
