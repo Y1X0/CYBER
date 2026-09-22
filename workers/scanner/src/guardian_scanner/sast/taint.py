@@ -344,8 +344,52 @@ class _Analyzer:
                 return None  # the shell=True rule owns this call; do not report it twice
         return confidence
 
+    def _nosql_query_parts(self, node: ast.expr, depth: int = 0) -> list[ast.expr]:
+        """The sub-expressions of a NoSQL query whose taint means attacker control of *structure*.
+
+        `find_one({"_id": user})` is a parameterized query: `user` is a value Mongo compares, not
+        an operator, so it is safe and contributes nothing. `find_one({"$where": user})`,
+        `find_one({user_key: 1})` and `find_one(request.json)` let the attacker choose an operator
+        or the whole query shape — those are what this returns. So the safe pattern is recognized
+        by yielding no dangerous expression for it, exactly as a sanitizer would.
+        """
+        if node is None or depth > 6:
+            return []
+        if isinstance(node, ast.Dict):
+            parts: list[ast.expr] = []
+            for key, value in zip(node.keys, node.values, strict=False):
+                if value is None:
+                    continue
+                if key is None:                       # {**spread}: attacker controls merged keys
+                    parts.append(value)
+                    continue
+                const_key = isinstance(key, ast.Constant) and isinstance(key.value, str)
+                if not const_key:                     # dynamic key could BE an operator name
+                    parts.extend((key, value))
+                elif key.value.startswith("$"):        # a value under an operator ($where/$gt/…)
+                    parts.append(value)
+                elif isinstance(value, ast.Dict | ast.List | ast.Tuple):
+                    parts.extend(self._nosql_query_parts(value, depth + 1))  # nested may hold $ops
+                # else: constant non-$ key with a scalar value = parameterized data, safe
+            return parts
+        if isinstance(node, ast.List | ast.Tuple):
+            parts = []
+            for element in node.elts:
+                parts.extend(self._nosql_query_parts(element, depth + 1))
+            return parts
+        return [node]  # not a literal collection: the whole query is attacker-shaped iff tainted
+
     def _dangerous_exprs(self, call: ast.Call, sink: Sink) -> list[ast.expr]:
         """The argument expressions this sink actually acts on."""
+        if sink.id == "taint-nosql":
+            # Only the parts that would let input choose an operator or the query shape — a
+            # parameterized `{"field": value}` yields nothing, so it is not reported.
+            parts: list[ast.expr] = []
+            for index in sink.positions or (0,):
+                if index < len(call.args):
+                    parts.extend(self._nosql_query_parts(call.args[index]))
+            return parts
+
         if sink.id == "taint-subprocess-argv":
             # Without a shell, only the program name is injectable. `run(["ls", user_input])` passes
             # the value as an argv entry, where it cannot become a second command — reporting that

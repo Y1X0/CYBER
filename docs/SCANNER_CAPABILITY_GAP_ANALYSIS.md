@@ -173,7 +173,9 @@ NetworkPolicy); see [docs/K8S_SCANNER.md](K8S_SCANNER.md). Still open: RBAC bind
 
 ## PRODUCT AREA 8 — Source Code — **FULLY IMPLEMENTED**
 
-**Existing implementation.** `engines/sast_engine.py` (taint + pattern rules + optional semgrep),
+**Existing implementation.** `engines/sast_engine.py` (taint + pattern rules + optional semgrep; the
+Python taint engine now also covers log injection (CWE-117), NoSQL injection (CWE-943) and LDAP
+injection (CWE-90) — see [docs/SAST_TAINT.md](SAST_TAINT.md)),
 `engines/sca_engine.py` (built-in lockfile parser + optional osv-scanner + vuln intel),
 `engines/secrets_engine.py` (patterns + entropy + git history + optional gitleaks), plus
 `ai_discovery` (LLM-found leads, verified + labelled ai_assisted) and `cicd`/`iac`/`ml_model`.

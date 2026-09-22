@@ -27,6 +27,8 @@ CWE_OPEN_REDIRECT = "CWE-601"
 CWE_SSTI = "CWE-1336"
 CWE_XSS = "CWE-79"
 CWE_LOG_INJECTION = "CWE-117"
+CWE_NOSQL_INJECTION = "CWE-943"
+CWE_LDAP_INJECTION = "CWE-90"
 
 # Everything a type coercion protects against: the result is an int/float/bool/UUID, so there is no
 # string left for an injection payload to live in.
@@ -42,6 +44,8 @@ _ALL_CLASSES = frozenset(
         CWE_SSTI,
         CWE_XSS,
         CWE_LOG_INJECTION,
+        CWE_NOSQL_INJECTION,
+        CWE_LDAP_INJECTION,
     }
 )
 
@@ -210,6 +214,56 @@ SINKS: tuple[Sink, ...] = (
         positions=(0,),
         remediation="Let the template escape the value; mark_safe/Markup disables that protection.",
     ),
+    Sink(
+        id="taint-log-injection",
+        title="Attacker-controlled data reaches a logging call",
+        cwe=CWE_LOG_INJECTION,
+        owasp="A09:2021",
+        severity=Severity.HIGH,
+        # Module-level logging functions resolve by dotted name (high); a logger object's methods
+        # (`log.info(...)`) match on the attribute alone (medium), like the SQL cursor sink.
+        dotted=("logging.debug", "logging.info", "logging.warning", "logging.warn", "logging.error",
+                "logging.critical", "logging.exception", "logging.log"),
+        methods=("debug", "info", "warning", "warn", "error", "critical", "exception", "log"),
+        positions=(),  # any argument is written into the log line
+        remediation="Strip CR/LF from attacker data before logging it (or use structured logging / "
+                    "an encoder); embedded newlines let an attacker forge log entries.",
+    ),
+    Sink(
+        id="taint-nosql",
+        title="Attacker-controlled data controls a NoSQL query",
+        cwe=CWE_NOSQL_INJECTION,
+        owasp="A03:2021",
+        # $-operator control reaches $where (server-side JS) on some deployments, so the base class
+        # is critical; a method match (the collection's type is unknown) reports it at HIGH.
+        severity=Severity.CRITICAL,
+        # pymongo collection methods whose FIRST argument is the query filter. Bare `find` is
+        # deliberately excluded — it collides with `str.find` — and `aggregate`/`distinct` are left
+        # out because their injectable argument is shaped differently (a pipeline / a non-filter
+        # first arg); `find_one` and the typed *_one/_many variants cover the common case safely.
+        methods=("find_one", "find_one_and_update", "find_one_and_replace", "find_one_and_delete",
+                 "update_one", "update_many", "replace_one", "delete_one", "delete_many",
+                 "count_documents"),
+        positions=(0,),  # the filter document; the analyzer decides which parts are *structural*
+        remediation="Do not pass request data as a query document or operator; use a fixed "
+                    "structure with typed values (parameterized), or coerce the value "
+                    "(ObjectId/int).",
+    ),
+    Sink(
+        id="taint-ldap",
+        title="Attacker-controlled data reaches an LDAP search filter",
+        cwe=CWE_LDAP_INJECTION,
+        owasp="A03:2021",
+        severity=Severity.HIGH,  # method match -> medium confidence -> reported MEDIUM
+        # python-ldap: search_s(base, scope, filterstr); the *_s / *_ext_s variants are LDAP-only
+        # and cannot collide with a builtin. `search` (ldap3) is included but only fires via the
+        # filter position/kwarg below, so `re.search(pattern, text)` — with neither — never does.
+        methods=("search_s", "search_ext_s", "search_st", "search_ext_st", "search_ext", "search"),
+        positions=(2,),  # python-ldap filterstr is the 3rd positional argument
+        keywords=("filterstr", "search_filter"),  # python-ldap / ldap3 filter keyword
+        remediation="Escape the value with ldap.filter.escape_filter_chars (python-ldap) or "
+                    "ldap3.utils.conv.escape_filter_chars before building the filter.",
+    ),
 )
 
 
@@ -227,9 +281,11 @@ class Sanitizer:
 SANITIZERS: tuple[Sanitizer, ...] = (
     Sanitizer(
         id="coerce",
-        dotted=("int", "float", "bool", "len", "uuid.UUID", "ipaddress.ip_address"),
+        dotted=("int", "float", "bool", "len", "uuid.UUID", "ipaddress.ip_address",
+                "bson.ObjectId", "bson.objectid.ObjectId"),
         neutralizes=_ALL_CLASSES,
-        note="the result is not a string, so there is nothing left to inject into",
+        note="the result is a typed object (int/UUID/ObjectId), not a string, so there is nothing "
+             "left to inject into",
     ),
     Sanitizer(
         id="shell-quote",
@@ -246,8 +302,17 @@ SANITIZERS: tuple[Sanitizer, ...] = (
     Sanitizer(
         id="url-quote",
         dotted=("urllib.parse.quote", "urllib.parse.quote_plus"),
-        neutralizes=frozenset({CWE_OPEN_REDIRECT}),
+        # Percent-encoding removes CR/LF and the metacharacters a log-forging payload needs, so it
+        # neutralizes log injection; it is NOT an SSRF control — the host is still attacker-chosen.
+        neutralizes=frozenset({CWE_OPEN_REDIRECT, CWE_LOG_INJECTION}),
         note="percent-encoding is not an SSRF control; the host is still attacker-chosen",
+    ),
+    Sanitizer(
+        id="ldap-escape",
+        dotted=("ldap.filter.escape_filter_chars", "ldap.dn.escape_dn_chars",
+                "ldap3.utils.conv.escape_filter_chars", "escape_filter_chars"),
+        neutralizes=frozenset({CWE_LDAP_INJECTION}),
+        note="escapes the metacharacters an LDAP search filter is built from",
     ),
     Sanitizer(
         id="basename",

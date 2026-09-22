@@ -648,3 +648,166 @@ def test_the_safe_routes_produce_nothing():
 def test_the_fixture_is_reported_once_per_issue():
     found = flows(VULNERABLE_APP, "vulnapp/app.py")
     assert len(found) == len({f.line for f in found}) == 8
+
+
+# ── new sinks: log injection (CWE-117) ────────────────────────────────────────────────────────────
+def test_log_injection_flow_fires_high():
+    found = flows(
+        "import logging\n"
+        "from flask import request\n"
+        "def h():\n"
+        "    logging.info(request.args['name'])\n"
+    )
+    assert [f.sink.id for f in found] == ["taint-log-injection"]
+    assert found[0].sink.cwe == "CWE-117"
+    assert found[0].severity is Severity.HIGH and found[0].confidence == "high"
+
+
+def test_log_injection_through_a_logger_object_is_reported():
+    # A logger's method is matched on the attribute alone (medium), like the SQL cursor sink.
+    assert rule_ids(
+        "from flask import request\n"
+        "def h(log):\n"
+        "    log.error('user=' + request.args['u'])\n"
+    ) == {"taint-log-injection"}
+
+
+def test_log_injection_is_cleared_by_percent_encoding():
+    assert rule_ids(
+        "import logging, urllib.parse\n"
+        "from flask import request\n"
+        "def h():\n"
+        "    logging.info(urllib.parse.quote(request.args['name']))\n"
+    ) == set()
+
+
+def test_a_constant_log_message_is_not_a_flow():
+    assert flows("import logging\ndef h():\n    logging.info('service started')\n") == []
+
+
+def test_an_unknown_function_breaks_the_log_flow():
+    assert rule_ids(
+        "import logging\n"
+        "from flask import request\n"
+        "def h():\n"
+        "    logging.info(sanitize(request.args['name']))\n"
+    ) == set()
+
+
+# ── new sinks: NoSQL injection (CWE-943) ──────────────────────────────────────────────────────────
+def test_nosql_operator_injection_fires_high():
+    found = flows(
+        "from flask import request\n"
+        "def h(col):\n"
+        "    col.find_one({'$where': request.args['q']})\n"
+    )
+    assert [f.sink.id for f in found] == ["taint-nosql"]
+    assert found[0].sink.cwe == "CWE-943"
+    # The collection's type is unknown (method match), so HIGH at medium confidence — like SQL.
+    assert found[0].severity is Severity.HIGH and found[0].confidence == "medium"
+
+
+def test_nosql_whole_request_body_as_query_fires():
+    assert rule_ids(
+        "from flask import request\n"
+        "def h(col):\n"
+        "    return col.delete_many(request.json)\n"
+    ) == {"taint-nosql"}
+
+
+def test_a_parameterized_nosql_query_is_safe():
+    """`{'_id': user}` compares user as a value, not an operator — the safe pattern must stay quiet."""
+    assert rule_ids(
+        "from flask import request\n"
+        "def h(col):\n"
+        "    col.find_one({'_id': request.args['id']})\n"
+    ) == set()
+
+
+def test_a_typed_nosql_value_is_cleared():
+    assert rule_ids(
+        "from bson import ObjectId\n"
+        "from flask import request\n"
+        "def h(col):\n"
+        "    col.find_one({'$where': ObjectId(request.args['id'])})\n"
+    ) == set()
+
+
+def test_a_constant_nosql_query_is_not_a_flow():
+    assert flows("def h(col):\n    col.find_one({'$where': 'this.x == 1'})\n") == []
+
+
+def test_str_find_is_not_mistaken_for_a_nosql_sink():
+    """`text.find(user)` is `str.find`, not a Mongo query — bare `find` is excluded for this reason."""
+    assert flows(
+        "from flask import request\n"
+        "def h(text):\n"
+        "    return text.find(request.args['q'])\n"
+    ) == []
+
+
+# ── new sinks: LDAP injection (CWE-90) ────────────────────────────────────────────────────────────
+def test_ldap_filter_injection_fires_medium():
+    found = flows(
+        "from flask import request\n"
+        "def h(conn):\n"
+        "    conn.search_s('dc=x', 2, '(uid=%s)' % request.args['u'])\n"
+    )
+    assert [f.sink.id for f in found] == ["taint-ldap"]
+    assert found[0].sink.cwe == "CWE-90"
+    assert found[0].severity is Severity.MEDIUM and found[0].confidence == "medium"
+
+
+def test_ldap3_keyword_filter_is_reported():
+    assert rule_ids(
+        "from flask import request\n"
+        "def h(conn):\n"
+        "    conn.search(search_base='dc=x', search_filter='(uid=%s)' % request.args['u'])\n"
+    ) == {"taint-ldap"}
+
+
+def test_ldap_filter_is_cleared_by_escape_filter_chars():
+    assert rule_ids(
+        "from ldap.filter import escape_filter_chars\n"
+        "from flask import request\n"
+        "def h(conn):\n"
+        "    conn.search_s('dc=x', 2, '(uid=%s)' % escape_filter_chars(request.args['u']))\n"
+    ) == set()
+
+
+def test_a_constant_ldap_filter_is_not_a_flow():
+    assert flows("def h(conn):\n    conn.search_s('dc=x', 2, '(uid=admin)')\n") == []
+
+
+def test_an_unknown_function_breaks_the_ldap_flow():
+    assert rule_ids(
+        "from flask import request\n"
+        "def h(conn):\n"
+        "    conn.search_s('dc=x', 2, validate(request.args['u']))\n"
+    ) == set()
+
+
+def test_re_search_is_not_mistaken_for_an_ldap_sink():
+    """`re.search(pattern, text)` has no filter argument in the LDAP position — it must not fire."""
+    assert flows(
+        "import re\n"
+        "from flask import request\n"
+        "def h():\n"
+        "    return re.search('p', request.args['x'])\n"
+    ) == []
+
+
+# ── the new sinks are deterministic and do not disturb the existing ones ──────────────────────────
+def test_new_sinks_are_deterministic():
+    src = (
+        "import logging\n"
+        "from flask import request\n"
+        "def h(col, conn):\n"
+        "    logging.info(request.args['a'])\n"
+        "    col.find_one({'$where': request.args['b']})\n"
+        "    conn.search_s('dc=x', 2, request.args['c'])\n"
+    )
+    first = [(f.sink.id, f.line) for f in flows(src)]
+    second = [(f.sink.id, f.line) for f in flows(src)]
+    assert first == second
+    assert {sid for sid, _ in first} == {"taint-log-injection", "taint-nosql", "taint-ldap"}
