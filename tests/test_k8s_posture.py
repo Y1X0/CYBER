@@ -25,7 +25,7 @@ from guardian_scanner.k8s.model import (
     load,
     pod_spec,
 )
-from guardian_scanner.k8s.rules import analyse, namespace_issues
+from guardian_scanner.k8s.rules import analyse, namespace_issues, rbac_reachability
 
 
 def _docs(text: str, path: str = "manifest.yaml"):
@@ -517,6 +517,209 @@ rules:
     verbs: ["get"]
 """
     assert _rules(text) == set()
+
+
+# ── cross-resource: binding → resolved-role reachability ────────────────────────────────────────
+def _reach(text: str) -> list:
+    documents = load("rbac.yaml", text).documents
+    return [issue for _binding, issue in rbac_reachability(documents)]
+
+
+def test_binding_to_a_role_granting_secrets_get_list_fires_high():
+    text = """
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: secret-reader, namespace: app}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: bind-reader, namespace: app}
+roleRef: {kind: Role, name: secret-reader, apiGroup: rbac.authorization.k8s.io}
+subjects:
+  - {kind: ServiceAccount, name: worker, namespace: app}
+"""
+    issues = [i for i in _reach(text) if i.rule == "rbac-binding-reach"]
+    assert issues and issues[0].severity == "high"
+    assert issues[0].cwe == "CWE-522"
+    assert "secrets" in issues[0].evidence["reasons"]
+    assert "worker" in issues[0].subject
+
+
+def test_binding_to_a_role_with_exec_fires_high():
+    text = """
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: execer, namespace: app}
+rules:
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: bind-execer, namespace: app}
+roleRef: {kind: Role, name: execer, apiGroup: rbac.authorization.k8s.io}
+subjects:
+  - {kind: User, name: alice}
+"""
+    issues = [i for i in _reach(text) if i.rule == "rbac-binding-reach"]
+    assert issues and issues[0].severity == "high"
+    assert "exec" in issues[0].evidence["reasons"]
+
+
+def test_binding_to_a_wildcard_role_fires_high():
+    text = """
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: everything}
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: bind-everything}
+roleRef: {kind: ClusterRole, name: everything, apiGroup: rbac.authorization.k8s.io}
+subjects:
+  - {kind: ServiceAccount, name: ci, namespace: build}
+"""
+    issues = [i for i in _reach(text) if i.rule == "rbac-binding-reach"]
+    assert issues and issues[0].severity == "high"
+    assert "wildcard" in issues[0].evidence["reasons"]
+    assert issues[0].evidence["scope"] == "cluster"
+
+
+def test_a_rolebinding_create_role_is_an_escalation_path():
+    text = """
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: binder, namespace: app}
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["rolebindings"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: bind-binder, namespace: app}
+roleRef: {kind: Role, name: binder, apiGroup: rbac.authorization.k8s.io}
+subjects:
+  - {kind: ServiceAccount, name: app, namespace: app}
+"""
+    issues = [i for i in _reach(text) if i.rule == "rbac-binding-reach"]
+    assert issues and "escalation" in issues[0].evidence["reasons"]
+
+
+def test_binding_to_a_harmless_view_role_does_not_fire():
+    """A binding to a role that only reads configmaps is not a reachability finding."""
+    text = """
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: cm-viewer, namespace: app}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: bind-viewer, namespace: app}
+roleRef: {kind: Role, name: cm-viewer, apiGroup: rbac.authorization.k8s.io}
+subjects:
+  - {kind: ServiceAccount, name: app, namespace: app}
+"""
+    assert [i for i in _reach(text) if i.rule == "rbac-binding-reach"] == []
+
+
+def test_the_builtin_view_role_by_name_does_not_fire():
+    text = """
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: bind-view, namespace: app}
+roleRef: {kind: ClusterRole, name: view, apiGroup: rbac.authorization.k8s.io}
+subjects:
+  - {kind: ServiceAccount, name: app, namespace: app}
+"""
+    assert [i for i in _reach(text) if i.rule == "rbac-binding-reach"] == []
+
+
+def test_the_builtin_cluster_admin_role_resolves_by_name():
+    text = """
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: bind-admin}
+roleRef: {kind: ClusterRole, name: cluster-admin, apiGroup: rbac.authorization.k8s.io}
+subjects:
+  - {kind: ServiceAccount, name: ci, namespace: build}
+"""
+    issues = [i for i in _reach(text) if i.rule == "rbac-binding-reach"]
+    assert issues and issues[0].severity == "high"
+    assert issues[0].evidence["resolved_via"] == "builtin"
+    assert "wildcard" in issues[0].evidence["reasons"]
+
+
+def test_the_builtin_edit_role_reaches_secrets_and_exec():
+    text = """
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: bind-edit, namespace: app}
+roleRef: {kind: ClusterRole, name: edit, apiGroup: rbac.authorization.k8s.io}
+subjects:
+  - {kind: ServiceAccount, name: app, namespace: app}
+"""
+    issues = [i for i in _reach(text) if i.rule == "rbac-binding-reach"]
+    assert issues
+    reasons = set(issues[0].evidence["reasons"])
+    assert {"secrets", "exec"} <= reasons
+
+
+def test_an_unresolved_roleref_is_a_coverage_finding_not_a_pass():
+    text = """
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: bind-mystery, namespace: app}
+roleRef: {kind: Role, name: not-in-scope, apiGroup: rbac.authorization.k8s.io}
+subjects:
+  - {kind: ServiceAccount, name: app, namespace: app}
+"""
+    issues = _reach(text)
+    coverage = [i for i in issues if i.rule == "rbac-unresolved-role"]
+    assert coverage and coverage[0].category == "scan-coverage"
+    assert coverage[0].severity == "info"
+    assert "not-in-scope" in coverage[0].title
+    # It must NOT be graded as a reachability finding (no guessed grant).
+    assert not any(i.rule == "rbac-binding-reach" for i in issues)
+
+
+def test_reachability_is_deterministic_and_order_independent():
+    role = """
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: reader}
+rules:
+  - {apiGroups: [""], resources: ["secrets"], verbs: ["get", "list"]}
+"""
+    binding = """
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: bind-reader}
+roleRef: {kind: ClusterRole, name: reader, apiGroup: rbac.authorization.k8s.io}
+subjects:
+  - {kind: ServiceAccount, name: b, namespace: ns}
+  - {kind: ServiceAccount, name: a, namespace: ns}
+"""
+    forward = [(i.rule, i.subject) for _d, i in
+               rbac_reachability(load("m.yaml", role + "---\n" + binding).documents)]
+    reverse = [(i.rule, i.subject) for _d, i in
+               rbac_reachability(load("m.yaml", binding + "---\n" + role).documents)]
+    assert forward == reverse
+    # Subjects are emitted in a stable (sorted) order regardless of manifest order.
+    assert forward == sorted(forward)
 
 
 # ── secrets ───────────────────────────────────────────────────────────────────────────────────────

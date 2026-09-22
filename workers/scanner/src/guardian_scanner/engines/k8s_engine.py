@@ -28,7 +28,7 @@ from guardian_core.findings import RawFinding
 
 from guardian_scanner.engines.base import EngineHealth, ScanContext
 from guardian_scanner.k8s.model import Document, LoadResult, load
-from guardian_scanner.k8s.rules import Issue, analyse, namespace_issues
+from guardian_scanner.k8s.rules import Issue, analyse, namespace_issues, rbac_reachability
 
 log = get_logger("guardian.k8s")
 
@@ -92,6 +92,12 @@ class K8sEngine:
         for representative, issue in namespace_issues(documents):
             yield self._finding(representative, issue)
 
+        # Second cross-resource pass: join each RBAC binding to the verbs its referenced role
+        # actually grants, and grade the subject's effective reach (roles are otherwise analysed in
+        # isolation). A roleRef that resolves to nothing in scope becomes a coverage finding.
+        for binding, issue in rbac_reachability(documents):
+            yield self._finding(binding, issue)
+
         if errors or truncated:
             yield self._coverage_finding(documents, errors, templated, truncated, files_read)
 
@@ -153,11 +159,11 @@ class K8sEngine:
         return RawFinding(
             engine=EngineKey.K8S,
             title=issue.title,
-            category="k8s-misconfig",
+            category=issue.category,
             description=f"{description}\n\nRemediation: {issue.remediation}",
             base_severity=_SEVERITY.get(issue.severity, Severity.MEDIUM),
             confidence="medium" if doc.templated else "high",
-            cwe_id=issue.cwe,
+            cwe_id=issue.cwe or None,
             location={
                 "path": doc.path,
                 "workload": doc.label,

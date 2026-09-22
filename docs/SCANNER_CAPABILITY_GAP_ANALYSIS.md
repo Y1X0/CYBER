@@ -181,8 +181,12 @@ capabilities, securityContext, RBAC wildcard/cluster-admin, host mounts, service
 **What is missing.** Marginal per-check breadth. The PSS-restricted / zero-trust batch has since
 landed (seccomp, AppArmor-unconfined, capabilities `drop: ["ALL"]`, digest-pinning, and the first
 cross-resource rule — `netpol-missing`, a namespace whose workloads are selected by no
-NetworkPolicy); see [docs/K8S_SCANNER.md](K8S_SCANNER.md). Still open: RBAC binding→role reach
-(bindings graded in isolation, not by the verbs the referenced role grants). Reusable: **yes**.
+NetworkPolicy); see [docs/K8S_SCANNER.md](K8S_SCANNER.md). **RBAC binding→role reach has since
+landed too** as the second cross-resource pass (`rbac-binding-reach`): each RoleBinding/
+ClusterRoleBinding is joined to the verbs its resolved role actually grants and the subject's
+effective reach is graded (secrets read, exec/attach, escalation, wildcard, impersonate), with a
+`rbac-unresolved-role` coverage finding when a `roleRef` is out of scan scope and the four
+well-known built-in cluster roles resolved by name. Reusable: **yes**.
 
 **Verdict: FULLY IMPLEMENTED.** Do not rebuild.
 

@@ -84,6 +84,9 @@ class Issue:
     remediation: str
     subject: str = ""     # container / subject / key the finding is about
     evidence: dict = field(default_factory=dict)
+    # Most issues are misconfigurations; a cross-resource pass may instead report a coverage gap
+    # (a roleRef pointing outside the scanned manifests), which must not read as a clean pass.
+    category: str = "k8s-misconfig"
 
 
 def _verb(direction: str) -> str:
@@ -659,6 +662,215 @@ def namespace_issues(documents: list[Document]) -> Iterator[tuple[Document, Issu
         )
 
 
+# ── cross-resource: binding → resolved-role reachability (second aggregate pass) ──────────────────
+# The well-known default ClusterRoles, modelled by the grants that matter for reach so a binding
+# to one resolves even when the role object is not in the scanned manifests. Only these four are
+# assumed by name — anything else unresolved is a coverage finding, never a guessed grant. Each
+# entry is the shape `_role_rules` produces: a list of (verbs, resources, apiGroups), lowercased.
+_WELL_KNOWN_CLUSTER_ROLES: dict[str, list[tuple[set, set, set]]] = {
+    # Full control of the cluster.
+    "cluster-admin": [({"*"}, {"*"}, {"*"})],
+    # Namespace admin: read/write most things INCLUDING secrets, exec into pods, and manage
+    # rolebindings within the namespace.
+    "admin": [
+        ({"get", "list", "watch", "create", "update", "patch", "delete"}, {"secrets"}, {""}),
+        ({"get", "create"}, {"pods/exec", "pods/attach"}, {""}),
+        ({"get", "list", "watch", "create", "update", "patch", "delete"},
+         {"rolebindings", "roles"}, {"rbac.authorization.k8s.io"}),
+    ],
+    # Read/write most things INCLUDING secrets and exec, but NOT rolebindings.
+    "edit": [
+        ({"get", "list", "watch", "create", "update", "patch", "delete"}, {"secrets"}, {""}),
+        ({"get", "create"}, {"pods/exec", "pods/attach"}, {""}),
+    ],
+    # Read-only, and notably EXCLUDES secrets and exec — so it must not fire.
+    "view": [
+        ({"get", "list", "watch"},
+         {"pods", "services", "configmaps", "deployments", "replicasets", "statefulsets"}, {""}),
+    ],
+}
+
+# Reasons a resolved role gives its subject dangerous reach, in priority order (all HIGH). The first
+# one that matches names the finding; every match is recorded in the evidence.
+_REACH_ORDER = ("wildcard", "secrets", "escalation", "exec", "impersonate")
+_REACH_CWE = {"wildcard": "CWE-269", "secrets": "CWE-522", "escalation": "CWE-269",
+              "exec": "CWE-269", "impersonate": "CWE-269"}
+_REACH_TEXT = {
+    "wildcard": "wildcard verbs or resources — control of every object the rule matches",
+    "secrets": "read access to Secrets — credential theft",
+    "escalation": "the ability to grant privileges — writing role bindings, or the bind/escalate "
+                  "verb",
+    "exec": "exec or attach into running pods — code execution on live workloads",
+    "impersonate": "the impersonate verb — acting as any user, group or service account",
+}
+_READ_VERBS = frozenset({"get", "list", "watch"})
+_EXEC_RESOURCES = frozenset({"pods/exec", "pods/attach"})
+_BIND_RESOURCES = frozenset({"rolebindings", "clusterrolebindings", "roles", "clusterroles"})
+_BIND_WRITE = frozenset({"create", "update", "patch", "delete", "deletecollection", "*"})
+
+
+def _role_rules(body: dict) -> list[tuple[set, set, set]]:
+    out: list[tuple[set, set, set]] = []
+    for rule in body.get("rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        verbs = {str(v).lower() for v in (rule.get("verbs") or [])}
+        resources = {str(r).lower() for r in (rule.get("resources") or [])}
+        groups = {str(g).lower() for g in (rule.get("apiGroups") or [])}
+        out.append((verbs, resources, groups))
+    return out
+
+
+def _index_roles(documents: list[Document]) -> dict[tuple, list[tuple[set, set, set]]]:
+    """Roles and ClusterRoles by (kind[, namespace], name), each with the grants it carries."""
+    index: dict[tuple, list[tuple[set, set, set]]] = {}
+    for doc in documents:
+        if doc.kind == "ClusterRole":
+            index[("ClusterRole", doc.name)] = _role_rules(doc.body)
+        elif doc.kind == "Role":
+            index[("Role", doc.namespace or "default", doc.name)] = _role_rules(doc.body)
+    return index
+
+
+def _resolve_role(role_ref: dict, binding_namespace: str,
+                  index: dict) -> tuple[list[tuple[set, set, set]] | None, str]:
+    """Resolve a roleRef to the grants of the referenced role.
+
+    Returns (grants, resolved_via). resolved_via is "manifest", "builtin" or "" (unresolved). Never
+    guesses: a name that is neither in the manifests nor one of the four well-known cluster roles
+    resolves to (None, "") and becomes a coverage finding rather than an assumed grant.
+    """
+    kind = str(role_ref.get("kind") or "")
+    name = str(role_ref.get("name") or "")
+    if not name:
+        return None, ""
+    if kind == "ClusterRole":
+        if ("ClusterRole", name) in index:
+            return index[("ClusterRole", name)], "manifest"
+        if name in _WELL_KNOWN_CLUSTER_ROLES:
+            return _WELL_KNOWN_CLUSTER_ROLES[name], "builtin"
+        return None, ""
+    if kind == "Role":
+        key = ("Role", binding_namespace or "default", name)
+        if key in index:
+            return index[key], "manifest"
+        return None, ""
+    return None, ""
+
+
+def _reach_reasons(role_rules: list[tuple[set, set, set]]) -> dict[str, dict[str, list]]:
+    """Which dangerous reaches the resolved role's grants add up to, with the triggering
+    verbs/resources named for the evidence. Grades ONLY what the grants actually contain."""
+    reasons: dict[str, dict[str, set]] = {}
+
+    def note(category: str, verbs: set, resources: set) -> None:
+        entry = reasons.setdefault(category, {"verbs": set(), "resources": set()})
+        entry["verbs"].update(verbs)
+        entry["resources"].update(resources)
+
+    for verbs, resources, _groups in role_rules:
+        vwild = "*" in verbs
+        rwild = "*" in resources
+
+        if vwild or rwild:
+            note("wildcard", verbs, resources)
+        if ("secrets" in resources or rwild) and (verbs & _READ_VERBS or vwild):
+            note("secrets", (verbs & _READ_VERBS) or {"*"},
+                 {"secrets"} if "secrets" in resources else {"*"})
+        exec_res = resources & _EXEC_RESOURCES
+        if (exec_res or rwild) and (verbs & {"get", "create"} or vwild):
+            note("exec", (verbs & {"get", "create"}) or {"*"}, exec_res or {"*"})
+        if "impersonate" in verbs or vwild:
+            note("impersonate", {"impersonate"} if "impersonate" in verbs else {"*"}, resources)
+        bind_res = resources & _BIND_RESOURCES
+        if (verbs & {"bind", "escalate"}) or (bind_res and (verbs & _BIND_WRITE)):
+            note("escalation", verbs & (_BIND_WRITE | {"bind", "escalate"}),
+                 bind_res or ({"*"} if rwild else set()))
+
+    return {cat: {"verbs": sorted(e["verbs"]), "resources": sorted(e["resources"])}
+            for cat, e in reasons.items()}
+
+
+def _reach_issue(binding: Document, role_kind: str, role_name: str, via: str,
+                 subject_kind: str, subject_name: str, reasons: dict, cluster_wide: bool) -> Issue:
+    primary = next(cat for cat in _REACH_ORDER if cat in reasons)
+    scope = "cluster-wide" if cluster_wide else f"namespace `{binding.namespace or 'default'}`"
+    subject_label = f"{subject_kind}/{subject_name}" if subject_kind else subject_name
+    via_note = (" (a built-in cluster role, resolved by name)" if via == "builtin" else "")
+    matched = ", ".join(_REACH_TEXT[cat] for cat in _REACH_ORDER if cat in reasons)
+    return Issue(
+        "rbac-binding-reach",
+        f"{subject_label} reaches {role_kind}/{role_name} granting {_REACH_TEXT[primary]}",
+        "high", _REACH_CWE[primary], "CIS 5.1.1",
+        f"`{binding.label}` binds {subject_label} to {role_kind} `{role_name}`{via_note}. Joining "
+        f"the binding to the role's actual grants, that subject's effective reach ({scope}) "
+        f"includes: {matched}. A binding read on its own hides this; the role's verbs are where "
+        "the privilege is.",
+        "Scope the role to the specific verbs and resources the subject needs, or bind a narrower "
+        "role.",
+        subject=subject_label,
+        evidence={"binding": binding.label, "roleRef": f"{role_kind}/{role_name}",
+                  "resolved_via": via, "scope": "cluster" if cluster_wide else "namespace",
+                  "reasons": [cat for cat in _REACH_ORDER if cat in reasons],
+                  "grants": {cat: reasons[cat] for cat in _REACH_ORDER if cat in reasons}},
+    )
+
+
+def _unresolved_role_issue(binding: Document, role_kind: str, role_name: str) -> Issue:
+    ref = f"{role_kind}/{role_name}" if role_kind else role_name
+    return Issue(
+        "rbac-unresolved-role",
+        f"Role `{ref}` referenced by binding `{binding.label}` is not in scan scope",
+        "info", "", "CIS 5.1.1",
+        f"`{binding.label}` binds subjects to {ref or 'a role'}, but that role is not among the "
+        "scanned manifests and is not one of the well-known built-in cluster roles, so its grants "
+        "are unknown. The subject's effective reach could not be graded — this is a coverage gap, "
+        "not a clean result.",
+        "Include the referenced role's manifest in the scan so its binding can be evaluated.",
+        subject=ref,
+        evidence={"binding": binding.label, "roleRef": ref},
+        category="scan-coverage",
+    )
+
+
+def rbac_reachability(documents: list[Document]) -> Iterator[tuple[Document, Issue]]:
+    """Join every RoleBinding/ClusterRoleBinding to the verbs its referenced role actually grants,
+    and grade the subject's effective reach — the cross-resource question the per-document RBAC
+    rules cannot answer, since a binding on its own does not carry the role's grants.
+
+    Roles are analysed here as an INDEX joined to bindings, not in isolation. A roleRef that
+    resolves to neither a scanned role nor a well-known built-in yields a coverage finding, never a
+    silent pass and never a guessed grant. Deterministic: results are emitted in a stable order.
+    """
+    index = _index_roles(documents)
+    results: list[tuple[Document, Issue]] = []
+    for doc in documents:
+        if doc.kind not in ("RoleBinding", "ClusterRoleBinding"):
+            continue
+        role_ref = doc.body.get("roleRef")
+        role_ref = role_ref if isinstance(role_ref, dict) else {}
+        role_kind = str(role_ref.get("kind") or "")
+        role_name = str(role_ref.get("name") or "")
+        grants, via = _resolve_role(role_ref, doc.namespace or "default", index)
+        if grants is None:
+            results.append((doc, _unresolved_role_issue(doc, role_kind, role_name)))
+            continue
+        reasons = _reach_reasons(grants)
+        if not reasons:
+            continue  # a harmless role (e.g. view on configmaps) does not fire
+        cluster_wide = doc.kind == "ClusterRoleBinding"
+        for subject in doc.body.get("subjects") or []:
+            if not isinstance(subject, dict):
+                continue
+            results.append((doc, _reach_issue(
+                doc, role_kind, role_name, via,
+                str(subject.get("kind") or ""), str(subject.get("name") or ""),
+                reasons, cluster_wide)))
+
+    results.sort(key=lambda pair: (pair[0].label, pair[1].subject, pair[1].rule, pair[1].title))
+    yield from results
+
+
 __all__ = [
     "ALL_RULES",
     "DANGEROUS_CAPABILITIES",
@@ -667,6 +879,7 @@ __all__ = [
     "namespace_issues",
     "network_issues",
     "rbac_issues",
+    "rbac_reachability",
     "secret_issues",
     "workload_issues",
 ]
