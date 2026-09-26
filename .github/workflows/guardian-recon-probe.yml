@@ -1,0 +1,104 @@
+name: Guardian Recon Probe
+
+# One-off empirical diagnostic (workflow_dispatch only). Sanctioned target: scanme.nmap.org is
+# explicitly authorized by Nmap for scan testing. TCP connect only; no NSE/UDP/OS/sweep.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Sanctioned nmap target (authorized for scanning)"
+        required: true
+        default: "scanme.nmap.org"
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      IMAGE: ghcr.io/y1x0/cyber-scanner@sha256:7b6082ed0bced75760cf15f33a95630d8128384008ff4c392e5630db10e7984a
+      TARGET: ${{ inputs.target }}
+    steps:
+      - name: Log in to GHCR
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: Pull the pinned scanner image
+        run: docker pull "$IMAGE"
+
+      - name: Resolve target IP
+        id: rip
+        run: |
+          IP=$(getent hosts "$TARGET" | awk '{print $1; exit}')
+          echo "Resolved $TARGET -> $IP"
+          echo "ip=$IP" >> "$GITHUB_OUTPUT"
+
+      - name: (a) Is nmap in the scan-plane image?
+        run: |
+          echo "=== inside $IMAGE ==="
+          docker run --rm --entrypoint sh "$IMAGE" -c 'echo -n "which nmap: "; which nmap || echo MISSING; echo -n "which nft: "; which nft || echo MISSING' || true
+
+      - name: (b) Install nmap on the runner and really scan the target
+        run: |
+          echo "=== apt-get install nmap on the GitHub runner ==="
+          sudo apt-get update -qq && sudo apt-get install -y -qq nmap
+          nmap --version | head -1
+          echo "=== nmap -Pn -T4 $TARGET (non-root TCP connect) ==="
+          nmap -Pn -T4 "$TARGET" || echo "NMAP_EXIT=$?"
+
+      - name: Write the Guardian-provider probe
+        run: |
+          cat > /tmp/probe_c.py <<'PY'
+          import os
+          ip = os.environ.get("TARGET_IP", "").strip()
+          print("target ip:", ip, flush=True)
+          from guardian_core.tool import ToolJob, EffectiveScope
+          from guardian_scanner.tools.providers.nmap_provider import NmapProvider
+          from guardian_scanner.tools.execution import execute_tool
+          from guardian_scanner.tools.backends import uid_nft
+          scope = EffectiveScope(targets=(ip,), ports=(22, 80, 443), protocols=("tcp",),
+                                 network_allowed=True, read_only=True)
+          job = ToolJob(tenant_id="probe", job_id="reconprobe", tool_key="nmap", scope=scope,
+                        settings={"allow_live": True})
+          prov = NmapProvider()
+          print("--- (c1) execute_tool as the scan worker would (worker concurrency UNSET) ---", flush=True)
+          try:
+              ev = execute_tool(prov, job)
+              print("  evidence_count:", len(ev), flush=True)
+              for e in ev:
+                  print("   ", e.kind, e.data, flush=True)
+          except Exception as exc:
+              print("  RAISED:", type(exc).__name__, exc, flush=True)
+          print("--- (c2) set_worker_concurrency(1); isolate() to reach the nft/CAP_NET_ADMIN gate ---", flush=True)
+          uid_nft.set_worker_concurrency(1)
+          try:
+              with uid_nft.isolate(job) as uid:
+                  print("  ISOLATION ESTABLISHED uid=", uid, "(nft table created; CAP_NET_ADMIN present)", flush=True)
+          except Exception as exc:
+              print("  ISOLATION REFUSED:", type(exc).__name__, "->", exc, flush=True)
+          print("--- (c3) full execute_tool path after concurrency=1 ---", flush=True)
+          try:
+              ev2 = execute_tool(prov, job)
+              print("  evidence_count:", len(ev2), flush=True)
+              for e in ev2:
+                  print("   ", e.kind, e.data, flush=True)
+          except Exception as exc:
+              print("  RAISED:", type(exc).__name__, exc, flush=True)
+          PY
+          echo "wrote /tmp/probe_c.py"
+
+      - name: (c) Guardian nmap provider path — default scan image, NO CAP_NET_ADMIN
+        run: |
+          docker run --rm -e TARGET_IP="${{ steps.rip.outputs.ip }}" \
+            -v /tmp/probe_c.py:/tmp/probe_c.py:ro --entrypoint python "$IMAGE" /tmp/probe_c.py || true
+
+      - name: (d) What it would take — CAP_NET_ADMIN + nft + nmap in the container
+        run: |
+          docker run --rm --cap-add=NET_ADMIN -e TARGET_IP="${{ steps.rip.outputs.ip }}" \
+            -v /tmp/probe_c.py:/tmp/probe_c.py:ro --entrypoint bash "$IMAGE" -c '
+              apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq nmap nftables >/dev/null 2>&1 || true
+              echo "in-container nmap: $(command -v nmap || echo MISSING) | nft: $(command -v nft || echo MISSING)"
+              python /tmp/probe_c.py
+            ' || true
