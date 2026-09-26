@@ -28,25 +28,24 @@ jobs:
       - name: Pull the pinned scanner image
         run: docker pull "$IMAGE"
 
-      - name: Resolve target IP
+      - name: Resolve target IPv4 (Guardian scope is IPv4-shaped)
         id: rip
         run: |
-          IP=$(getent hosts "$TARGET" | awk '{print $1; exit}')
-          echo "Resolved $TARGET -> $IP"
+          IP=$(getent ahostsv4 "$TARGET" | awk 'NR==1{print $1}')
+          echo "Resolved $TARGET -> IPv4 $IP"
           echo "ip=$IP" >> "$GITHUB_OUTPUT"
 
-      - name: (a) Is nmap in the scan-plane image?
+      - name: (a) Is nmap/nft in the scan-plane image?
         run: |
           echo "=== inside $IMAGE ==="
           docker run --rm --entrypoint sh "$IMAGE" -c 'echo -n "which nmap: "; which nmap || echo MISSING; echo -n "which nft: "; which nft || echo MISSING' || true
 
-      - name: (b) Install nmap on the runner and really scan the target
+      - name: (b) Install nmap on the runner and really scan the target (IPv4)
         run: |
-          echo "=== apt-get install nmap on the GitHub runner ==="
           sudo apt-get update -qq && sudo apt-get install -y -qq nmap
           nmap --version | head -1
-          echo "=== nmap -Pn -T4 $TARGET (non-root TCP connect) ==="
-          nmap -Pn -T4 "$TARGET" || echo "NMAP_EXIT=$?"
+          echo "=== nmap -Pn -T4 ${{ steps.rip.outputs.ip }} (non-root TCP connect) ==="
+          nmap -Pn -T4 "${{ steps.rip.outputs.ip }}" || echo "NMAP_EXIT=$?"
 
       - name: Write the Guardian-provider probe
         run: |
@@ -58,7 +57,7 @@ jobs:
           from guardian_scanner.tools.providers.nmap_provider import NmapProvider
           from guardian_scanner.tools.execution import execute_tool
           from guardian_scanner.tools.backends import uid_nft
-          scope = EffectiveScope(targets=(ip,), ports=(22, 80, 443), protocols=("tcp",),
+          scope = EffectiveScope(targets=(ip,), ports=(22, 80, 9929), protocols=("tcp",),
                                  network_allowed=True, read_only=True)
           job = ToolJob(tenant_id="probe", job_id="reconprobe", tool_key="nmap", scope=scope,
                         settings={"allow_live": True})
@@ -89,16 +88,28 @@ jobs:
           PY
           echo "wrote /tmp/probe_c.py"
 
-      - name: (c) Guardian nmap provider path — default scan image, NO CAP_NET_ADMIN
+      - name: (c) Guardian provider path — default scan image, NO CAP_NET_ADMIN (expect fail-closed)
         run: |
           docker run --rm -e TARGET_IP="${{ steps.rip.outputs.ip }}" \
             -v /tmp/probe_c.py:/tmp/probe_c.py:ro --entrypoint python "$IMAGE" /tmp/probe_c.py || true
 
-      - name: (d) What it would take — CAP_NET_ADMIN + nft + nmap in the container
+      - name: (d) CAP_NET_ADMIN capability test on a clean container (does nft work on a GH runner?)
+        run: |
+          docker run --rm --cap-add=NET_ADMIN ubuntu:24.04 bash -c '
+            set -x
+            apt-get update -qq && apt-get install -y -qq nftables nmap
+            echo "=== can CAP_NET_ADMIN create an nft table in a GH-runner container? ==="
+            nft add table inet guardian_probe && echo "NFT_ADD_TABLE_OK" && nft list tables && nft delete table inet guardian_probe
+            echo "=== nmap -sT -Pn -p22,80,9929 '"${{ steps.rip.outputs.ip }}"' ==="
+            nmap -sT -Pn -p22,80,9929 '"${{ steps.rip.outputs.ip }}"'
+          ' || echo "D_EXIT=$?"
+
+      - name: (e) Positive Guardian path — scanner image WITH CAP_NET_ADMIN + nft/nmap installed (visible apt)
         run: |
           docker run --rm --cap-add=NET_ADMIN -e TARGET_IP="${{ steps.rip.outputs.ip }}" \
             -v /tmp/probe_c.py:/tmp/probe_c.py:ro --entrypoint bash "$IMAGE" -c '
-              apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq nmap nftables >/dev/null 2>&1 || true
+              set -x
+              apt-get update && apt-get install -y nmap nftables
               echo "in-container nmap: $(command -v nmap || echo MISSING) | nft: $(command -v nft || echo MISSING)"
               python /tmp/probe_c.py
-            ' || true
+            ' || echo "E_EXIT=$?"
