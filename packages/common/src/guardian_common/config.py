@@ -124,6 +124,16 @@ class Settings(BaseSettings):
     # target, and both are written to the immutable audit log. This flag never affects non-owners.
     owner_direct_scan: bool = False
 
+    # Owner-direct RECON (active port scanning). OFF by default, exactly like owner_direct_scan: the
+    # capability does not exist until an operator sets GUARDIAN_OWNER_DIRECT_RECON=true. Only then
+    # may the tenant OWNER dispatch a governed nmap port scan against a target under their own
+    # asserted legal authority. Recon is OWNER-ONLY — a non-owner can NEVER invoke it, even with a
+    # verified-ownership authorization (the owner role is re-checked server-side at dispatch). The
+    # owner affirms legal right per target (immutable), both the affirmation and the dispatch are
+    # audited, and the scan still runs through the governance-gated tool path inside the MANDATORY
+    # uid+nftables egress cage. This flag never affects a non-owner or the artifact/scan planes.
+    owner_direct_recon: bool = False
+
     # Per-tenant ceilings (WP-G2). Platform defaults; a tenant may lower or raise them within the
     # hard ceiling via `tenants.settings["quota"]`. 0 disables that limit entirely, which is a
     # deliberate operational choice and not the effect of leaving a value unset.
@@ -424,9 +434,13 @@ class Settings(BaseSettings):
         # Broker-seal key (P1-A): the payload-seal key is separate from the credential KMS master
         # and required on every plane that seals/unseals broker payloads — the tool plane (unseals a
         # job, seals its evidence), the scan plane (unseals its job + sealed creds, seals its raw
-        # findings), and the control plane (seals jobs, unseals results). The recon plane never
-        # seals. It MUST differ from encryption_key so the domains use distinct keys.
-        if not self.recon_plane:
+        # findings), and the control plane (seals jobs, unseals results). A PURE recon plane (recon
+        # discovery only) never seals. But the network plane co-locates the recon queue with the
+        # `tools` queue so nmap runs under the uid+nftables cage (GUARDIAN_TOOL_PLANE=true), and
+        # run_tool DOES seal its result — so the key is required whenever tool/scan sealing happens
+        # on this worker, even if recon_plane is also set. It MUST differ from encryption_key.
+        never_seals = self.recon_plane and not (self.tool_plane or self.scan_plane)
+        if not never_seals:
             if not self.broker_seal_key or self.broker_seal_key == _DEV_SEAL_SENTINEL:
                 raise ValueError(
                     "GUARDIAN_BROKER_SEAL_KEY must be set to a strong value outside local/dev"

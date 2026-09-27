@@ -126,6 +126,36 @@ class OwnerDirectAffirmation(Base, TimestampMixin):
     affirmed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ReconAffirmation(Base, TimestampMixin):
+    """A tenant OWNER's one-time, per-target legal affirmation for owner-direct RECON (port scan).
+
+    The exact analogue of OwnerDirectAffirmation, for the network recon plane. Before the first
+    owner-direct nmap scan of a target the owner must affirm they have the legal right to port-scan
+    it; that affirmation is recorded here (operational: "has this target been affirmed?") AND
+    written to the immutable audit log (accountability). This row is NOT itself an authorization
+    grant and is never consulted by the tool authorization gate or the uid+nftables egress cage — it
+    only gates the per-target affirmation prompt.
+
+    `target` is the normalized recon target (IP / host, lowercased). Unique per tenant+target, so
+    the affirmation is asked exactly once per target. It is not grantable to another user: the
+    capability is the OWNER role, re-checked server-side at every dispatch, not this row.
+    """
+
+    __tablename__ = "recon_affirmations"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "target", name="uq_recon_affirmation_target"),
+        Index("idx_recon_affirmation_tenant", "tenant_id"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    tenant_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("tenants.id"), nullable=False)
+    # The normalized recon target the owner affirmed a right to port-scan (IP/host, lowercased).
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    # The owner who affirmed. Recorded for accountability; it never makes another user an owner.
+    affirmed_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    affirmed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class DomainVerification(Base, TimestampMixin):
     """Proof that a customer controls a domain (WP-F1).
 

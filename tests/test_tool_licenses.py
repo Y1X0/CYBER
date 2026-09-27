@@ -37,7 +37,6 @@ def test_every_entry_has_a_recognised_state(registry):
 
 
 @pytest.mark.parametrize("tool,reason", [
-    ("nmap", "NPSL restricts commercial redistribution"),
     ("masscan", "AGPL-3.0"),
     ("trufflehog", "AGPL-3.0"),
     ("codeql", "commercial use requires a licence"),
@@ -46,6 +45,15 @@ def test_the_tools_that_cannot_ship_are_blocked(registry, tool, reason):
     assert tool in registry, f"{tool} must be recorded even though it cannot ship ({reason})"
     assert registry[tool].state in BLOCKED_STATES
     assert registry[tool].notes, "a blocked tool must explain why"
+
+
+def test_nmap_is_approved_for_personal_use_only(registry):
+    """nmap (NPSL) ships under APPROVED_PERSONAL_USE — a deliberate, non-commercial decision. If it
+    ever reverts to a plain APPROVED (losing the review flag) or is dropped, this fails: the distinct
+    state is what forces a re-review before any commercial use."""
+    assert "nmap" in registry
+    assert registry["nmap"].state == "APPROVED_PERSONAL_USE"
+    assert "commercial" in registry["nmap"].notes.lower(), "the commercial caveat must be recorded"
 
 
 @pytest.mark.parametrize("tool", ["naabu", "zmap", "gitleaks", "trivy", "nuclei", "osv-scanner"])
@@ -154,9 +162,16 @@ def test_an_unregistered_tool_is_refused(tmp_path, registry):
 
 
 def test_a_tool_awaiting_legal_review_is_refused(tmp_path, registry):
+    # nmap is now APPROVED_PERSONAL_USE, so synthesize a LEGAL_REVIEW entry to test the MECHANISM:
+    # the gate must refuse any image installing a tool in a blocked (legal-review) state.
+    from tools.check_tool_licenses import Entry
+
+    reg = dict(registry)
+    reg["pending-scanner"] = Entry("pending-scanner", "1.0", "NPSL", "LEGAL_REVIEW",
+                                   "counsel has not signed off")
     image = tmp_path / "Dockerfile"
-    image.write_text("FROM alpine\nRUN apk add nmap\n")
-    assert any("nmap" in p and "LEGAL_REVIEW" in p for p in check(image, registry))
+    image.write_text("FROM alpine\nRUN apk add pending-scanner\n")
+    assert any("pending-scanner" in p and "LEGAL_REVIEW" in p for p in check(image, reg))
 
 
 def test_the_real_scanner_image_passes(registry):

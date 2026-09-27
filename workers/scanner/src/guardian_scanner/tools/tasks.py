@@ -24,6 +24,7 @@ from dataclasses import replace
 
 from guardian_common.config import get_settings
 from guardian_common.logging import get_logger
+from guardian_core.enums import AuthorizationBasis, StaffRole
 from guardian_core.tool import (
     ToolJob,
     derive_effective_scope,
@@ -34,7 +35,15 @@ from guardian_core.tool import (
     job_to_wire,
 )
 from guardian_db.audit import record_audit
-from guardian_db.models import Asset, Authorization, Customer, Scan, ScanEngineRun, ToolCatalog
+from guardian_db.models import (
+    Asset,
+    Authorization,
+    Customer,
+    Scan,
+    ScanEngineRun,
+    TenantMembership,
+    ToolCatalog,
+)
 from guardian_db.session import session_scope
 from sqlalchemy import select
 
@@ -120,6 +129,24 @@ def _execution_backend_for(session, tool_key):  # noqa: ANN001, ANN202
     return _DEFAULT_BACKENDS.get(tool_key, "inproc")
 
 
+def _is_tenant_owner(session, tenant_id, actor_uuid) -> bool:  # noqa: ANN001
+    """The owner-direct RECON server-side re-check, on the trusted dispatch plane.
+
+    True IFF `actor_uuid` is a real user whose TenantMembership role in this tenant is OWNER. A
+    service account (API key) has no membership row and can never satisfy this, so a machine
+    principal can never invoke owner-direct recon — exactly like scans.py `_is_owner`, at dispatch
+    rather than trusted from the caller. Mirrors the owner-direct-scan gate: the capability is the
+    OWNER role, verified here, not a client flag and not any affirmation row.
+    """
+    if actor_uuid is None:
+        return False
+    membership = session.execute(
+        select(TenantMembership).where(
+            TenantMembership.user_id == actor_uuid, TenantMembership.tenant_id == tenant_id)
+    ).scalar_one_or_none()
+    return membership is not None and membership.role == StaffRole.OWNER.value
+
+
 def _enforce_tool_plane(*, expect_tool: bool) -> None:
     """Pin a task to its plane; a misroute fails loudly. Skipped under eager (tests)."""
     if celery_app.conf.task_always_eager:
@@ -181,8 +208,18 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
     self, tenant_id: str, tool_key: str, requested_targets: list[str], actor_id: str | None = None,
     human_approved: bool = False, settings: dict | None = None, policy: dict | None = None,
     campaign_id: str | None = None, approval_id: str | None = None,
+    owner_direct: bool = False, asset_id: str | None = None,
 ) -> dict:
-    """TRUSTED Control Plane: identity → authorize → scope → policy → dispatch → persist."""
+    """TRUSTED Control Plane: identity → authorize → scope → policy → dispatch → persist.
+
+    `owner_direct` is the owner-direct RECON authority (off by default; the API sets it only after
+    its own owner-role re-check + per-target affirmation). It is RE-CHECKED here, on the trusted
+    dispatch plane, before it can take effect: the actor must be the tenant OWNER and the
+    owner-direct-recon flag must be enabled, or the dispatch is refused and audited. When it holds,
+    the owner's asserted authority augments the authorized set for THIS dispatch (mirroring how
+    owner-direct scanning bypasses the ownership gate) — but the uid+nftables egress cage still
+    confines the scan to exactly those targets, and the DB-authorization gate is otherwise intact.
+    """
     _enforce_tool_plane(expect_tool=False)
     from guardian_scanner.tools import registry
     from guardian_scanner.tools.evidence import persist_evidence_chain
@@ -193,6 +230,7 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
 
     tid = uuid.UUID(tenant_id)
     now = dt.datetime.now(dt.UTC)
+    basis = AuthorizationBasis.VERIFIED_OWNERSHIP.value
 
     # Control Plane: WHO may run this? (governance) then WHAT may it touch? (authz/scope).
     with session_scope() as session:
@@ -210,7 +248,32 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
             return {"status": "forbidden", "tool": tool_key, "principal": gov.principal_kind,
                     "level": gov.required_level, "reasons": list(gov.reasons)}
 
+        # ── Owner-direct RECON: server-side re-check BEFORE it can widen scope (like scans.py) ──
+        if owner_direct:
+            if not get_settings().owner_direct_recon:
+                record_audit(
+                    session, action="recon.owner_direct.denied", tenant_id=tid,
+                    actor_id=gov.actor_uuid, entity_type="tool_job", entity_id=tool_key,
+                    metadata={"reason": "feature_disabled"})
+                return {"status": "forbidden", "tool": tool_key,
+                        "reasons": ["owner-direct recon is disabled on this deployment"]}
+            if not _is_tenant_owner(session, tid, gov.actor_uuid):
+                # A non-owner (or machine key) can NEVER invoke owner-direct recon, even with a
+                # verified-ownership authorization — the OWNER role is the capability, checked here.
+                record_audit(
+                    session, action="recon.owner_direct.denied", tenant_id=tid,
+                    actor_id=gov.actor_uuid, entity_type="tool_job", entity_id=tool_key,
+                    metadata={"reason": "not_owner", "principal": gov.principal_kind})
+                return {"status": "forbidden", "tool": tool_key,
+                        "reasons": ["owner-direct recon requires the tenant owner role"]}
+            basis = AuthorizationBasis.OWNER_DIRECT_RECON.value
+
         authorized = _authorized_target_values(session, tid, now)
+        if owner_direct:
+            # The owner asserts authority for the requested targets (ownership gate bypassed for
+            # this one dispatch, like owner-direct scanning). The uid+nftables egress cage still
+            # confines egress to exactly these targets; the DB-authz gate above is left intact.
+            authorized = sorted(set(authorized) | set(requested_targets or []))
         scope = derive_effective_scope(requested_targets or [], authorized, caps, policy)
         backend_name = _execution_backend_for(session, tool_key)
         decision = evaluate_tool_policy(caps, scope, human_approved=human_approved)
@@ -256,7 +319,18 @@ def dispatch_tool_job(  # noqa: ANN001, PLR0913
     binder = _BINDERS.get(tool_key, _bind_and_derive_findings)
     with session_scope() as session:
         ids = persist_evidence_chain(session, tenant_id=tid, evidences=evidences)
-        bound = binder(session, tid, tool_key, evidences)
+        # nmap carries the authorization basis so an owner-direct recon Scan is labeled as such in
+        # reports; every other tool/binder keeps the default verified-ownership basis unchanged.
+        if tool_key == "nmap" and owner_direct and asset_id:
+            # Owner-direct recon bypasses the DB authorization, so there is no asset-bound
+            # Authorization to bind through; bind to the asset the owner explicitly targeted.
+            bound = _bind_owner_direct_recon(
+                session, tid, tool_key, evidences, asset_id=asset_id, authorization_basis=basis)
+        elif tool_key == "nmap":
+            bound = _bind_nmap_findings(
+                session, tid, tool_key, evidences, authorization_basis=basis)
+        else:
+            bound = binder(session, tid, tool_key, evidences)
 
     # Auto-enrich the graph per bound customer (trusted plane, 6E) — evidence → finding → graph.
     from guardian_scanner.discovery.tasks import enrich_graph
@@ -388,8 +462,13 @@ def _asset_for_target_ip(session, tenant_id, ip, now):  # noqa: ANN001, ANN202
     return None
 
 
-def _bind_nmap_findings(session, tenant_id, tool_key, evidences):  # noqa: ANN001, ANN202
-    """Bind nmap findings to the asset named by each target IP's authorization (ADR-0019 strict)."""
+def _bind_nmap_findings(session, tenant_id, tool_key, evidences, *,  # noqa: ANN001, ANN202
+                        authorization_basis=AuthorizationBasis.VERIFIED_OWNERSHIP.value):
+    """Bind nmap findings to the asset named by each target IP's authorization (ADR-0019 strict).
+
+    `authorization_basis` labels each Scan this creates so an owner-direct recon run is reported as
+    "owner-direct-recon" rather than the default "verified-ownership".
+    """
     from guardian_scanner.normalize import to_finding
     from guardian_scanner.tools import registry
 
@@ -413,7 +492,8 @@ def _bind_nmap_findings(session, tenant_id, tool_key, evidences):  # noqa: ANN00
         customer = session.get(Customer, asset.customer_id)
         criticality = customer.criticality if customer is not None else "medium"
         scan = Scan(tenant_id=tenant_id, customer_id=asset.customer_id, asset_id=asset.id,
-                    trigger="tool", status="completed", requested_engines=[tool_key])
+                    trigger="tool", status="completed", requested_engines=[tool_key],
+                    authorization_basis=authorization_basis)
         session.add(scan)
         session.flush()
         run = ScanEngineRun(scan_id=scan.id, engine=tool_key[:30], status="completed",
@@ -427,6 +507,48 @@ def _bind_nmap_findings(session, tenant_id, tool_key, evidences):  # noqa: ANN00
                 asset_criticality=criticality, business_impact=criticality))
         bound.append((str(asset.customer_id), len(raws)))
     return bound
+
+
+def _bind_owner_direct_recon(session, tenant_id, tool_key, evidences, *,  # noqa: ANN001, ANN202
+                             asset_id, authorization_basis):
+    """Bind owner-direct recon findings to the asset the OWNER explicitly targeted.
+
+    Owner-direct recon bypasses the DB authorization (the owner asserted authority), so there is no
+    asset-bound Authorization to resolve through — the owner named the asset at dispatch. This binds
+    all nmap findings to that one tenant-owned asset and labels the Scan `owner-direct-recon`, so
+    the run is reported under the authority it actually ran on. Evidence is persisted independently;
+    a scan with no derived finding creates no Scan (ADR-0019 evidence-first).
+    """
+    from guardian_scanner.normalize import to_finding
+    from guardian_scanner.tools import registry
+
+    provider = registry.tool_for(tool_key)
+    if provider is None:
+        return []
+    asset = session.get(Asset, uuid.UUID(str(asset_id)))
+    if asset is None or asset.tenant_id != tenant_id:
+        return []  # asset must exist and belong to this tenant; otherwise evidence-only
+    raws = [r for r in (provider.normalize(e) for e in evidences
+                        if e.kind == "nmap_service") if r is not None]
+    if not raws:
+        return []  # Evidence persisted; nothing derived — no empty Scan
+    customer = session.get(Customer, asset.customer_id)
+    criticality = customer.criticality if customer is not None else "medium"
+    scan = Scan(tenant_id=tenant_id, customer_id=asset.customer_id, asset_id=asset.id,
+                trigger="tool", status="completed", requested_engines=[tool_key],
+                authorization_basis=authorization_basis)
+    session.add(scan)
+    session.flush()
+    run = ScanEngineRun(scan_id=scan.id, engine=tool_key[:30], status="completed",
+                        tool_versions={tool_key: provider.version})
+    session.add(run)
+    session.flush()
+    for raw in raws:
+        session.add(to_finding(
+            raw, tenant_id=tenant_id, customer_id=asset.customer_id, scan_id=scan.id,
+            engine_run_id=run.id, asset_id=asset.id, exposure=asset.exposure,
+            asset_criticality=criticality, business_impact=criticality))
+    return [(str(asset.customer_id), len(raws))]
 
 
 def _ct_upsert(ingestor, cache, node_type, key):  # noqa: ANN001, ANN202

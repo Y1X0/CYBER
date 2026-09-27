@@ -40,3 +40,28 @@ def enqueue_discovery(run_id: str) -> None:
     # dispatches only the DB-less probing step to the isolated `recon` plane (6C.4). Routing is by
     # task name via task_routes, so the API stays a pure publisher (ADR-003).
     _client().send_task("guardian.run_discovery", args=[run_id])
+
+
+def enqueue_owner_direct_recon(
+    *, tenant_id: str, actor_id: str, target: str, asset_id: str | None,
+    ports: list[int] | None = None,
+) -> None:
+    """Dispatch an owner-direct nmap recon job through the governance-gated tool path.
+
+    The API has already re-checked owner + affirmation; the trusted `dispatch_tool_job` (default
+    queue, DB) then RE-CHECKS owner-direct server-side, runs governance + authorization + policy,
+    and hands the signed job to the isolated recon plane's `run_tool` (uid+nftables egress cage).
+    The API only publishes (ADR-003); it never opens a socket or forces isolation itself.
+    `human_approved` is the owner's per-target affirmation, and `allow_live` selects the live nmap
+    path (offline snapshot otherwise). `owner_direct=True` is validated at dispatch, not trusted.
+    """
+    settings: dict = {"allow_live": True}
+    policy = {"ports": list(ports)} if ports else None
+    _client().send_task(
+        "guardian.dispatch_tool_job",
+        kwargs={
+            "tenant_id": tenant_id, "tool_key": "nmap", "requested_targets": [target],
+            "actor_id": actor_id, "human_approved": True, "settings": settings,
+            "policy": policy, "owner_direct": True, "asset_id": asset_id,
+        },
+    )

@@ -14,6 +14,7 @@ cannot simply be bundled.
 |-------|---------|
 | `APPROVED` | Permissive licence; ship freely, with attribution. |
 | `APPROVED_SEPARATE_PROCESS` | Copyleft, but invoked as a separate process with no linking and no distribution of modified source. Commonly accepted; confirmed by counsel per deployment model. |
+| `APPROVED_PERSONAL_USE` | The licence permits personal / educational / non-commercial use but restricts commercial redistribution. Approved for THIS personal/educational deployment only, with the operator accepting the terms and legal responsibility. **Must be revisited before any commercial use** — the distinct state name is the flag that forces that review. |
 | `LEGAL_REVIEW` | Cannot ship until counsel signs off. Blocked in CI. |
 | `PROHIBITED` | Incompatible with a commercial SaaS product. Never ship. |
 | `NOT_ADOPTED` | The licence is acceptable, but the capability is deliberately not used; the tool must not enter an image. Blocked in CI, with a different reason from a licence block. |
@@ -40,7 +41,7 @@ cannot simply be bundled.
 | **Network** | | | | |
 | naabu | 2.3.x | MIT | `APPROVED` | Port discovery. **Preferred over nmap** for the discovery stage precisely because it carries no licence encumbrance. |
 | fingerprintx | 1.1.x | MIT | `APPROVED` | Service fingerprinting without nmap. |
-| nmap | 7.9x | NPSL | `LEGAL_REVIEW` | The Nmap Public Source License restricts redistribution in commercial products. A commercial OEM licence from Nmap Software LLC is required before shipping. Guardian's wrapper already exists; the binary must not enter an image until this clears. |
+| nmap | 7.9x | NPSL | `APPROVED_PERSONAL_USE` | The Nmap Public Source License permits personal/educational/non-commercial use but restricts redistribution in commercial products. This deployment is personal/educational: the operator has accepted the NPSL personal-use terms and the associated legal responsibility, so the binary ships in the **recon image only** (`Dockerfile.recon`), never the artifact/scan image. **Before any commercial use, a commercial OEM licence from Nmap Software LLC is required and this row must return to `LEGAL_REVIEW`.** The provider is isolated behind the tool interface, so naabu (MIT, `APPROVED`) can be substituted without re-architecting. |
 | masscan | 1.3.x | AGPL-3.0 | `PROHIBITED` | AGPL §13 covers network interaction, which is what a SaaS product is. Use ZMap instead. |
 | ZMap | 4.x | Apache-2.0 | `APPROVED` | Permissive substitute for masscan. |
 | Exploit-DB index | — | GPL-2.0 (index data) | `APPROVED` | **Index only; no exploit code is ingested or stored.** WP-C4 reads `files_exploits.csv` — titles, ids, dates — to record that an exploit exists and how mature it is. Guardian never downloads an exploit body: storing weaponized code would make the knowledge base itself a liability and is not needed to rank a finding. |

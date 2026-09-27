@@ -1,0 +1,227 @@
+# Guardian recon plane — run governed active network recon (nmap) on a GitHub runner, for free.
+#
+# WHAT THIS IS. An operator-triggered, one-shot recon-plane consumer: it drains the `recon` and
+# `tools` queues and runs the network-touching work — the DB-less discovery probes (`recon_collect`)
+# and the governed external-binary tools (`run_tool`, i.e. nmap under the uid+nftables egress cage).
+# The control plane stays on Render/`default`: guardian-api's owner-direct-recon route re-checks the
+# owner + affirmation and publishes, and `dispatch_tool_job` (default queue, DB) governs, authorizes,
+# derives scope, RE-CHECKS owner-direct, signs the job, and hands run_tool to THIS plane.
+#
+# WHY A SEPARATE, PRIVILEGED WORKFLOW. This is the ONLY workflow that adds --cap-add=NET_ADMIN, and
+# it runs the recon image (nmap + nftables) as root. nmap is FORCED onto the uid+nftables backend,
+# which builds a per-run kernel egress allowlist with `nft` (needs CAP_NET_ADMIN) and setuids each
+# run to an unprivileged uid before exec. Without that capability the backend FAILS CLOSED — nmap is
+# never run unconfined. The artifact/scan plane (guardian-scan-plane.yml) never gets NET_ADMIN, and a
+# CI guard (test_recon_plane_isolation.py) fails the build if the capability ever appears anywhere
+# but here.
+#
+# THE SECRET BOUNDARY. This job holds ONLY the Redis broker URL, the broker-seal key, and the PUBLIC
+# job-signing key. It has NO GUARDIAN_JWT_SECRET, NO GUARDIAN_ENCRYPTION_KEY (credential KMS master),
+# and NO GUARDIAN_JOB_SIGNING_PRIVATE_KEY — they are not referenced, so they never reach the runner.
+# config.py refuses to boot a recon/tool plane that carries the JWT secret or the KMS master, so a
+# mis-set secret crashes the job loudly rather than running a network binary next to a master key. The
+# public signing key is NOT a secret (it can only VERIFY jobs, never mint them); run_tool needs it to
+# authenticate the signed job the control plane sent.
+#
+# WORKFLOW_DISPATCH ONLY — NEVER A SCHEDULE. Active port scanning against real hosts must never begin
+# because a cron fired. Every run here is a human pressing "Run workflow", after having created an
+# owner-direct-recon dispatch in the console.
+name: Guardian Recon Plane
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "How long the recon plane stays up to execute recon/tool jobs (max 300)."
+        type: string
+        required: false
+        default: "30"
+
+permissions:
+  contents: read
+  packages: read
+
+# Two recon planes draining the same queues would not double-run a job (Redis hands each message to
+# one consumer), but there is no reason to run two. Queue a second trigger behind the first.
+concurrency:
+  group: guardian-recon-plane
+  cancel-in-progress: false
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    environment: production
+    # Ceiling above the window so `timeout` is what ends the run, not the runner (a runner-killed job
+    # skips the graceful Celery shutdown and can strand a task mid-flight).
+    timeout-minutes: 310
+
+    steps:
+      - name: Resolve window length
+        id: cfg
+        env:
+          RAW: ${{ inputs.minutes || '30' }}
+        run: |
+          mins="${RAW//[^0-9]/}"
+          [ -n "$mins" ] || mins=30
+          [ "$mins" -ge 1 ] || mins=1
+          if [ "$mins" -gt 300 ]; then mins=300; fi
+          echo "minutes=$mins" >> "$GITHUB_OUTPUT"
+          echo "Recon-plane window: ${mins} minute(s)"
+
+      # Full history so the revision guard below can prove the image's ancestry with git merge-base.
+      - name: Check out repository (for the image-revision guard)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Log in to GHCR
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      # Pinned by digest, not tag: the exact recon artifact guardian-deploy-recon.yml built and
+      # pushed. To repin after a rebuild: run guardian-deploy-recon.yml (mode: publish), read the
+      # @sha256 it prints, and replace the digest below.
+      - name: Pull the verified recon image
+        id: image
+        run: |
+          IMAGE="ghcr.io/y1x0/cyber-recon@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+          echo "ref=$IMAGE" >> "$GITHUB_OUTPUT"
+          docker pull "$IMAGE"
+
+      # Refuse a recon image whose source commit is not a verifiable ancestor of a known floor — the
+      # revision is read from the image's own org.opencontainers.image.revision label and its ancestry
+      # proved against this checkout, so no value is trusted that the repo cannot verify.
+      - name: Refuse a recon image with unverifiable provenance
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          MIN_REVISION="f65c09fc03ee1ee0ff34d6dafaf9822baa195465"  # conservative provenance floor
+          REV="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE" 2>/dev/null || true)"
+          if [ -z "$REV" ] || [ "$REV" = "<no value>" ]; then
+            echo "##[error]recon image has no org.opencontainers.image.revision label — cannot verify provenance. Rebuild + repin."
+            exit 1
+          fi
+          echo "Image source revision: $REV"
+          if ! git cat-file -e "${REV}^{commit}" 2>/dev/null; then
+            echo "##[error]image revision $REV is not a commit in this repository — refusing an image whose provenance cannot be verified."
+            exit 1
+          fi
+          if git merge-base --is-ancestor "$MIN_REVISION" "$REV"; then
+            echo "OK: recon image provenance verified (postdates $MIN_REVISION)."
+          else
+            echo "##[error]recon image was built at $REV, which predates the provenance floor ($MIN_REVISION). Rebuild from current HEAD and repin."
+            exit 1
+          fi
+
+      # Only three settings are needed, and that is the point: the broker to receive jobs, the seal
+      # key to unseal/seal payloads, and the PUBLIC signing key to authenticate the signed job. A
+      # missing one must stop the run — started anyway, the plane would consume nothing or refuse
+      # every job.
+      - name: Check required settings are present (Redis + seal key + PUBLIC signing key ONLY)
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+          GUARDIAN_JOB_SIGNING_PUBLIC_KEY: ${{ secrets.GUARDIAN_JOB_SIGNING_PUBLIC_KEY }}
+        run: |
+          missing=""
+          for k in GUARDIAN_REDIS_URL GUARDIAN_BROKER_SEAL_KEY GUARDIAN_JOB_SIGNING_PUBLIC_KEY; do
+            [ -n "${!k}" ] || missing="$missing $k"
+          done
+          if [ -n "$missing" ]; then
+            echo "##[error]missing required settings:$missing — set them in the 'production' environment."
+            exit 1
+          fi
+          echo "Required recon-plane settings present (values not shown). No JWT secret, no KMS master, no signing PRIVATE key is set or needed."
+
+      # Fail fast if the broker is not guardian-queue. The control plane publishes each signed nmap
+      # job to guardian-queue (frankfurt); a recon plane pointed at any other Redis would connect
+      # fine, sit idle, and let every dispatch silently time out. Compare ONLY the host; never print
+      # the credential.
+      - name: Assert the broker is guardian-queue (fail fast on a mismatch)
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+        run: |
+          EXPECTED_HOST="frankfurt-keyvalue.render.com"
+          host="$(printf '%s' "$GUARDIAN_REDIS_URL" | sed -E 's#^[a-zA-Z]+://##; s#^[^@]*@##; s#[:/].*$##')"
+          echo "Broker host the recon plane will use: ${host:-<empty>}"
+          if [ "$host" != "$EXPECTED_HOST" ]; then
+            echo "##[error]GUARDIAN_REDIS_URL points at '${host:-<empty>}', not guardian-queue ('${EXPECTED_HOST}')."
+            echo "##[error]the control plane dispatches to guardian-queue; a recon plane on a different broker sits idle and every scan times out."
+            exit 1
+          fi
+          echo "OK: broker matches guardian-queue (${EXPECTED_HOST})."
+
+      # Make the secret boundary VISIBLE, not just implied by a successful boot. List the GUARDIAN_*
+      # env KEYS the recon-plane container actually sees (values redacted) using the exact env the
+      # worker step uses, and hard-fail if a master key OR the signing PRIVATE key is present. The
+      # proof is what is ABSENT: GUARDIAN_JWT_SECRET, GUARDIAN_ENCRYPTION_KEY, and
+      # GUARDIAN_JOB_SIGNING_PRIVATE_KEY must not appear.
+      - name: Prove the recon plane holds NO JWT secret, NO KMS master, NO signing private key
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+          GUARDIAN_JOB_SIGNING_PUBLIC_KEY: ${{ secrets.GUARDIAN_JOB_SIGNING_PUBLIC_KEY }}
+        run: |
+          RECON_ENV="-e GUARDIAN_ENV=production -e GUARDIAN_REDIS_URL -e GUARDIAN_BROKER_SEAL_KEY \
+            -e GUARDIAN_JOB_SIGNING_PUBLIC_KEY \
+            -e GUARDIAN_DATABASE_URL= -e GUARDIAN_APP_DATABASE_URL= \
+            -e GUARDIAN_RECON_PLANE=true -e GUARDIAN_TOOL_PLANE=true"
+          echo "GUARDIAN_* keys visible to the recon-plane container (values redacted):"
+          # shellcheck disable=SC2086
+          docker run --rm $RECON_ENV --entrypoint sh "${{ steps.image.outputs.ref }}" \
+            -c 'printenv | grep "^GUARDIAN_" | sed "s/=.*/=<redacted>/" | sort'
+          echo "---"
+          # shellcheck disable=SC2086
+          if docker run --rm $RECON_ENV --entrypoint sh "${{ steps.image.outputs.ref }}" \
+            -c 'printenv | grep -qE "^(GUARDIAN_JWT_SECRET|GUARDIAN_ENCRYPTION_KEY|GUARDIAN_JOB_SIGNING_PRIVATE_KEY)="'; then
+            echo "##[error]a forbidden secret (JWT/ENCRYPTION/SIGNING-PRIVATE) is present in the recon-plane env — boundary violated"
+            exit 1
+          fi
+          echo "OK: JWT secret, KMS master, and signing PRIVATE key are ABSENT from the recon-plane container."
+
+      - name: Run the recon plane (recon + tools; nmap under the MANDATORY uid+nftables cage)
+        env:
+          GUARDIAN_REDIS_URL: ${{ secrets.GUARDIAN_REDIS_URL }}
+          GUARDIAN_BROKER_SEAL_KEY: ${{ secrets.GUARDIAN_BROKER_SEAL_KEY }}
+          GUARDIAN_JOB_SIGNING_PUBLIC_KEY: ${{ secrets.GUARDIAN_JOB_SIGNING_PUBLIC_KEY }}
+        run: |
+          set -o pipefail
+          SECONDS_LIMIT=$(( ${{ steps.cfg.outputs.minutes }} * 60 ))
+
+          # --cap-add=NET_ADMIN: the ONLY workflow that grants it. The uid_nft backend needs it to
+          # build the per-run kernel egress allowlist with `nft`; without it, nmap FAILS CLOSED. No
+          # other capability is added, and the artifact/scan plane never gets this one (CI-guarded).
+          #
+          # DB URLs set EMPTY (not omitted) to keep the plane DB-less past the production TLS
+          # validator; GUARDIAN_RECON_PLANE=true + GUARDIAN_TOOL_PLANE=true mark it, and NO JWT
+          # secret / KMS master / signing private key is passed — config refuses a recon/tool plane
+          # that carries the first two, so a leak crashes the run here rather than running a network
+          # binary beside a master key.
+          #
+          # --pool=solo + concurrency 1: the single allocator the uid_nft guard requires (it fails
+          # closed until it can prove concurrency==1). --without-gossip/--without-mingle: no fleet.
+          set +e
+          timeout --signal=TERM --kill-after=120s "${SECONDS_LIMIT}s" \
+            docker run --rm \
+              --cap-add=NET_ADMIN \
+              -e GUARDIAN_ENV=production \
+              -e GUARDIAN_REDIS_URL -e GUARDIAN_BROKER_SEAL_KEY \
+              -e GUARDIAN_JOB_SIGNING_PUBLIC_KEY \
+              -e GUARDIAN_DATABASE_URL= -e GUARDIAN_APP_DATABASE_URL= \
+              -e GUARDIAN_RECON_PLANE=true -e GUARDIAN_TOOL_PLANE=true \
+              "${{ steps.image.outputs.ref }}" \
+              celery -A guardian_scanner.celery_app.celery_app worker \
+                --queues recon,tools \
+                --pool=solo \
+                --concurrency 1 \
+                --without-gossip --without-mingle \
+                --loglevel INFO
+          rc=$?
+          set -e
+
+          # 124/143 are `timeout` ending the window on schedule — this workflow working, not a failure.
+          if [ "$rc" -eq 124 ] || [ "$rc" -eq 143 ] || [ "$rc" -eq 0 ]; then
+            echo "Recon-plane window ended cleanly (exit ${rc})."
+          else
+            echo "##[error]recon-plane worker exited ${rc} before the window closed (likely a config/secret error above)"
+            exit "$rc"
+          fi

@@ -1,0 +1,100 @@
+# Build the recon (network plane) image and push it to GHCR (WP-A2).
+#
+# This is the NETWORK plane: nmap + the nftables egress cage, run as root with CAP_NET_ADMIN by
+# guardian-recon-plane.yml. It ships NONE of the artifact-scanning binaries and never parses customer
+# artifacts — the split that keeps the untrusted-byte parsers off the one privileged image.
+#
+# The tool licence gate runs FIRST and gates Dockerfile.recon, so nmap's APPROVED_PERSONAL_USE
+# decision (docs/TOOL_LICENSES.md) is enforced here: if nmap ever returns to LEGAL_REVIEW, this build
+# refuses before it pushes.
+name: Guardian Deploy Recon
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "plan = build+load+verify only; publish = build+push"
+        type: choice
+        required: true
+        default: plan
+        options: [plan, publish]
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: guardian-deploy-recon
+  cancel-in-progress: false
+
+jobs:
+  recon:
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # An image that should not exist is cheaper to refuse than to build and push. The gate defaults
+      # to every shipping image, which now includes Dockerfile.recon — so the nmap licence decision is
+      # verified before the binary can enter a pushed artifact.
+      - name: Tool licence gate
+        run: python tools/check_tool_licenses.py
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: Build and push the recon image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: infra/docker/Dockerfile.recon
+          # publish pushes to GHCR; plan only loads locally so the toolchain can be verified.
+          push: ${{ inputs.mode == 'publish' }}
+          load: ${{ inputs.mode == 'plan' }}
+          tags: ghcr.io/y1x0/cyber-recon:sha-${{ github.sha }}
+          # Stamp the source commit so a consumer can PROVE which code the image runs — the recon
+          # plane's revision guard reads org.opencontainers.image.revision.
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Print the pushed image digest
+        if: inputs.mode == 'publish'
+        run: |
+          echo "PUSHED_IMAGE=ghcr.io/y1x0/cyber-recon@${{ steps.build.outputs.digest }}"
+          echo "revision=${{ github.sha }}"
+          echo "Repin this digest in .github/workflows/guardian-recon-plane.yml (the 'Pull the verified recon image' step)."
+
+      # Prove nmap + nft are present and the entrypoint imports, before the artifact is trusted. A
+      # missing binary would make the uid_nft backend fail closed at run time (nmap never runs) — this
+      # asserts the image can actually do the job rather than assuming it.
+      - name: Verify the recon toolchain inside the image
+        if: inputs.mode == 'plan'
+        run: |
+          IMG=ghcr.io/y1x0/cyber-recon:sha-${{ github.sha }}
+          cat > /tmp/verify.sh <<'SH'
+          set -e
+          for tool in nmap nft; do
+            printf '  %-10s ' "$tool"
+            if command -v "$tool" >/dev/null 2>&1; then
+              "$tool" --version 2>&1 | head -1
+            else
+              echo "MISSING"; exit 1
+            fi
+          done
+          # The artifact-scanning binaries must NOT be here — this is the network plane only.
+          for forbidden in trivy gitleaks syft grype osv-scanner semgrep checkov; do
+            if command -v "$forbidden" >/dev/null 2>&1; then
+              echo "  ##[error]$forbidden must not be in the recon image (artifact tooling belongs to the scan plane)"; exit 1
+            fi
+          done
+          python -c "import guardian_scanner.celery_app; print('  entrypoint import: ok')"
+          SH
+          docker run --rm --entrypoint sh -v /tmp/verify.sh:/verify.sh:ro "$IMG" /verify.sh
