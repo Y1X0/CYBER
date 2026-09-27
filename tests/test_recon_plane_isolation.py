@@ -144,12 +144,16 @@ _PUBKEY = "ZmFrZS1lZDI1NTE5LXB1YmxpYy1rZXktMzItYnl0ZXM="  # any non-empty value 
 
 
 def _plane(**over):
-    from guardian_common.config import Settings
+    from guardian_common.config import _DEV_JWT_SENTINEL, Settings
 
+    # Pin the execution-plane secrets explicitly (init kwargs beat env vars in pydantic-settings), so
+    # a GUARDIAN_JWT_SECRET / GUARDIAN_ENCRYPTION_KEY present in the CI environment does not trip the
+    # JWT/KMS boundary check before the broker-seal check under test. Execution planes must NOT carry
+    # a real JWT secret or KMS master — the sentinel/empty are the allowed values.
     base = dict(
         env="production", database_url="", app_database_url="",
         redis_url="rediss://:rpw@frankfurt-keyvalue.render.com:6379/0",
-        # execution planes must NOT carry a real JWT secret or KMS master (left at sentinel/empty).
+        jwt_secret=_DEV_JWT_SENTINEL, encryption_key="",
         broker_seal_key=_STRONG_SEAL, job_signing_public_key=_PUBKEY,
     )
     base.update(over)
