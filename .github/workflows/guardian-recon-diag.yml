@@ -1,0 +1,166 @@
+# Guardian recon diagnostic — prove the REAL nmap path executes confined on the recon image.
+#
+# This is the recon analogue of guardian-dast-direct.yml: a workflow_dispatch-only smoke test that
+# exercises Guardian's OWN nmap provider (NmapProvider → execute_tool → the FORCED uid+nftables cage
+# → run_nmap), not raw nmap. It shows the cage build (the kernel ruleset it installs), the exact argv
+# Guardian runs, and the evidence/findings that come back — against a single sanctioned target.
+#
+# SAFETY. Hard-pinned to scanme.nmap.org (Nmap's own, explicitly scan-authorized host). Any other
+# target is refused before anything runs. workflow_dispatch only — never a schedule. It does NOT touch
+# the owner-direct API, the broker, the DB, or any secret, and it does not activate recon: it calls
+# the execution primitive directly to demonstrate that the packaged path works on this image.
+name: Guardian Recon Diagnostic
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Sanctioned scan target (must be scanme.nmap.org)."
+        type: string
+        required: false
+        default: "scanme.nmap.org"
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: guardian-recon-diag
+  cancel-in-progress: false
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 15
+    steps:
+      # Hard safety rail: this diagnostic may ONLY ever touch scanme.nmap.org.
+      - name: Refuse any target but the sanctioned one
+        env:
+          TARGET: ${{ inputs.target || 'scanme.nmap.org' }}
+        run: |
+          if [ "$TARGET" != "scanme.nmap.org" ]; then
+            echo "##[error]this diagnostic only scans scanme.nmap.org (got '${TARGET}')"
+            exit 1
+          fi
+          echo "Target: $TARGET (Nmap's explicitly scan-authorized host)"
+
+      # Full history so the provenance guard can prove the image's ancestry with git merge-base.
+      - name: Check out repository (for the image-revision guard)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Log in to GHCR
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      # Same pinned recon artifact guardian-recon-plane.yml runs. Repin after a rebuild the same way.
+      - name: Pull the verified recon image
+        id: image
+        run: |
+          IMAGE="ghcr.io/y1x0/cyber-recon@sha256:71fe97871e3edfad7bf3c2d26a99035e50a83b6b51b6250b92ff4e3b93a3d0f8"
+          echo "ref=$IMAGE" >> "$GITHUB_OUTPUT"
+          docker pull "$IMAGE"
+
+      - name: Refuse a recon image with unverifiable provenance
+        env:
+          IMAGE: ${{ steps.image.outputs.ref }}
+        run: |
+          MIN_REVISION="f65c09fc03ee1ee0ff34d6dafaf9822baa195465"  # conservative provenance floor
+          REV="$(docker inspect --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' "$IMAGE" 2>/dev/null || true)"
+          if [ -z "$REV" ] || [ "$REV" = "<no value>" ]; then
+            echo "##[error]recon image has no revision label — cannot verify provenance."; exit 1
+          fi
+          echo "Image source revision: $REV"
+          if ! git cat-file -e "${REV}^{commit}" 2>/dev/null; then
+            echo "##[error]image revision $REV is not a commit in this repository."; exit 1
+          fi
+          if git merge-base --is-ancestor "$MIN_REVISION" "$REV"; then
+            echo "OK: recon image provenance verified."
+          else
+            echo "##[error]recon image predates the provenance floor. Rebuild + repin."; exit 1
+          fi
+
+      # Resolve the target to an IPv4 on the HOST (before the cage): the cage pins IPs and nmap runs
+      # with -n (no DNS), so resolution is a control-plane step, never confined. getent ahostsv4 keeps
+      # it IPv4 (an IPv6 result would fail Guardian's IPv4-shaped IP pinning).
+      - name: Resolve the sanctioned target to IPv4
+        id: resolve
+        run: |
+          ip="$(getent ahostsv4 scanme.nmap.org | awk '{print $1; exit}')"
+          [ -n "$ip" ] || { echo "##[error]could not resolve scanme.nmap.org to IPv4"; exit 1; }
+          echo "scanme.nmap.org -> $ip"
+          echo "ip=$ip" >> "$GITHUB_OUTPUT"
+
+      - name: Write the diagnostic (exercises Guardian's nmap provider through the cage)
+        run: |
+          cat > /tmp/recon_diag.py <<'PY'
+          import json, os, subprocess, sys
+          from guardian_core.tool import EffectiveScope, ToolJob
+          from guardian_scanner.tools.backends import uid_nft
+          from guardian_scanner.tools.execution import execute_tool
+          from guardian_scanner.tools.nmap_runner import build_nmap_argv
+          from guardian_scanner.tools.providers.nmap_provider import NmapProvider
+
+          ip = os.environ["TARGET_IP"]
+          prov = NmapProvider()
+          ports = tuple(prov.capabilities.ports)
+          print(f"[provider] {prov.key} v{prov.version} external_binary={prov.external_binary}")
+          print(f"[provider] capability port allowlist = {ports}")
+          print(f"[argv]     {' '.join(build_nmap_argv([ip], ports))}")
+
+          # Production sets this from the Celery worker_init; the diagnostic sets it explicitly so the
+          # single-allocator guard passes (concurrency must be provably 1).
+          uid_nft.set_worker_concurrency(1)
+          uid_nft.reap_orphans()
+
+          scope = EffectiveScope(targets=(ip,), ports=ports, protocols=("tcp",),
+                                 network_allowed=True, read_only=True)
+          job = ToolJob(tenant_id="diag", job_id="recondiag01", tool_key="nmap",
+                        scope=scope, settings={"allow_live": True})
+
+          print("\n== CAGE BUILD (per-run uid + nftables egress allowlist) ==")
+          try:
+              with uid_nft.isolate(job) as run_uid:
+                  print(f"[cage] run-uid = {run_uid} (nmap drops to this uid before exec)")
+                  rs = subprocess.run(["nft", "list", "ruleset"], capture_output=True, text=True)
+                  print("[cage] kernel ruleset installed for this run:")
+                  print(rs.stdout or rs.stderr or "(empty)")
+          except uid_nft.IsolationError as exc:
+              print(f"[cage] FAILED CLOSED (no unconfined run): {exc}")
+              sys.exit(3)
+
+          print("== GUARDIAN NMAP PROVIDER (execute_tool -> FORCED uid_nft -> run_nmap) ==")
+          evidence = execute_tool(prov, job)
+          print(f"[result] {len(evidence)} evidence item(s) returned")
+          findings = 0
+          for e in evidence:
+              print(json.dumps({"kind": e.kind, "target": e.target,
+                                "provenance": e.provenance, "data": e.data}, default=str))
+              raw = prov.normalize(e)
+              if raw is not None:
+                  findings += 1
+                  print(f"  -> FINDING: {raw.title} [{raw.base_severity}] at {raw.location}")
+          open_svcs = [e for e in evidence if e.kind == "nmap_service"]
+          print(f"\n[summary] evidence={len(evidence)} open_services={len(open_svcs)} findings={findings}")
+          if not open_svcs:
+              print("[summary] no open-service evidence — see the nmap_scan status above for why")
+          PY
+          echo "wrote /tmp/recon_diag.py"
+
+      - name: Run Guardian's nmap provider confined (--cap-add=NET_ADMIN)
+        env:
+          IP: ${{ steps.resolve.outputs.ip }}
+        run: |
+          # --cap-add=NET_ADMIN is what lets the uid_nft backend build the per-run nft egress cage.
+          # No secrets, no DB, no broker are passed: this exercises the execution primitive directly.
+          # GUARDIAN_ENV=local because the diagnostic calls execute_tool directly, bypassing the
+          # config-gated Celery task routing — it is not testing config, and the production validator
+          # (which would demand broker/seal secrets for a tool plane) is irrelevant to the nmap path.
+          docker run --rm \
+            --cap-add=NET_ADMIN \
+            -e GUARDIAN_ENV=local \
+            -e TARGET_IP="$IP" \
+            -v /tmp/recon_diag.py:/tmp/recon_diag.py:ro \
+            --entrypoint python \
+            "${{ steps.image.outputs.ref }}" /tmp/recon_diag.py

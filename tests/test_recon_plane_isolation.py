@@ -33,6 +33,11 @@ _DOCKERFILE_SCANNER = _ROOT / "infra/docker/Dockerfile.scanner"
 # container is actually GRANTED at `docker run`, which is `--cap-add` / `--privileged`.
 _CAP_PATTERNS = (re.compile(r"--cap-add", re.IGNORECASE), re.compile(r"--privileged", re.IGNORECASE))
 
+# The ONLY workflows allowed to grant a capability: the recon plane itself and its diagnostic smoke
+# test. Both run the recon image (nmap under the uid+nftables cage) and legitimately need NET_ADMIN.
+# Anything else with a capability grant — above all the scan/artifact plane — must trip the guard.
+_PRIVILEGED_RECON_WORKFLOWS = {"guardian-recon-plane.yml", "guardian-recon-diag.yml"}
+
 
 def _dockerfile_directives(path: pathlib.Path) -> str:
     """The Dockerfile's effective directives — comment (#...) and blank lines stripped — so a check
@@ -49,15 +54,15 @@ def _dockerfile_directives(path: pathlib.Path) -> str:
 def test_net_admin_appears_only_in_the_recon_plane_workflow():
     offenders: dict[str, list[str]] = {}
     for wf in sorted(_WORKFLOWS.glob("*.yml")):
-        if wf.name == "guardian-recon-plane.yml":
+        if wf.name in _PRIVILEGED_RECON_WORKFLOWS:
             continue
         text = wf.read_text()
         hits = [p.pattern for p in _CAP_PATTERNS if p.search(text)]
         if hits:
             offenders[wf.name] = hits
     assert not offenders, (
-        "NET_ADMIN / --cap-add / privileged must appear ONLY in guardian-recon-plane.yml; "
-        f"found in: {offenders}"
+        "a capability grant (--cap-add / --privileged) may appear ONLY in the recon-plane "
+        f"workflows {_PRIVILEGED_RECON_WORKFLOWS}; found in: {offenders}"
     )
 
 
@@ -75,6 +80,17 @@ def test_recon_plane_workflow_does_grant_net_admin():
     # reason rather than a policy one. If this ever stops being true, the workflow is broken.
     text = _RECON_PLANE.read_text()
     assert "--cap-add=NET_ADMIN" in text
+
+
+def test_recon_diagnostic_is_scanme_only_and_privileged():
+    diag = _WORKFLOWS / "guardian-recon-diag.yml"
+    if not diag.exists():
+        pytest.skip("recon diagnostic workflow not present")
+    text = diag.read_text()
+    assert "--cap-add=NET_ADMIN" in text          # it must build the cage to exercise the real path
+    assert "scanme.nmap.org" in text              # hard-pinned sanctioned target
+    assert "schedule:" not in text                # workflow_dispatch only — never a cron
+    assert "cyber-recon@sha256:" in text          # runs the pinned recon image, not raw nmap
 
 
 def test_artifact_scanner_image_stays_unprivileged():
