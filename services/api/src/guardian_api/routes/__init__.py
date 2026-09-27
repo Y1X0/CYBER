@@ -19,6 +19,7 @@ from guardian_api.routes import (
     graph,
     health,
     knowledge_base,
+    recon,
     remediation,
     reports,
     scans,
@@ -42,6 +43,7 @@ v1.include_router(artifacts.router, prefix="/assets", tags=["artifacts"])
 v1.include_router(verifications.router, prefix="/verifications", tags=["ownership"])
 v1.include_router(authorizations.router, prefix="/authorizations", tags=["authorization"])
 v1.include_router(scans.router, prefix="/scans", tags=["scans"])
+v1.include_router(recon.router, prefix="/recon", tags=["recon"])
 v1.include_router(discovery.router, prefix="/discovery", tags=["discovery"])
 v1.include_router(graph.router, prefix="/graph", tags=["graph"])
 v1.include_router(findings.router, prefix="/findings", tags=["findings"])

@@ -7,6 +7,7 @@ from guardian_db.models.assets import (
     DomainVerification,
     Engagement,
     OwnerDirectAffirmation,
+    ReconAffirmation,
 )
 from guardian_db.models.audit import ApiKey, AuditLog
 from guardian_db.models.billing import Plan, PlanEntitlement, Subscription, UsageRecord
@@ -81,6 +82,7 @@ __all__ = [
     "SbomRecord",
     "DomainVerification",
     "OwnerDirectAffirmation",
+    "ReconAffirmation",
     "Exploit",
     "FeedState",
     "FeedSync",

@@ -24,7 +24,12 @@ from pathlib import Path
 
 REGISTRY = Path("docs/TOOL_LICENSES.md")
 
-APPROVED_STATES = {"APPROVED", "APPROVED_SEPARATE_PROCESS"}
+# APPROVED_PERSONAL_USE: the licence permits personal / educational / non-commercial use but
+# restricts commercial redistribution, and the operator has accepted those terms and the legal
+# responsibility for THIS deployment (a personal/educational one). The tool may ship here, but the
+# distinct state name is deliberate: if the project ever goes commercial, this row must be revisited
+# and will stand out from a plainly-permissive APPROVED. nmap (NPSL) is the case this exists for.
+APPROVED_STATES = {"APPROVED", "APPROVED_SEPARATE_PROCESS", "APPROVED_PERSONAL_USE"}
 # NOT_ADOPTED: the licence is fine but the capability is deliberately not used, so the tool must not
 # appear in an image either. Blocked, with a different reason from a licence block.
 BLOCKED_STATES = {"LEGAL_REVIEW", "PROHIBITED", "NOT_ADOPTED"}
@@ -172,11 +177,16 @@ def render_notice(registry: dict[str, Entry]) -> str:
     return "\n".join(lines)
 
 
-# Every runtime image that ships tools. Both must be gated: the scanner image installs the SCA and
-# secrets binaries, and the worker-tools image installs the network-plane binaries (nftables today,
-# nmap/naabu tomorrow). Gating only the first — the previous behaviour — left the second able
-# to ship a blocked binary with no CI catching it (Phase-0 audit P1-2).
-_DEFAULT_IMAGES = ("infra/docker/Dockerfile.scanner", "infra/docker/Dockerfile")
+# Every runtime image that ships tools must be gated: the scanner image installs the SCA and secrets
+# binaries, the compose worker-tools image installs nftables, and the recon image installs the
+# network-plane binaries (nmap + nftables). Gating only the first — the original behaviour — left
+# the others able to ship a blocked binary with no CI catching it (Phase-0 audit P1-2). The recon
+# image is where nmap enters, so it MUST be gated or the nmap licence decision is unenforced.
+_DEFAULT_IMAGES = (
+    "infra/docker/Dockerfile.scanner",
+    "infra/docker/Dockerfile",
+    "infra/docker/Dockerfile.recon",
+)
 
 
 def main(argv: list[str] | None = None) -> int:

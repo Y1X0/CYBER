@@ -225,6 +225,13 @@ class AuthorizationBasis(str, Enum):
 
     VERIFIED_OWNERSHIP = "verified-ownership"
     OWNER_DIRECT = "owner-direct"
+    # The tenant OWNER dispatched an active RECON port scan (nmap) under the owner-direct-recon
+    # capability (off by default; owner role re-checked server-side at dispatch; the owner affirmed
+    # legal right to port-scan the target). Analogous to OWNER_DIRECT for scans, but for the network
+    # recon plane; the scan still runs inside the mandatory uid+nftables egress cage. Every recon
+    # Scan produced under this authority carries this basis so a report states plainly why the
+    # target could be probed.
+    OWNER_DIRECT_RECON = "owner-direct-recon"
 
 
 class PortalRole(str, Enum):

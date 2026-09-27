@@ -1,0 +1,90 @@
+# Guardian recon plane — the NETWORK plane (WP-A2), separate from the artifact/scan image.
+#
+# Guardian's execution model splits scanning in two, and only THIS half needs kernel privileges:
+#
+#   * ARTIFACT PLANE (Dockerfile.scanner) — parses untrusted customer bytes (repos, images,
+#     manifests, lockfiles). Unprivileged (USER guardian), no CAP_NET_ADMIN, no network scanner.
+#
+#   * NETWORK / RECON PLANE (this image) — nmap and the nftables egress cage touch customer
+#     infrastructure. nmap is `external_binary`, FORCED onto the uid+nftables backend, which fails
+#     closed without `nft`. That backend needs CAP_NET_ADMIN (to build the per-run kernel egress
+#     allowlist) and the ability to setuid a run to an unprivileged uid before exec — so this image
+#     runs as ROOT and is granted NET_ADMIN by the workflow (--cap-add=NET_ADMIN), and by NOTHING
+#     else. The scan/artifact image never gets that capability (CI-guarded).
+#
+# DELIBERATELY NOT HERE: none of the artifact-scanning binaries (trivy/gitleaks/syft/grype/
+# osv-scanner/semgrep/checkov/modelscan) and no `git`. This image consumes ONLY the `recon` and
+# `tools` queues; it never runs the `scan`/`default` engine tasks, so it never parses a customer
+# artifact. Keeping the untrusted-byte parsers OFF the one privileged image is the whole point of the
+# split — the plane most likely to meet hostile network input carries the smallest surface.
+#
+# nmap ships here under docs/TOOL_LICENSES.md state APPROVED_PERSONAL_USE (NPSL personal/educational
+# use accepted for this deployment). The provider is isolated behind the tool interface, so naabu
+# (MIT) can replace it without re-architecting if this ever goes commercial. The tool licence gate
+# (tools/check_tool_licenses.py) gates THIS Dockerfile, so that decision is enforced in CI.
+
+FROM python:3.12-slim
+
+ARG NMAP_VERSION=debian
+ARG NFTABLES_VERSION=debian
+
+# The versions actually installed, readable from the image itself, plus the source revision so a
+# consumer can PROVE which code the image runs (the recon workflow's revision guard reads this).
+LABEL org.opencontainers.image.title="guardian-recon" \
+      guardian.tools.nmap="${NMAP_VERSION}" \
+      guardian.tools.nftables="${NFTABLES_VERSION}"
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    # Marks every process from this image as a scanner worker (skips the bootstrap-admin-password
+    # check; this plane never seeds). Set on the image so it cannot be forgotten per-deployment.
+    GUARDIAN_SCANNER_WORKER=true
+
+# nmap (NPSL, APPROVED_PERSONAL_USE): the governed TCP-connect port scanner (-sT, no root needed for
+#   the scan itself; run under an unprivileged run-uid by the uid_nft backend).
+# nftables (GPL-2.0, separate process): `nft` builds the per-run kernel egress allowlist; WITHOUT it
+#   an external-binary run fails closed (never runs unconfined), so it MUST ship here.
+# ca-certificates: TLS trust anchors.
+# `upgrade` before `install`, same layer as `update`: the base is a floating tag, so it carries
+# whatever its packages were at ITS build time; the blanket upgrade keeps the release gate from
+# blocking on base CVEs Debian has already fixed (same rationale as the other images; see ADR-027).
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends nmap nftables ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pyproject.toml README.md alembic.ini requirements.lock ./
+COPY packages ./packages
+COPY services ./services
+COPY workers ./workers
+
+# Hash-verified dependency install from the lock, then the app without re-resolving. --require-hashes
+# refuses any artifact whose hash is not in the lock, so a substituted upstream wheel cannot enter
+# this image. setuptools >=78.1.1 fixes CVE-2025-47273 (path traversal). Drop pip's vendored SBOM
+# manifests so Trivy does not mis-attribute pip's internal _vendor versions as image findings.
+RUN pip install --upgrade pip "setuptools>=78.1.1" \
+    && pip install --require-hashes -r requirements.lock \
+    && pip install -e . --no-deps \
+    && vendor="$(python -c 'import os, pip._vendor as v; print(os.path.dirname(v.__file__))')" \
+    && rm -f "$vendor/bom.cdx.json" "$vendor/vendor.txt"
+
+# Runs as ROOT on purpose — the ONLY Guardian image that does. The uid_nft backend must (a) create
+# per-run nftables tables (CAP_NET_ADMIN) and (b) setuid each nmap run to an unprivileged run-uid
+# (61000-61999) before exec so the kernel `meta skuid` rules can confine its egress. Both require
+# starting privileged. The container gets CAP_NET_ADMIN from the workflow and nothing more; every
+# nmap process still drops to an unprivileged uid before it runs (root unrecoverable).
+
+# Health: a broken image fails at start rather than silently scanning nothing. The recon plane's
+# health is simply that the Python entrypoint imports and `nft` + `nmap` are present.
+HEALTHCHECK --interval=60s --timeout=20s --start-period=15s --retries=3 \
+    CMD nft --version >/dev/null 2>&1 && nmap --version >/dev/null 2>&1 \
+        && python -c "import guardian_scanner.celery_app" || exit 1
+
+# Consumes the recon plane's queues only: `recon` (DB-less discovery probing) and `tools` (governed
+# external-binary tools, i.e. nmap under the uid+nftables cage). --pool=solo + --concurrency 1 is the
+# single-allocator the uid_nft guard requires (it fails closed until it can prove concurrency==1).
+CMD ["celery", "-A", "guardian_scanner.celery_app.celery_app", "worker", \
+     "--queues", "recon,tools", "--pool=solo", "--concurrency", "1", "--loglevel", "INFO"]
