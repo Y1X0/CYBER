@@ -35,15 +35,40 @@ _SENSITIVE = {
 }
 
 
+def _doctype_is_dangerous(xml: bytes) -> bool:
+    """True if the XML carries a DOCTYPE that is more than a bare `<!DOCTYPE name>`.
+
+    nmap ALWAYS emits a bare `<!DOCTYPE nmaprun>` (no internal subset, no external DTD), which is
+    harmless: ElementTree's expat parser does not fetch external entities, and with no internal
+    subset there are no entities to expand. The XXE / entity-expansion vectors are (a) an internal
+    subset `[...]` (which can define billion-laughs / recursive entities), (b) an external DTD via
+    SYSTEM/PUBLIC, and (c) parameter entities `%`. So a DOCTYPE is dangerous iff its declaration —
+    the text between `<!DOCTYPE` and the first `>` — contains any of those markers. The `[` marker
+    also fires before any `>` for an internal subset, so scanning to the first `>` is sufficient.
+    """
+    idx = xml.find(b"<!DOCTYPE")
+    if idx == -1:
+        return False
+    end = xml.find(b">", idx)
+    if end == -1:
+        return True  # an unterminated DOCTYPE is not a bare declaration — refuse
+    decl = xml[idx + len(b"<!DOCTYPE"):end]
+    return any(tok in decl for tok in (b"[", b"SYSTEM", b"PUBLIC", b"%"))
+
+
 def _parse(xml: bytes):  # noqa: ANN202
     """Parse nmap XML → [(ip, port, proto, service, product, version)], or None if malformed.
 
-    XXE / entity-expansion defense without a dependency: reject any DTD/entity before parsing.
+    XXE / entity-expansion defense without a dependency, applied BEFORE parsing: reject any entity
+    declaration outright, and reject a DOCTYPE unless it is a bare `<!DOCTYPE name>` (no internal
+    subset, no external SYSTEM/PUBLIC DTD, no parameter entities). This still blocks every XXE
+    vector while allowing nmap's own benign `<!DOCTYPE nmaprun>` — without which the parser rejected
+    every real nmap scan as malformed.
     """
-    if b"<!DOCTYPE" in xml or b"<!ENTITY" in xml:
+    if b"<!ENTITY" in xml or _doctype_is_dangerous(xml):
         return None
     try:
-        root = ET.fromstring(xml)  # noqa: S314 - DTD/entities already rejected above
+        root = ET.fromstring(xml)  # noqa: S314 - entity decls + dangerous DOCTYPEs rejected above
     except ET.ParseError:
         return None
     out = []
@@ -93,29 +118,34 @@ class NmapProvider:
         if not job.scope.targets:
             raise ValueError("nmap: no in-scope target")
 
-    def _scan_evidence(self, job, *, status, ports, reason=""):  # noqa: ANN001, ANN202
+    def _scan_evidence(self, job, *, status, ports, reason="", mode="offline"):  # noqa: ANN001, ANN202
         return RawEvidence(
             tool=self.key, execution_id=job.job_id, target=",".join(job.scope.targets),
             kind="nmap_scan",
             data={"status": status, "reason": reason, "scan_type": "tcp_connect",
                   "targets": list(job.scope.targets), "ports": list(ports)},
-            provenance={"mode": "offline", "source": self.key}, occurred_at="")
+            provenance={"mode": mode, "source": self.key}, occurred_at="")
 
     def execute(self, job: ToolJob):  # noqa: ANN201
         settings = job.settings or {}
         ports = tuple(job.scope.ports) or _PORTS
         allow_live = bool(settings.get("allow_live"))
+        # The provenance mode reflects how the scan ACTUALLY ran, so a live scan's scan-evidence is
+        # never mislabeled "offline" (a live failed/ok scan reads "live", matching the service
+        # evidence below).
+        mode = "live" if allow_live else "offline"
 
         if allow_live:  # pragma: no cover - real subprocess/network path
             from guardian_scanner.tools.nmap_runner import build_nmap_argv, run_nmap
             try:
                 argv = build_nmap_argv(list(job.scope.targets), ports)
             except ValueError as exc:
-                yield self._scan_evidence(job, status="failed", ports=ports, reason=str(exc))
+                yield self._scan_evidence(job, status="failed", ports=ports, reason=str(exc),
+                                          mode=mode)
                 return
             result = run_nmap(argv)
             if result.status != "ok":
-                yield self._scan_evidence(job, status=result.status, ports=ports)
+                yield self._scan_evidence(job, status=result.status, ports=ports, mode=mode)
                 return
             xml = result.xml
         else:
@@ -124,9 +154,10 @@ class NmapProvider:
 
         parsed = _parse(xml)
         if parsed is None:
-            yield self._scan_evidence(job, status="failed", ports=ports, reason="malformed_xml")
+            yield self._scan_evidence(job, status="failed", ports=ports, reason="malformed_xml",
+                                      mode=mode)
             return
-        yield self._scan_evidence(job, status="ok", ports=ports)
+        yield self._scan_evidence(job, status="ok", ports=ports, mode=mode)
         for ip, port, proto, service, product, version in parsed:
             yield RawEvidence(
                 tool=self.key, execution_id=job.job_id, target=ip, kind="nmap_service",
