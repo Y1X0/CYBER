@@ -14,7 +14,23 @@ from guardian_core.capability import CapabilityLevel, derive_capability_level
 from guardian_core.enums import EngineKey
 from guardian_core.tool import EffectiveScope, RawEvidence, ToolJob
 from guardian_scanner.tools.nmap_runner import build_nmap_argv, run_nmap
-from guardian_scanner.tools.providers.nmap_provider import NmapProvider
+from guardian_scanner.tools.providers.nmap_provider import NmapProvider, _parse
+
+# A REAL nmap -oX document header, exactly as nmap emits it — including the bare `<!DOCTYPE nmaprun>`
+# line, the xml-stylesheet PI, and a comment — captured from a live scan of scanme.nmap.org. The old
+# guard rejected every such document (any `<!DOCTYPE` → malformed); this fixture locks the fix so a
+# genuine nmap scan can never be dropped again.
+_REAL_NMAP_XML = (
+    b'<?xml version="1.0" encoding="UTF-8"?>\n'
+    b'<!DOCTYPE nmaprun>\n'
+    b'<?xml-stylesheet href="file:///usr/bin/../share/nmap/nmap.xsl" type="text/xsl"?>\n'
+    b'<!-- Nmap 7.95 scan initiated as: nmap -sT -Pn -n -oX - -p 22,80 45.33.32.156 -->\n'
+    b'<nmaprun scanner="nmap" args="nmap -sT -Pn -n -oX - -p 22,80 45.33.32.156" version="7.95">\n'
+    b'<host><address addr="45.33.32.156" addrtype="ipv4"/><ports>'
+    b'<port protocol="tcp" portid="22"><state state="open"/><service name="ssh"/></port>'
+    b'<port protocol="tcp" portid="80"><state state="open"/><service name="http"/></port>'
+    b'</ports></host></nmaprun>'
+)
 
 _XML_TELNET = (
     b'<?xml version="1.0"?><nmaprun>'
@@ -67,11 +83,61 @@ def test_argv_rejects_empty_or_bad_ports():
         build_nmap_argv(["10.0.0.5"], (70000,))
 
 
-# ── XML parse fail-closed ──
+# ── XML parse: real nmap DOCTYPE accepted, XXE vectors still rejected (fix + regression) ──
+def test_parse_accepts_real_nmap_doctype_xml():
+    # The exact shape nmap emits — bare `<!DOCTYPE nmaprun>` — must parse to the open services.
+    assert b"<!DOCTYPE nmaprun>" in _REAL_NMAP_XML          # fixture really carries the DOCTYPE
+    parsed = _parse(_REAL_NMAP_XML)
+    assert parsed == [
+        ("45.33.32.156", 22, "tcp", "ssh", None, None),
+        ("45.33.32.156", 80, "tcp", "http", None, None),
+    ]
+
+
+def test_real_nmap_xml_yields_service_evidence_offline():
+    # End-to-end through the provider (offline path feeds the real-shaped XML): open 22/80 surface.
+    ev = list(NmapProvider().execute(_job(ports=(22, 80), xml=_REAL_NMAP_XML)))
+    assert ev[0].kind == "nmap_scan" and ev[0].data["status"] == "ok"
+    ports = sorted(e.data["port"] for e in ev if e.kind == "nmap_service")
+    assert ports == [22, 80]
+
+
+def test_parse_still_rejects_entity_declaration():
+    # A billion-laughs / entity-injection payload (internal subset + <!ENTITY>) stays rejected.
+    xxe = (b'<?xml version="1.0"?><!DOCTYPE nmaprun [<!ENTITY e SYSTEM "file:///etc/passwd">]>'
+           b'<nmaprun>&e;</nmaprun>')
+    assert _parse(xxe) is None
+
+
+def test_parse_still_rejects_doctype_internal_subset_without_entity_keyword():
+    # Even without the literal <!ENTITY, a DOCTYPE with an internal subset `[...]` is refused.
+    assert _parse(b'<!DOCTYPE nmaprun [ <!-- subset --> ]><nmaprun/>') is None
+
+
+def test_parse_still_rejects_external_dtd_system_and_public():
+    assert _parse(b'<!DOCTYPE nmaprun SYSTEM "http://evil.invalid/x.dtd"><nmaprun/>') is None
+    assert _parse(b'<!DOCTYPE nmaprun PUBLIC "-//x//DTD//EN" "http://evil.invalid/x.dtd">'
+                  b'<nmaprun/>') is None
+
+
+def test_parse_still_rejects_parameter_entity_doctype():
+    assert _parse(b'<!DOCTYPE nmaprun [ %pe; ]><nmaprun/>') is None
+
+
 def test_xml_xxe_is_rejected():
     ev = list(NmapProvider().execute(_job(xml=b'<!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/passwd">]><nmaprun/>')))  # noqa: E501
     assert ev[0].kind == "nmap_scan" and ev[0].data["status"] == "failed"
     assert not [e for e in ev if e.kind == "nmap_service"]
+
+
+def test_scan_evidence_mode_reflects_live_vs_offline():
+    # Cosmetic fix: the nmap_scan provenance mode must not be hardcoded "offline" on a live run.
+    p = NmapProvider()
+    job = _job(ports=(22, 80), xml=_REAL_NMAP_XML)
+    offline_ev = list(p.execute(job))
+    assert offline_ev[0].kind == "nmap_scan" and offline_ev[0].provenance["mode"] == "offline"
+    live_ev = p._scan_evidence(job, status="failed", ports=(22,), reason="x", mode="live")
+    assert live_ev.provenance["mode"] == "live"
 
 
 def test_malformed_xml_fails_closed():
