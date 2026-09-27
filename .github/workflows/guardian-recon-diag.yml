@@ -58,7 +58,7 @@ jobs:
       - name: Pull the verified recon image
         id: image
         run: |
-          IMAGE="ghcr.io/y1x0/cyber-recon@sha256:71fe97871e3edfad7bf3c2d26a99035e50a83b6b51b6250b92ff4e3b93a3d0f8"
+          IMAGE="ghcr.io/y1x0/cyber-recon@sha256:ff26f5e6606c51985f75eb7423f7920af02dc381510c6bb29e7a56a7d0a63299"
           echo "ref=$IMAGE" >> "$GITHUB_OUTPUT"
           docker pull "$IMAGE"
 
