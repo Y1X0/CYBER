@@ -99,7 +99,7 @@ jobs:
           from guardian_core.tool import EffectiveScope, ToolJob
           from guardian_scanner.tools.backends import uid_nft
           from guardian_scanner.tools.execution import execute_tool
-          from guardian_scanner.tools.nmap_runner import build_nmap_argv
+          from guardian_scanner.tools.nmap_runner import build_nmap_argv, run_nmap
           from guardian_scanner.tools.providers.nmap_provider import NmapProvider
 
           ip = os.environ["TARGET_IP"]
@@ -119,13 +119,20 @@ jobs:
           job = ToolJob(tenant_id="diag", job_id="recondiag01", tool_key="nmap",
                         scope=scope, settings={"allow_live": True})
 
-          print("\n== CAGE BUILD (per-run uid + nftables egress allowlist) ==")
+          print("\n== CAGE BUILD + RAW nmap THROUGH THE CAGE ==")
           try:
               with uid_nft.isolate(job) as run_uid:
                   print(f"[cage] run-uid = {run_uid} (nmap drops to this uid before exec)")
                   rs = subprocess.run(["nft", "list", "ruleset"], capture_output=True, text=True)
                   print("[cage] kernel ruleset installed for this run:")
                   print(rs.stdout or rs.stderr or "(empty)")
+                  # Raw run_nmap INSIDE the cage: proves nmap actually executes confined and shows the
+                  # real bytes it returns (the nmap subprocess drops to run-uid; nft confines egress).
+                  res = run_nmap(build_nmap_argv([ip], ports))
+                  print(f"\n[raw nmap] status={res.status} returncode={res.returncode} "
+                        f"xml_bytes={len(res.xml)}")
+                  print("[raw nmap] first 700 bytes of nmap's own XML:")
+                  print(res.xml[:700].decode(errors="replace") or "(no stdout)")
           except uid_nft.IsolationError as exc:
               print(f"[cage] FAILED CLOSED (no unconfined run): {exc}")
               sys.exit(3)
